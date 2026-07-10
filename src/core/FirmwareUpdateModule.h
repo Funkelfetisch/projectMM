@@ -126,6 +126,9 @@ public:
         // while the firmware moves on (a stale date reads as a failed flash; see build_info.h).
         std::snprintf(buildStr_, sizeof(buildStr_), "%s · %s", kBuildId, kBuildDate);
         std::snprintf(firmwareStr_, sizeof(firmwareStr_), "%s", kFirmwareName);
+        std::snprintf(productStr_, sizeof(productStr_), "%s", kProductName);
+        std::snprintf(brandStr_, sizeof(brandStr_), "%s", kBrandName);
+        std::snprintf(updateManifestStr_, sizeof(updateManifestStr_), "%s", kAutoUpdateManifestUrl);
     }
 
     void defineControls() override {
@@ -134,6 +137,9 @@ public:
         controls_.addReadOnly("version", versionStr_, sizeof(versionStr_));
         controls_.addReadOnly("build", buildStr_, sizeof(buildStr_));
         controls_.addReadOnly("firmware", firmwareStr_, sizeof(firmwareStr_));
+        controls_.addReadOnly("product", productStr_, sizeof(productStr_));
+        controls_.addReadOnly("brand", brandStr_, sizeof(brandStr_));
+        if (updateManifestStr_[0]) controls_.addReadOnly("updateManifest", updateManifestStr_, sizeof(updateManifestStr_));
         firmwareSizeVal_ = static_cast<uint32_t>(platform::firmwareSize());
         totalFlashVal_ = static_cast<uint32_t>(platform::firmwarePartition());
         if (totalFlashVal_ > 0) {
@@ -195,6 +201,9 @@ private:
     char     versionStr_[32] = {};   ///< pure semver — such as "2.0.0" or "2.1.0-dev.7"
     char     buildStr_[48]   = {};   // "<8-hex><+?> · <__DATE__ __TIME__>" — id + separator + 20-char stamp
     char     firmwareStr_[24] = {};  ///< build variant name, such as "esp32s3-n16r8"
+    char     productStr_[24] = {};
+    char     brandStr_[24] = {};
+    char     updateManifestStr_[96] = {};
     uint32_t firmwareSizeVal_ = 0;   ///< bytes used in the app partition
     uint32_t totalFlashVal_   = 0;   ///< app partition size
 };

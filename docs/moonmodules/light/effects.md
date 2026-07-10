@@ -719,6 +719,22 @@ Detail: [technical](moxygen/FreqMatrixEffect.md)
 
 [Tests](../../tests/unit-tests.md#freqmatrixeffect)
 
+<a id="heliowledpresets"></a>
+
+### HelioWledPresets · 3D
+
+HELIO product preset player for the migrated WLED `helio1` bundle. It renders the saved WLED effect presets directly over the HELIO strip order and carries both original playlists: `Static Animations` (`Ripple`, `Lake`, `Phased`, `Running`, `Candle Multi`, `Loading`, `Colortwinkles`, `Pink Palette`) and `Audio` (`GEQ`, `Gravfreq`, `Noisemeter`, `Freqmap`, `Freqwave`, `Juggles`, `Gravcenter`, `Multi Comet`, `Plasmoid`, `Fw Starburst`). The audio playlist is the boot default, matching the WLED config's default preset 11.
+
+- `playlist` - choose `Static Animations` or `Audio`.
+- `preset` - choose the specific migrated WLED preset when `autoPlay` is off.
+- `autoPlay` - advance through the selected playlist with the WLED durations (10s static, 30s audio).
+- `idleBeat` - synthesize a small 120 BPM signal when no mic level is present so audio scenes still preview and idle gracefully.
+- `intensity` - output gain for the generated preset frame.
+
+Origin: HELIO private product layer, on the WLED helio1 preset bundle and WLED/SR effect behaviours.
+
+Detail: [technical](moxygen/HelioWledPresetsEffect.md)
+
 <a id="lissajous"></a>
 
 ### Lissajous 🐙 · 2D

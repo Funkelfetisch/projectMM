@@ -1,0 +1,8 @@
+# HELIO 1: standard ESP32-S3 module, 8 MB flash, no PSRAM, WiFi only.
+# Uses the same 8 MB OTA partition table as the N8R8 S3 variant, but does not
+# enable SPIRAM or SPI Ethernet.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/esp32s3_n8r8.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESP_SYSTEM_MEMPROT_FEATURE=n
+CONFIG_HEAP_HAS_EXEC_HEAP=y

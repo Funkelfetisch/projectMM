@@ -31,6 +31,7 @@ add_executable(mm_tests
     unit/core/unit_ControlModule.cpp
     unit/core/unit_FilesystemModule_subtree.cpp
     unit/core/unit_FirmwareUpdateModule.cpp
+    unit/core/unit_AutoUpdateModule.cpp
     unit/core/unit_HttpServerModule_apply.cpp
     unit/core/unit_ImprovFrame.cpp
     unit/core/unit_ImprovOpReassembler.cpp

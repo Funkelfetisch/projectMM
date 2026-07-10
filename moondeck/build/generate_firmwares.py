@@ -67,7 +67,8 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # ensure_ascii=False keeps the em-dashes in descriptions literal (readable
     # diffs), matching the hand-authored deviceModels.json sibling.
-    args.out.write_text(json.dumps(build_doc(), indent=2, ensure_ascii=False) + "\n")
+    args.out.write_text(json.dumps(build_doc(), indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
     print(f"generate_firmwares: wrote {args.out} ({len(FIRMWARES)} variants)")
     return 0
 

@@ -133,6 +133,75 @@
     ]
   },
   {
+    "name": "HELIO 1",
+    "chip": "ESP32-S3",
+    "firmwares": [
+      "helio1"
+    ],
+    "flashBaud": 460800,
+    "supported": [
+      "LEDs",
+      "WiFi",
+      "Audio"
+    ],
+    "planned": [],
+    "modules": [
+      {
+        "type": "System",
+        "id": "System",
+        "controls": {
+          "deviceModel": "HELIO 1",
+          "deviceName": "HELIO"
+        }
+      },
+      {
+        "type": "SingleRowLayout",
+        "id": "HELIO Strip",
+        "parent_id": "Layouts",
+        "controls": {
+          "width": 311
+        }
+      },
+      {
+        "type": "Layer",
+        "id": "Layer",
+        "parent_id": "Effects"
+      },
+      {
+        "type": "AudioSpectrumEffect",
+        "id": "Audio Spectrum",
+        "parent_id": "Layer"
+      },
+      {
+        "type": "Drivers",
+        "id": "Drivers",
+        "controls": {
+          "brightness": 64
+        }
+      },
+      {
+        "type": "RmtLedDriver",
+        "id": "RmtLed",
+        "parent_id": "Drivers",
+        "controls": {
+          "pins": "35",
+          "ledsPerPin": "311",
+          "presetRef": "GRBW"
+        }
+      },
+      {
+        "type": "AudioService",
+        "id": "Audio",
+        "parent_id": "Services",
+        "controls": {
+          "sckPin": 40,
+          "wsPin": 38,
+          "sdPin": 39
+        }
+      }
+    ]
+  },
+  {
     "name": "QuinLED Dig-2-Go",
     "chip": "ESP32",
     "firmwares": [

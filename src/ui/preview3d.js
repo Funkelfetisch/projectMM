@@ -51,6 +51,7 @@ let previewCoordCount_ = 0;
 let previewMaxDim_ = 1;
 let previewStride_ = 1;      // device's adaptive downscale factor (1 = full res); for the status line
 let showSeqNumbers_ = false; // sequence-number overlay toggle (preview-numbers button)
+let helioPreview_ = false;   // product-aware renderer: live strip colours projected as HELIO reflections
 // Dot-size multiplier on the auto-computed "filled-panel" base (1 = ¾-fill). A user knob
 // because the ideal fill is subjective and layout-dependent — a 2D panel reads best solid,
 // a 3D cube reads best with smaller dots so the back layers show through. Persisted.
@@ -441,6 +442,7 @@ function updatePreviewStatus() {
     const el = document.getElementById("preview-status");
     if (!el) return;
     const parts = [];
+    if (helioPreview_) parts.push("HELIO ball");
     if (previewStride_ > 1) parts.push(`1/${previewStride_} · link limited`);   // resolution shed
     if (effectiveFps_ > 0)  parts.push(`${Math.round(effectiveFps_)} fps`);      // adaptive rate
     if (parts.length) {
@@ -449,6 +451,19 @@ function updatePreviewStatus() {
     } else {
         el.hidden = true;
     }
+}
+
+function setProductInfo(info) {
+    const helio = !!info && (
+        String(info.brand || "").toUpperCase() === "HELIO" ||
+        String(info.product || "").toLowerCase() === "helio1" ||
+        String(info.firmware || "").toLowerCase() === "helio1"
+    );
+    if (helio === helioPreview_) return;
+    helioPreview_ = helio;
+    camAutoFit = true;
+    updatePreviewStatus();
+    if (lastVerts) redrawCached();
 }
 
 function renderPreviewBinary(buf) {
@@ -531,11 +546,60 @@ function measureFrameRate() {
 // rgb may be null — then every light is drawn off (the shader's placeholder ring), so the grid
 // LAYOUT shows the instant the coordinate table arrives (a fresh page / UI refresh), before any
 // color frame. A color frame then calls this again with its rgb to light the scene.
+function buildHelioVerts(rgb, n) {
+    const bands = [
+        { y:  0.00, r: 0.50, twist:  0.00, gain: 1.00, dir:  1 },
+        { y:  0.18, r: 0.47, twist:  0.08, gain: 0.68, dir: -1 },
+        { y: -0.18, r: 0.47, twist: -0.08, gain: 0.68, dir: -1 },
+        { y:  0.34, r: 0.36, twist:  0.17, gain: 0.45, dir:  1 },
+        { y: -0.34, r: 0.36, twist: -0.17, gain: 0.45, dir:  1 },
+        { y:  0.46, r: 0.20, twist:  0.28, gain: 0.26, dir: -1 },
+        { y: -0.46, r: 0.20, twist: -0.28, gain: 0.26, dir: -1 },
+    ];
+    const need = Math.max(1, n) * bands.length * 6;
+    if (!vertsBuf || vertsBuf.length < need) vertsBuf = new Float32Array(need);
+
+    let vi = 0;
+    for (let i = 0; i < n; i++) {
+        const a0 = (i / Math.max(1, n)) * Math.PI * 2;
+        const r = rgb ? rgb[i * 3] / 255 : 0;
+        const g = rgb ? rgb[i * 3 + 1] / 255 : 0;
+        const b = rgb ? rgb[i * 3 + 2] / 255 : 0;
+        for (const band of bands) {
+            const a = a0 * band.dir + band.twist;
+            vertsBuf[vi++] = Math.cos(a) * band.r;
+            vertsBuf[vi++] = band.y;
+            vertsBuf[vi++] = Math.sin(a) * band.r;
+            vertsBuf[vi++] = r * band.gain;
+            vertsBuf[vi++] = g * band.gain;
+            vertsBuf[vi++] = b * band.gain;
+        }
+    }
+
+    previewBox_ = { x: 100, y: 100, z: 100 };
+    previewMaxDim_ = 100;
+    lastMaxDim = 100;
+    lastVerts = vertsBuf.subarray(0, vi);
+    lastVertCount = vi / 6;
+    return vi;
+}
+
 function drawLights(rgb) {
     if (!gl) initWebGL();
     if (!gl) return;
     if (!previewCoords_ || previewCoordCount_ === 0) return;
     const n = previewCoordCount_;
+
+    if (helioPreview_) {
+        if (buildHelioVerts(rgb, n) === 0) return;
+        if (camAutoFit) {
+            camAutoFit = false;
+            camDist = 2.35;
+            camTgtX = camTgtY = camTgtZ = 0;
+        }
+        if (!glLoopRunning) startRenderLoop();
+        return;
+    }
 
     if (!vertsBuf || vertsBuf.length < n * 6) vertsBuf = new Float32Array(n * 6);
     let vi = 0;
@@ -668,7 +732,9 @@ function drawVerts() {
     const volume = (bX > 1 ? bX : 1) * (bY > 1 ? bY : 1) * (bZ > 1 ? bZ : 1);
     const gridPitch = Math.pow(volume / Math.max(1, lastVertCount), 1 / dims);     // grid units
     const pxPerGridUnit = canvas.width / lastMaxDim;
-    const pointSize = Math.max(2, gridPitch * pxPerGridUnit * 0.75 * dotScale_);
+    const pointSize = helioPreview_
+        ? Math.max(2.2, Math.min(8.0, canvas.width / Math.sqrt(Math.max(1, lastVertCount)) * 0.62 * dotScale_))
+        : Math.max(2, gridPitch * pxPerGridUnit * 0.75 * dotScale_);
     gl.uniform1f(glLocs.uPointSize, pointSize);
     // LOD: the off-LED placeholder rings are useful when sprites are big enough to show a
     // hollow rim, but become visual mud once sprites are tiny (a dense grid zoomed out).
@@ -702,6 +768,7 @@ function drawVerts() {
 // normalisation the point coords use (pos/maxDim - 0.5*box/maxDim), so the cuboid's
 // faces pass through the outermost LED centres.
 function drawBoundingBox(mvp) {
+    if (helioPreview_) return;
     if (!lineProgram || !previewBox_ || !previewMaxDim_) return;
     const md = previewMaxDim_;
     const key = previewBox_.x + "x" + previewBox_.y + "x" + previewBox_.z + "@" + md;
@@ -754,7 +821,7 @@ function drawSeqLabels(mvp, glCanvas, pointSize) {
     const ctx = lc.getContext("2d");
     ctx.clearRect(0, 0, W, H);
 
-    if (!showSeqNumbers_ || !previewCoords_ || previewCoordCount_ === 0) return;
+    if (helioPreview_ || !showSeqNumbers_ || !previewCoords_ || previewCoordCount_ === 0) return;
 
     // Project every sent point; keep those in front of the camera + inside the viewport.
     // mvp is column-major: clip[r] = Σ_c mvp[c*4+r] * v[c].
@@ -854,6 +921,7 @@ function buildMVP(ex, ey, ez, tx, ty, tz, aspect) {
 export const preview = {
     init: initWebGL,
     setupLayout: setupLayout,
+    setProductInfo: setProductInfo,
     onBinaryMessage: renderPreviewBinary,
     resetCamera: resetCamera,
     // Redraw the last frame with the current theme's background — call on a theme

@@ -43,6 +43,13 @@
       "description": "ESP32-S3 (N8R8: 8 MB flash, 8 MB octal PSRAM) — WiFi + W5500 SPI Ethernet. Half the flash of N16R8; the N16R8 binary overruns an 8 MB board, so N8R8 boards (LightCrafter etc.) need this variant."
     },
     {
+      "name": "helio1",
+      "chip": "esp32s3",
+      "eth_only": false,
+      "ships": true,
+      "description": "HELIO 1 controller — ESP32-S3 with 8 MB flash, WiFi, RMT LED output on GPIO35, I2S microphone pins baked into the installer catalog, and automatic OTA from update.helio.lighting."
+    },
+    {
       "name": "esp32p4-eth",
       "chip": "esp32p4",
       "eth_only": true,

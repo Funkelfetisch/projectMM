@@ -1,4 +1,5 @@
 #include "core/Scheduler.h"
+#include "core/build_info.h"
 #include "light/layers/Effects.h"
 #include "light/layouts/GridLayout.h"
 #include "light/layouts/GridBlacksLayout.h"
@@ -38,6 +39,7 @@
 #include "light/effects/DistortionWavesEffect.h"
 #include "light/effects/GameOfLifeEffect.h"
 #include "light/effects/GEQ3DEffect.h"
+#include "light/effects/HelioWledPresetsEffect.h"
 #include "light/effects/PaintBrushEffect.h"
 #include "light/effects/SolidEffect.h"
 #include "light/effects/StarSkyEffect.h"
@@ -139,6 +141,7 @@
 #include "core/IrService.h"
 #include "core/FileManagerModule.h"
 #include "core/FirmwareUpdateModule.h"
+#include "core/AutoUpdateModule.h"
 #include "core/ImprovProvisioningModule.h"
 #include "core/MqttModule.h"
 #include "core/DevicesModule.h"
@@ -149,6 +152,28 @@
 #include "core/NetworkModule.h"
 
 #include <cstdio>
+#include <cstring>
+
+namespace {
+
+constexpr uint16_t kHelioDefaultLedCount = 311;
+
+bool isHelioProduct() {
+    return std::strcmp(mm::kProductName, "helio1") == 0 ||
+           std::strcmp(mm::kFirmwareName, "helio1") == 0 ||
+           std::strcmp(mm::kBrandName, "HELIO") == 0;
+}
+
+void setText(char* dst, size_t dstLen, const char* value) {
+    if (!dst || dstLen == 0) return;
+    if (!value) { dst[0] = 0; return; }
+    size_t len = std::strlen(value);
+    if (len >= dstLen) len = dstLen - 1;
+    std::memcpy(dst, value, len);
+    dst[len] = 0;
+}
+
+} // namespace
 
 static void registerModuleTypes() {
     // Second argument is the module's spec page relative to docs/moonmodules/ —
@@ -203,6 +228,7 @@ static void registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::GameOfLifeEffect>("GameOfLifeEffect", "light/effects.md#gameoflife");
     mm::ModuleFactory::registerType<mm::GEQEffect>("GEQEffect", "light/effects.md#geq");
     mm::ModuleFactory::registerType<mm::GEQ3DEffect>("GEQ3DEffect", "light/effects.md#geq3d");
+    mm::ModuleFactory::registerType<mm::HelioWledPresetsEffect>("HelioWledPresetsEffect", "light/effects.md#heliowledpresets");
     mm::ModuleFactory::registerType<mm::LavaLampEffect>("LavaLampEffect", "light/effects.md#lavalamp");
     mm::ModuleFactory::registerType<mm::LinesEffect>("LinesEffect", "light/effects.md#lines");
     mm::ModuleFactory::registerType<mm::LissajousEffect>("LissajousEffect", "light/effects.md#lissajous");
@@ -290,6 +316,7 @@ static void registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::IrService>("IrService", "core/services.md#ir");
     mm::ModuleFactory::registerType<mm::FileManagerModule>("FileManagerModule", "core/system.md#file-manager");
     mm::ModuleFactory::registerType<mm::FirmwareUpdateModule>("FirmwareUpdateModule", "core/system.md#firmware-update");
+    mm::ModuleFactory::registerType<mm::AutoUpdateModule>("AutoUpdateModule", "core/system.md#auto-update");
     mm::ModuleFactory::registerType<mm::ImprovProvisioningModule>("ImprovProvisioningModule", "core/system.md#improv-provisioning");
     mm::ModuleFactory::registerType<mm::MqttModule>("MqttModule", "core/system.md#mqtt");
     mm::ModuleFactory::registerType<mm::DevicesModule>("DevicesModule", "core/system.md#devices");
@@ -311,10 +338,10 @@ static void printModuleMetrics(mm::MoonModule* mod, int depth) {
         printModuleMetrics(mod->child(i), depth + 1);
     }
 }
-
 void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     registerModuleTypes();
     mm::Scheduler scheduler;
+    const bool helioProduct = isHelioProduct();
 
     // All modules created via factory (heap-allocated, PSRAM when available, classSize set)
 
@@ -349,6 +376,11 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
 
     // System (deviceName needed by other modules)
     auto* systemModule = static_cast<mm::SystemModule*>(mm::ModuleFactory::create("SystemModule"));
+    if (helioProduct) {
+        systemModule->setDefaultDeviceName("HELIO");
+        systemModule->setDefaultDeviceModel("HELIO 1");
+        systemModule->setDefaultFpsCap(35);
+    }
     systemModule->setScheduler(&scheduler);
 
     // Fixed System modules — the device's inspection / bring-up toolkit (what runs,
@@ -390,6 +422,20 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // the device. When added, its pins default to empty so it stays idle until the
     // user enters the real GPIOs. The audio effects reach it via the static
     // AudioService::latestFrame(), which returns a silent frame when no mic exists.
+    //
+    // HELIO is a product firmware, not a generic board chooser: every HELIO 1 has
+    // the same mic wiring, so helio1 bakes this peripheral in and marks it
+    // wired-by-code so OTA/recovery from an older saved System.json preserves it.
+    mm::AudioService* helioAudioModule = nullptr;
+    if (helioProduct) {
+        helioAudioModule = static_cast<mm::AudioService*>(mm::ModuleFactory::create("AudioService"));
+        helioAudioModule->setName("Audio");
+        helioAudioModule->sckPin = 40;
+        helioAudioModule->wsPin = 38;
+        helioAudioModule->sdPin = 39;
+        helioAudioModule->markWiredByCode();
+        systemModule->addChild(helioAudioModule);
+    }
 
     // FirmwareUpdate — surfaces OTA status as two read-only controls.
     // The actual flash is driven by POST /api/firmware/url; this module just
@@ -400,6 +446,10 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     auto* firmwareUpdateModule = static_cast<mm::FirmwareUpdateModule*>(
         mm::ModuleFactory::create("FirmwareUpdateModule"));
     firmwareUpdateModule->setName("Firmware");
+
+    auto* autoUpdateModule = static_cast<mm::AutoUpdateModule*>(
+        mm::ModuleFactory::create("AutoUpdateModule"));
+    autoUpdateModule->setName("Auto Update");
 
     // Network (platform stubs return false on desktop — module is a no-op)
     auto* networkModule = static_cast<mm::NetworkModule*>(mm::ModuleFactory::create("NetworkModule"));
@@ -446,28 +496,40 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         mqttModule->markWiredByCode();
     }
 
-    // Layouts: top-level container; one or more layouts. Today one GridLayout,
-    // which self-initialises to defaultGridSize (persistence overlays any saved
-    // size before setup()). No boot-time dimensions threaded in here.
+    // Layouts: top-level container; one or more layouts. Generic projectMM boots
+    // with one GridLayout; helio1 boots with its one circular-strip source layout.
+    // Persistence overlays saved dimensions before setup(), unless a stale file
+    // describes a different child type and the code-wired HELIO strip protects itself.
     auto* layouts = static_cast<mm::Layouts*>(mm::ModuleFactory::create("Layouts"));
-    auto* grid = static_cast<mm::GridLayout*>(mm::ModuleFactory::create("GridLayout"));
-    layouts->addChild(grid);
+    mm::GridLayout* grid = nullptr;
+    mm::SingleRowLayout* helioStrip = nullptr;
+    if (helioProduct) {
+        helioStrip = static_cast<mm::SingleRowLayout*>(mm::ModuleFactory::create("SingleRowLayout"));
+        helioStrip->setName("HELIO Strip");
+        helioStrip->width = kHelioDefaultLedCount;
+        helioStrip->markWiredByCode();
+        layouts->addChild(helioStrip);
+    } else {
+        grid = static_cast<mm::GridLayout*>(mm::ModuleFactory::create("GridLayout"));
+        layouts->addChild(grid);
+    }
 
     // Effects: top-level container; one or more layers, each rendering
     // into its own buffer. Today one Layer with one effect + one modifier.
     auto* effectsContainer = static_cast<mm::Effects*>(mm::ModuleFactory::create("Effects"));
     auto* layer = static_cast<mm::Layer*>(mm::ModuleFactory::create("Layer"));
-    layer->setChannelsPerLight(3);
+    layer->setChannelsPerLight(helioProduct ? 4 : 3);
     effectsContainer->addChild(layer);
     // setLayouts wires the shared Layouts to the container AND propagates to every child Layer.
     effectsContainer->setLayouts(layouts);
 
     // One default effect so a bare device (no catalog inject) still shows lights out
-    // of the box — but NO default modifier: the boot Layer is just an effect on a
-    // 16x16 grid. A device-model catalog entry can REPLACE this (replaceChildren) with
-    // its own effects/modifiers — e.g. the testbench swaps in AudioSpectrum + RandomMap.
-    auto* noise = mm::ModuleFactory::create("NoiseEffect");
-    layer->addChild(noise);
+    // of the box, but NO default modifier. Generic projectMM uses Noise; helio1
+    // starts on its migrated WLED audio playlist over the strip. A device-model
+    // catalog entry can still replace this with its own effects/modifiers.
+    auto* defaultEffect = mm::ModuleFactory::create(helioProduct ? "HelioWledPresetsEffect" : "NoiseEffect");
+    if (helioProduct) defaultEffect->setName("HELIO WLED Presets");
+    layer->addChild(defaultEffect);
 
     // Drivers: top-level container; one or more Driver children. Bound to the
     // Effects container — Drivers re-resolves the active Layer from it at every
@@ -476,11 +538,15 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // lets a driver read across N Layer buffers from one place — the hook
     // multi-layer blending uses.
     auto* drivers = static_cast<mm::Drivers*>(mm::ModuleFactory::create("Drivers"));
+    if (helioProduct) {
+        drivers->brightness = 64;
+    }
     drivers->setEffects(effectsContainer);
 
     // Output drivers (NetworkSend + the LED drivers: RMT / LCD_CAM / Parlio) are
-    // NOT boot-wired. They are added explicitly per board through the catalog
-    // (POST /api/modules to the Drivers container), the same model AudioService
+    // NOT boot-wired on generic projectMM. They are added explicitly per board
+    // through the catalog (POST /api/modules to the Drivers container), the same
+    // model AudioService uses.
     // uses, so a device only carries the drivers its board actually has instead of
     // every driver the chip is capable of. The Drivers container wires any child
     // generically in passBufferToDrivers() (setSourceBuffer/setLayer/setCorrection)
@@ -488,6 +554,20 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // one added at boot, and a non-wiredByCode child persists across reboot via
     // FilesystemModule. A bare flash with no catalog inject therefore has no LED /
     // network output until a board is selected — the deliberate explicit-add model.
+
+    // HELIO is a single-board product firmware, so its physical strip output is
+    // baked in. Generic projectMM still relies on the device catalog for LEDs.
+#if defined(CONFIG_SOC_RMT_SUPPORTED)
+    if (helioProduct) {
+        auto* helioRmt = static_cast<mm::RmtLedDriver*>(mm::ModuleFactory::create("RmtLedDriver"));
+        helioRmt->setName("RmtLed");
+        setText(helioRmt->pins, sizeof(helioRmt->pins), "35");
+        std::snprintf(helioRmt->ledsPerPin, sizeof(helioRmt->ledsPerPin), "%u",
+                      static_cast<unsigned>(kHelioDefaultLedCount));
+        helioRmt->markWiredByCode();
+        drivers->addChild(helioRmt);
+    }
+#endif
 
     // PreviewDriver is the one driver that stays boot-wired: it needs the HTTP
     // server's WS broadcaster (set below, once httpServer exists), a reference only
@@ -539,6 +619,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     scheduler.addModule(systemModule);
     scheduler.addModule(fileManagerModule);
     scheduler.addModule(firmwareUpdateModule);
+    scheduler.addModule(autoUpdateModule);
     if (improvModule) networkModule->addChild(improvModule);
     if (mqttModule) networkModule->addChild(mqttModule);
     // Devices: discovers other devices on the LAN. Child of Network (discovery
@@ -561,13 +642,21 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     scheduler.addModule(httpServer);
 
     scheduler.setup();
+    mm::platform::markOtaAppValid();
 
     uint32_t lights = layouts->totalLightCount();
     uint32_t bufBytes = lights * 3;
-    std::printf("projectMM running — grid %dx%d, %lu lights, buffer %lu bytes\n",
-                grid->width, grid->height,
-                static_cast<unsigned long>(lights),
-                static_cast<unsigned long>(bufBytes));
+    if (helioProduct && helioStrip) {
+        std::printf("projectMM running — HELIO strip %u, %lu lights, buffer %lu bytes\n",
+                    static_cast<unsigned>(helioStrip->width),
+                    static_cast<unsigned long>(lights),
+                    static_cast<unsigned long>(bufBytes));
+    } else if (grid) {
+        std::printf("projectMM running — grid %dx%d, %lu lights, buffer %lu bytes\n",
+                    grid->width, grid->height,
+                    static_cast<unsigned long>(lights),
+                    static_cast<unsigned long>(bufBytes));
+    }
     std::printf("sizeof: MoonModule=%zu Layer=%zu Drivers=%zu Grid=%zu HttpServer=%zu\n",
                 sizeof(mm::MoonModule), sizeof(mm::Layer), sizeof(mm::Drivers),
                 sizeof(mm::GridLayout), sizeof(mm::HttpServerModule));
@@ -597,7 +686,11 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
 
     uint32_t lastLog = mm::platform::millis();
     const uint32_t bootMillis = lastLog;   // window start for the MM_IP serial token
-    bool mmIpWindowClosed = false;         // latches true once the 60 s window elapses
+    bool mmIpWindowClosed = false;         // latches true once the short boot token burst ends
+    uint8_t bootIpPrints = 0;
+    constexpr uint32_t kBootIpLogMs = 15000;
+    constexpr uint32_t kSteadyPerfLogMs = 60000;
+    constexpr uint8_t kBootIpMaxPrints = 4;
 
     // Subscribe THIS (render-loop) task to the task watchdog: a genuine wedge here now panics-and-reboots
     // (the self-heal, with a backtrace) instead of hanging silently. The sdkconfig runs the TWDT with
@@ -609,9 +702,17 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         scheduler.tick();
         mm::platform::taskWdtReset();   // feed the render-loop WDT subscription — a live tick is not a wedge
 
-        // Log every second
+        // Serial diagnostics. Keep the installer's MM_IP/MM_DEVICE token at 1 Hz
+        // during the boot window, but do not dump the full module tree every second:
+        // USB/JTAG serial output can stall just long enough to show as a rhythmic
+        // light hitch. Detailed timings are available through /api/system.
         uint32_t now = mm::platform::millis();
-        if (now - lastLog >= 1000) {
+        const bool inBootIpWindow = !mmIpWindowClosed &&
+                                    bootIpPrints < kBootIpMaxPrints &&
+                                    now - bootMillis < kBootIpLogMs;
+        const uint32_t logEvery = inBootIpWindow ? 1000u : kSteadyPerfLogMs;
+        if (!inBootIpWindow) mmIpWindowClosed = true;
+        if (now - lastLog >= logEvery) {
             lastLog = now;
             if (scheduler.tickTimeUs() == 0) continue; // no measurement yet
 
@@ -646,41 +747,19 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
             if (drivers->renderSplitActive())
                 std::printf("  renderWait: %uus", static_cast<unsigned>(drivers->renderWaitPeakUs()));
             // Stable MM_IP=<ip> token for the web installer's post-flash serial
-            // read. It rides this already-periodic line (zero extra printf, re-emits
-            // every second so the installer catches it whenever it reopens the port).
-            // Gated to the first 60 s of uptime: the installer reads at ~3–15 s after
-            // boot, well inside that window; afterwards the device's IP comes from the
-            // REST API (http://<ip>/api/…), so a permanent token would just be noise on
-            // the perf line. The window latches off once for good — a plain `now <
-            // 60000` would re-open every ~49.7 days when millis() wraps. All-zero
-            // octets until the network connects — printed only once there's an IP.
-            // Both buffers are reused stack locals, no allocation.
-            if (!mmIpWindowClosed) {
-                if (now - bootMillis >= 60000) {
-                    mmIpWindowClosed = true;   // first 60 s elapsed; stop for the rest of uptime
-                } else {
-                    uint8_t ip[4];
-                    networkModule->currentIp(ip);
-                    if (ip[0] || ip[1] || ip[2] || ip[3]) {
-                        char ipStr[16];
-                        mm::formatDottedQuad(ipStr, ip);
-                        std::printf("  MM_IP=%s", ipStr);
-                        // Alongside MM_IP: the device's mDNS .local name, so the web
-                        // installer can offer a clickable http://<deviceName>.local link
-                        // that survives a later DHCP IP change. deviceName is owned by
-                        // SystemModule and is the device's single network identity (the
-                        // SAME string NetworkModule registers for mDNS, the AP SSID, and
-                        // the DHCP hostname; SystemModule keeps it a valid hostname), so
-                        // this is exactly what resolves on the LAN. Serial-borne because
-                        // the installer's REST fallback is blocked by mixed-content on the
-                        // HTTPS Pages site.
-                        std::printf("  MM_DEVICE=%s.local", systemModule->deviceName());
-                    }
+            // read. Gated to the first 60 s of uptime; afterwards the REST API is
+            // the diagnostics surface and serial stays quiet enough for smooth LEDs.
+            if (inBootIpWindow) {
+                uint8_t ip[4];
+                networkModule->currentIp(ip);
+                if (ip[0] || ip[1] || ip[2] || ip[3]) {
+                    char ipStr[16];
+                    mm::formatDottedQuad(ipStr, ip);
+                    std::printf("  MM_IP=%s", ipStr);
+                    std::printf("  MM_DEVICE=%s.local", systemModule->deviceName());
+                    bootIpPrints++;
+                    if (bootIpPrints >= kBootIpMaxPrints) mmIpWindowClosed = true;
                 }
-            }
-            // Per-module timing (walk tree recursively)
-            for (uint8_t i = 0; i < scheduler.moduleCount(); i++) {
-                printModuleMetrics(scheduler.module(i), 0);
             }
             std::printf("\n");
             std::fflush(stdout);

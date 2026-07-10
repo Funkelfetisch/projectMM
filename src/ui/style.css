@@ -35,6 +35,38 @@ body[data-theme="light"] {
     --yellow:      #b58000;
 }
 
+body[data-brand="helio"] {
+    --bg-0:        #070a10;
+    --bg-1:        #0f172a;
+    --fg:          #f7f8fb;
+    --fg-muted:    #aeb6c8;
+    --accent:      #f59e0b;
+    --accent-soft: #6366f1;
+    --card-bg-0:   #111827;
+    --card-bg-1:   #172033;
+    --card-bg-2:   #202a3d;
+    --border:      rgba(255,255,255,0.12);
+    --green:       #22c55e;
+    --red:         #ef4444;
+    --yellow:      #f2b84b;
+}
+
+body[data-brand="helio"][data-theme="light"] {
+    --bg-0:        #f7f8fb;
+    --bg-1:        #ffffff;
+    --fg:          #171923;
+    --fg-muted:    #5b6475;
+    --accent:      #635bff;
+    --accent-soft: #c8c4ff;
+    --card-bg-0:   #ffffff;
+    --card-bg-1:   #eef1f7;
+    --card-bg-2:   #e3e8f2;
+    --border:      #ccd3df;
+    --green:       #16a34a;
+    --red:         #dc2626;
+    --yellow:      #b7791f;
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -75,6 +107,32 @@ body {
     width: 28px;
     height: 28px;
     display: block;
+    object-fit: contain;
+}
+
+body[data-brand="helio"] #brand-logo {
+    width: 96px;
+}
+
+body[data-brand="helio"] #status-bar {
+    background:
+        linear-gradient(90deg, rgba(245, 158, 11, 0.12), transparent 28%),
+        linear-gradient(135deg, #090b11 0%, #101827 52%, #0a0d14 100%);
+    border-color: rgba(251, 191, 36, 0.32);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+body[data-brand="helio"] #status-bar .brand {
+    display: none;
+}
+
+body[data-brand="helio"] #device-name:empty {
+    display: none;
+}
+
+body[data-brand="helio"] #sys-stats {
+    color: #f8fafc;
+    text-shadow: 0 0 12px rgba(34, 211, 238, 0.28);
 }
 
 #device-name {
@@ -197,6 +255,26 @@ body {
     color: var(--accent);
     background: var(--bg-2);
     font-weight: 600;
+}
+
+.nav-item--presets {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.nav-item--presets::before {
+    content: "";
+    width: 0.82em;
+    height: 0.82em;
+    flex: 0 0 auto;
+    border: 1px solid currentColor;
+    border-radius: 2px;
+    background:
+        linear-gradient(currentColor 0 0) 50% 50% / 1px 100% no-repeat,
+        linear-gradient(currentColor 0 0) 50% 50% / 100% 1px no-repeat;
+    opacity: 0.76;
 }
 
 .nav-footer {
@@ -425,6 +503,635 @@ body.cards-resizing {
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
 .preview-show:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ============================================================
+   HELIO Product Layer
+   ============================================================ */
+
+.workspace.helio-product {
+    display: block;
+}
+
+.workspace.helio-product .preview-pane,
+body.helio-product-mode .preview-show {
+    display: none;
+}
+
+.workspace.helio-product #main {
+    max-width: 1280px;
+    width: 100%;
+    margin: 0 auto;
+    overflow: visible;
+    max-height: none;
+}
+
+.helio-home {
+    --helio-amber: #d97706;
+    --helio-gold: #fbbf24;
+    --helio-cyan: #22d3ee;
+    --helio-indigo: #6366f1;
+    --helio-panel: rgba(15, 23, 42, 0.82);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.helio-stage {
+    min-height: 520px;
+    display: grid;
+    grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
+    gap: 18px;
+    align-items: stretch;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #0b1020;
+    overflow: hidden;
+}
+
+.helio-stage-info {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    gap: 14px;
+}
+
+.helio-eyebrow {
+    color: var(--helio-gold);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.helio-stage h1 {
+    margin: 0;
+    color: #fff;
+    font-size: 52px;
+    line-height: 0.95;
+    font-weight: 800;
+}
+
+.helio-stage p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 1.08rem;
+}
+
+.helio-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.helio-metric {
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.04);
+}
+
+.helio-metric-label {
+    display: block;
+    color: var(--fg-muted);
+    font-size: 0.76rem;
+}
+
+.helio-metric-value {
+    display: block;
+    margin-top: 3px;
+    color: #fff;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.helio-hero-actions,
+.helio-head-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.helio-primary-action,
+.helio-secondary-action,
+.helio-size-grid button,
+.helio-start-grid button {
+    min-height: 44px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    padding: 0 14px;
+    color: var(--fg);
+    background: var(--card-bg-1);
+    font: inherit;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.helio-primary-action {
+    min-width: 96px;
+    background: var(--helio-amber);
+    border-color: var(--helio-amber);
+    color: #111827;
+}
+
+.helio-secondary-action:hover,
+.helio-size-grid button:hover,
+.helio-start-grid button:hover,
+.helio-scene-card:hover {
+    border-color: var(--accent);
+}
+
+.helio-trace-shell {
+    position: relative;
+    min-height: 460px;
+    border-radius: 8px;
+    background: #05070d;
+    overflow: hidden;
+}
+
+#helio-trace {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 460px;
+}
+
+.helio-panels {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.9fr) minmax(240px, 0.7fr);
+    gap: 12px;
+}
+
+.helio-panel,
+.helio-presets {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--helio-panel);
+    padding: 12px;
+}
+
+.helio-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.helio-section-head h2 {
+    margin: 0;
+    font-size: 1rem;
+    line-height: 1.2;
+}
+
+.helio-inline-status {
+    min-height: 18px;
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+}
+
+.helio-scene-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.helio-scene-card {
+    min-width: 0;
+    min-height: 168px;
+    display: grid;
+    grid-template-rows: 1fr auto auto;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.04);
+    color: var(--fg);
+    text-align: left;
+    cursor: pointer;
+}
+
+.helio-scene-card.active {
+    border-color: var(--helio-gold);
+    box-shadow: inset 0 0 0 1px rgba(251,191,36,0.4);
+}
+
+.helio-mode-preview {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    background: #05070d;
+    border-radius: 6px;
+}
+
+.helio-scene-label {
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.helio-scene-meta {
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.helio-slider-row,
+.helio-palette-row,
+.helio-solid-row {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 48px;
+    margin-bottom: 10px;
+}
+
+.helio-slider-row input[type="range"],
+.helio-solid-row input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+}
+
+.helio-palette-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.helio-palette-row label {
+    display: grid;
+    gap: 6px;
+    color: var(--fg-muted);
+}
+
+.helio-palette-row select {
+    min-height: 42px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg-1);
+    color: var(--fg);
+    padding: 0 10px;
+    font: inherit;
+}
+
+.helio-swatches {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.helio-swatch {
+    min-height: 34px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.helio-swatch.active {
+    outline: 2px solid var(--helio-gold);
+    outline-offset: 1px;
+}
+
+.helio-solid-row {
+    grid-template-columns: auto 54px minmax(0, 1fr);
+}
+
+.helio-solid-row input[type="color"] {
+    width: 54px;
+    height: 42px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+}
+
+.helio-preset-controls {
+    display: grid;
+    gap: 8px;
+    padding: 8px 0 12px;
+}
+
+.helio-select-row,
+.helio-toggle-row {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 38px;
+    color: var(--fg-muted);
+}
+
+.helio-select-row select {
+    min-width: 0;
+    min-height: 38px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg-1);
+    color: var(--fg);
+    padding: 0 10px;
+    font: inherit;
+}
+
+.helio-toggle-row input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+}
+
+.helio-toggle-row {
+    grid-template-columns: 18px minmax(0, 1fr);
+    color: var(--fg);
+}
+
+.helio-size-grid,
+.helio-start-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.helio-size-grid button.active {
+    border-color: var(--helio-gold);
+    background: rgba(245,158,11,0.18);
+}
+
+.helio-preset-grid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .helio-scene-card,
+    .helio-primary-action,
+    .helio-secondary-action {
+        transition: none;
+    }
+}
+
+@media (max-width: 1080px) {
+    .helio-stage {
+        grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+    }
+    .helio-panels {
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+    }
+    .helio-setup-panel {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 720px) {
+    .workspace.helio-product #main {
+        max-width: none;
+    }
+    .helio-stage {
+        min-height: 0;
+        grid-template-columns: 1fr;
+        padding: 12px;
+    }
+    .helio-stage h1 {
+        font-size: 40px;
+    }
+    .helio-trace-shell,
+    #helio-trace {
+        min-height: 330px;
+    }
+    .helio-panels,
+    .helio-scene-grid {
+        grid-template-columns: 1fr;
+    }
+    .helio-metrics,
+    .helio-size-grid,
+    .helio-start-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .helio-panel,
+    .helio-presets {
+        padding: 10px;
+    }
+}
+
+@media (max-width: 420px) {
+    .helio-stage h1 {
+        font-size: 36px;
+    }
+    .helio-trace-shell,
+    #helio-trace {
+        min-height: 300px;
+    }
+    .helio-metrics {
+        grid-template-columns: 1fr;
+    }
+    .helio-head-actions {
+        width: 100%;
+    }
+    .helio-head-actions .helio-secondary-action {
+        flex: 1 1 0;
+    }
+}
+
+/* HELIO surface refinement: the device has its own renderer-led product surface,
+   so the generic floating point-cloud preview stays out of module workflows. */
+.workspace.helio-device {
+    display: block;
+}
+
+.workspace.helio-device .preview-pane,
+body.helio-device-mode .preview-show {
+    display: none;
+}
+
+.workspace.helio-device #main {
+    width: 100%;
+    max-width: 1180px;
+    margin: 0 auto;
+    overflow: visible;
+    max-height: none;
+}
+
+.workspace.helio-product #main {
+    max-width: min(1500px, calc(100vw - 340px));
+}
+
+body[data-brand="helio"] .helio-home {
+    --helio-amber: #f59e0b;
+    --helio-gold: #fcd34d;
+    --helio-cyan: #22d3ee;
+    --helio-magenta: #e879f9;
+    --helio-indigo: #818cf8;
+    --helio-panel: rgba(8, 13, 24, 0.86);
+}
+
+body[data-brand="helio"] .helio-stage {
+    position: relative;
+    min-height: clamp(520px, 58vh, 760px);
+    grid-template-columns: minmax(300px, 0.62fr) minmax(520px, 1.38fr);
+    gap: 28px;
+    padding: clamp(20px, 2.2vw, 34px);
+    border-color: rgba(251, 191, 36, 0.34);
+    background:
+        linear-gradient(115deg, rgba(245, 158, 11, 0.18), transparent 26%),
+        linear-gradient(300deg, rgba(34, 211, 238, 0.16), transparent 30%),
+        repeating-linear-gradient(135deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 18px),
+        #06080e;
+    box-shadow: 0 24px 70px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+
+body[data-brand="helio"] .helio-stage::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+        linear-gradient(90deg, rgba(255,255,255,0.10), transparent 18% 82%, rgba(255,255,255,0.08)),
+        linear-gradient(0deg, transparent 0 70%, rgba(245,158,11,0.09));
+    mix-blend-mode: screen;
+}
+
+body[data-brand="helio"] .helio-stage-info {
+    position: relative;
+    z-index: 1;
+}
+
+body[data-brand="helio"] .helio-eyebrow {
+    width: max-content;
+    padding: 4px 9px;
+    border: 1px solid rgba(34, 211, 238, 0.45);
+    color: var(--helio-cyan);
+    background: rgba(34, 211, 238, 0.08);
+    text-transform: uppercase;
+    letter-spacing: 0;
+}
+
+body[data-brand="helio"] .helio-stage h1 {
+    font-size: clamp(54px, 5.8vw, 96px);
+    text-shadow: 0 0 28px rgba(251, 191, 36, 0.25);
+}
+
+body[data-brand="helio"] .helio-stage p {
+    color: #dbe4f3;
+}
+
+body[data-brand="helio"] .helio-metric,
+body[data-brand="helio"] .helio-panel,
+body[data-brand="helio"] .helio-presets,
+body[data-brand="helio"] .helio-playlist-card {
+    background:
+        linear-gradient(145deg, rgba(255,255,255,0.075), rgba(255,255,255,0.025)),
+        rgba(7, 10, 18, 0.86);
+    border-color: rgba(255,255,255,0.16);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+body[data-brand="helio"] .helio-primary-action {
+    background: linear-gradient(135deg, #fbbf24, #fb7185);
+    border-color: rgba(251, 191, 36, 0.75);
+    color: #05070d;
+    box-shadow: 0 0 24px rgba(245, 158, 11, 0.22);
+}
+
+body[data-brand="helio"] .helio-secondary-action,
+body[data-brand="helio"] .helio-size-grid button,
+body[data-brand="helio"] .helio-start-grid button,
+body[data-brand="helio"] .helio-scene-card,
+body[data-brand="helio"] .helio-playlist-step,
+body[data-brand="helio"] .preset-tool {
+    background: linear-gradient(145deg, rgba(255,255,255,0.07), rgba(255,255,255,0.025));
+    border-color: rgba(255,255,255,0.16);
+}
+
+body[data-brand="helio"] .helio-secondary-action:hover,
+body[data-brand="helio"] .helio-size-grid button:hover,
+body[data-brand="helio"] .helio-start-grid button:hover,
+body[data-brand="helio"] .helio-scene-card:hover,
+body[data-brand="helio"] .helio-playlist-step:hover {
+    border-color: var(--helio-cyan);
+    box-shadow: 0 0 22px rgba(34, 211, 238, 0.14);
+}
+
+body[data-brand="helio"] .helio-trace-shell {
+    min-height: clamp(460px, 53vh, 720px);
+    background:
+        radial-gradient(ellipse at center, rgba(30, 41, 59, 0.36), transparent 62%),
+        #03050a;
+    border: 1px solid rgba(34, 211, 238, 0.18);
+    box-shadow: inset 0 0 60px rgba(34, 211, 238, 0.08), 0 30px 70px rgba(0,0,0,0.42);
+}
+
+body[data-brand="helio"] #helio-trace {
+    min-height: clamp(460px, 53vh, 720px);
+}
+
+body[data-brand="helio"] .helio-scene-card {
+    min-height: 188px;
+    transform: translateZ(0);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+body[data-brand="helio"] .helio-scene-card:hover {
+    transform: translateY(-2px);
+}
+
+body[data-brand="helio"] .helio-scene-card.active,
+body[data-brand="helio"] .helio-playlist-card.active {
+    border-color: var(--helio-gold);
+    box-shadow: inset 0 0 0 1px rgba(251,191,36,0.45), 0 0 30px rgba(251,191,36,0.14);
+}
+
+body[data-brand="helio"] .helio-mode-preview,
+body[data-brand="helio"] .helio-playlist-preview,
+body[data-brand="helio"] .preset-preview {
+    background: #03050a;
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: inset 0 0 26px rgba(34,211,238,0.08);
+}
+
+body[data-brand="helio"] .helio-setup-panel.is-collapsed {
+    align-self: start;
+}
+
+.helio-setup-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+}
+
+.helio-setup-copy {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+}
+
+.helio-setup-copy strong {
+    color: #fff;
+    font-size: 1.04rem;
+}
+
+.helio-setup-copy span {
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+}
+
+@media (max-width: 1180px) {
+    .workspace.helio-product #main {
+        max-width: none;
+    }
+
+    body[data-brand="helio"] .helio-stage {
+        grid-template-columns: 1fr;
+    }
+}
 
 /* ============================================================
    Cards
@@ -1336,6 +2043,59 @@ body.cards-resizing {
 }
 .control-row button.action-btn:hover { filter: brightness(1.15); }
 
+.helio-setup {
+    border-color: var(--accent-soft);
+    cursor: default;
+}
+.helio-setup-row {
+    align-items: stretch;
+}
+.helio-segmented {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+.helio-segmented button,
+.helio-mini-btn {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg-1);
+    color: var(--fg);
+    padding: 7px 9px;
+    font: inherit;
+    font-size: 0.86rem;
+    cursor: pointer;
+}
+.helio-segmented button:hover,
+.helio-mini-btn:hover {
+    border-color: var(--accent);
+}
+.helio-segmented button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+.helio-setup-row input[type="number"] {
+    flex: 1;
+    min-width: 72px;
+    max-width: 120px;
+}
+.helio-setup-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+.helio-setup-status {
+    color: var(--fg-muted);
+    font-size: 0.86rem;
+    min-height: 1.2em;
+}
+
 .peek-btn {
     background: transparent;
     border: 1px solid var(--border);
@@ -1686,4 +2446,169 @@ body.cards-resizing {
     box-shadow:
         inset 0 1px 0 color-mix(in srgb, #fff 40%, transparent),
         0 0 12px color-mix(in srgb, var(--pad-tint) 55%, transparent);
+}
+
+/* ============================================================
+   Presets
+   ============================================================ */
+
+.presets-view {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.presets-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.presets-head h2 {
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: 650;
+}
+
+.presets-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.presets-status {
+    min-height: 18px;
+    color: var(--fg-muted);
+    font-size: 0.86rem;
+}
+
+.presets-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 12px;
+}
+
+.preset-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card-bg-0);
+    overflow: hidden;
+    min-width: 0;
+}
+
+.preset-preview {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #05070d;
+}
+
+.preset-body {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.preset-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.preset-meta {
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+    min-height: 1.2em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.preset-card-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.preset-tool {
+    flex: 1 1 0;
+    min-width: 0;
+    border: 1px solid var(--border);
+    background: var(--card-bg-1);
+    color: var(--fg);
+    border-radius: 4px;
+    padding: 6px 8px;
+    cursor: pointer;
+}
+
+.preset-tool:hover { border-color: var(--accent); }
+.preset-tool--danger { color: var(--red); }
+.preset-tool--danger:hover { border-color: var(--red); }
+
+.helio-playlists-view {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.helio-playlist-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+}
+
+.helio-playlist-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card-bg-0);
+    overflow: hidden;
+    min-width: 0;
+}
+
+.helio-playlist-card.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.helio-playlist-preview {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #05070d;
+}
+
+.helio-playlist-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+}
+
+.helio-playlist-sequence {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    gap: 6px;
+}
+
+.helio-playlist-step {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--card-bg-1);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    line-height: 1.2;
+    padding: 6px 8px;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.helio-playlist-step:hover,
+.helio-playlist-step.active {
+    border-color: var(--accent);
 }

@@ -103,6 +103,15 @@ if(MM_VERSION)
     # release asset names, and the manifest all carry the same version.
     target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_VERSION=${MM_VERSION})
 endif()
+if(MM_PRODUCT_NAME)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_PRODUCT_NAME=${MM_PRODUCT_NAME})
+endif()
+if(MM_BRAND_NAME)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_BRAND_NAME=${MM_BRAND_NAME})
+endif()
+if(MM_AUTO_UPDATE_MANIFEST_URL)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_AUTO_UPDATE_MANIFEST_URL=${MM_AUTO_UPDATE_MANIFEST_URL})
+endif()
 if(MM_ETH_ONLY)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_NO_WIFI)
 endif()
@@ -147,7 +156,7 @@ set(UI_DIR ${COMPONENT_DIR}/../../src/ui)
 add_custom_command(
     OUTPUT ${UI_DIR}/ui_embedded.h
     COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DOUT=${UI_DIR}/ui_embedded.h -DPYTHON_CMD=${Python3_EXECUTABLE} -P ${UI_DIR}/embed_ui.cmake
-    DEPENDS ${UI_DIR}/index.html ${UI_DIR}/app.js ${UI_DIR}/style.css ${UI_DIR}/install-picker.js ${UI_DIR}/preview3d.js ${UI_DIR}/moonlight-logo.png ${UI_DIR}/embed_ui.cmake
+    DEPENDS ${UI_DIR}/index.html ${UI_DIR}/app.js ${UI_DIR}/style.css ${UI_DIR}/install-picker.js ${UI_DIR}/semver.js ${UI_DIR}/preview3d.js ${UI_DIR}/heliotrace.js ${UI_DIR}/moonlight-logo.png ${UI_DIR}/embed_ui.cmake
     COMMENT "Embedding UI files"
 )
 add_custom_target(ui_embed DEPENDS ${UI_DIR}/ui_embedded.h)
