@@ -104,6 +104,16 @@ public:
         windowSlice(bufN, outStart, outLen);
         return outLen;
     }
+    /// Set the code-wired defaults for a physical output. Persisted controls overlay these
+    /// during setup, so a catalog or an existing device configuration still wins.
+    void setDefaultCorrection(const char* presetName, WhiteMode whiteMode) {
+        setDefaultPresetName(presetName);
+        whiteMode_ = static_cast<uint8_t>(whiteMode);
+    }
+    void setPreviewWhitePoint(uint8_t red, uint8_t green, uint8_t blue) {
+        correction_.setPreviewWhitePoint(red, green, blue);
+    }
+    const Correction& outputCorrection() const { return correction_; }
     /// The active Layer this driver reads dimensions from — null when no Layer is wired
     /// (such as after the last Layer was deleted). Drivers must tolerate null here.
     Layer* layer() const { return layer_; }

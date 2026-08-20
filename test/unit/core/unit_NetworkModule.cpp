@@ -14,6 +14,7 @@
 #include "core/NetworkModule.h"
 #include "conditional_controls.h"  // shared conditional-control invariant helpers
 
+#include <cstdio>
 #include <cstring>
 
 // setWifiCredentials copies SSID + password into internal buffers and raises the dirty flag so the next tick1s() applies them.
@@ -68,6 +69,41 @@ TEST_CASE("NetworkModule::setWifiCredentials accepts long SSID without crash") {
     longSsid[len] = 0;
     net.setWifiCredentials(longSsid, "pw");
     CHECK(net.dirty());
+}
+
+// Text controls are drafts until the explicit action runs. This prevents a pause after typing
+// "Studio" in "StudioNetVPN" from starting a connection and dropping the setup AP with a partial SSID.
+TEST_CASE("NetworkModule connects edited credentials only on connectWifi") {
+    mm::NetworkModule net;
+    net.setup();
+    net.rebuildControls();
+
+    auto control = [&](const char* name) -> const mm::ControlDescriptor* {
+        for (uint8_t i = 0; i < net.controls().count(); i++) {
+            if (std::strcmp(net.controls()[i].name, name) == 0) return &net.controls()[i];
+        }
+        return nullptr;
+    };
+    auto mode = [&]() -> const char* {
+        auto* c = control("mode");
+        return c ? static_cast<const char*>(c->ptr) : "";
+    };
+
+    auto* ssid = control("ssid");
+    auto* password = control("password");
+    REQUIRE(ssid != nullptr);
+    REQUIRE(password != nullptr);
+    std::snprintf(static_cast<char*>(ssid->ptr), static_cast<size_t>(ssid->max), "%s", "StudioNetVPN");
+    std::snprintf(static_cast<char*>(password->ptr), static_cast<size_t>(password->max), "%s", "secret");
+
+    mm::platform::setTestWifiStaAvailable(true);
+    net.onControlChanged("ssid");
+    net.onControlChanged("password");
+    CHECK(std::strcmp(mode(), "Idle") == 0);
+
+    net.onControlChanged("connectWifi");
+    CHECK(std::strcmp(mode(), "WiFi STA (waiting)") == 0);
+    mm::platform::setTestWifiStaAvailable(false);
 }
 
 // After setup(), NetworkModule exposes a `mode` read-only control whose value

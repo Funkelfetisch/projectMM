@@ -4,7 +4,6 @@
 
 #include "light/drivers/LedDriverConfig.h"
 #include "light/drivers/PinList.h"         // parsePinList / assignCounts (shared with MultiPinLedDriver)
-#include "light/drivers/RmtSymbol.h"       // encodeWs2812Symbols (host-testable)
 #include "platform/platform.h"
 
 namespace mm {
@@ -15,8 +14,8 @@ namespace mm {
 /// buffer (8-bit, GRB). The default LED driver for classic-ESP32 and S3 board entries, and the
 /// readable EXAMPLE future LED drivers copy: a sibling of NetworkSendDriver (same DriverBase hooks,
 /// same per-light `correction_.apply()` guard, same once-allocated owned buffer sized off the hot
-/// path); only the emit differs — this fuses the correction + WS2812 symbol-encode into one pass
-/// (the encode is `RmtSymbol.h`, host-tested) then hands per-pin slices to the platform.
+/// path); only the emit differs — this corrects directly into one byte frame, then the ESP-IDF
+/// byte encoder feeds RMT symbols to the peripheral without a frame-sized symbol expansion.
 ///
 /// **Wire contract — [WS2812B](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf):** 1-wire NRZ
 /// at 800 kHz, no clock line. Each bit is a 1.25 µs cell that starts HIGH then drops LOW; the HIGH
@@ -24,20 +23,29 @@ namespace mm {
 /// order (GRB, GRBW, …) is applied by `Correction` before the encode, so the encoder is
 /// order-agnostic. Frames latch on ≥300 µs idle-LOW. Timings live in `LedDriverConfig`, converted to
 /// RMT ticks from the granted resolution (~40 MHz), never hard-coded to one clock. The platform owns
-/// only the peripheral (`platform::rmtWs2812*`); on a chip without RMT TX channels those calls are
+/// only the peripheral and byte encoding (`platform::rmtWs2812*`); on a chip without RMT TX channels those calls are
 /// inert stubs, so it compiles everywhere. The peripheral half uses the modern RMT driver (ESP-IDF
-/// 5.x "RMT v2": `rmt_new_tx_channel` / a copy encoder / `rmt_transmit`), not the legacy
+/// 5.x "RMT v2": `rmt_new_tx_channel` / a bytes encoder / `rmt_transmit`), not the legacy
 /// channel-numbered API — not a preference: the legacy driver was removed entirely in ESP-IDF v6
 /// (the build IDF), so v2 is the only API that exists. On chips whose RMT has a DMA backend
-/// (`SOC_RMT_SUPPORT_DMA` — the P4; the classic ESP32 has none) the whole-frame loopback capture
+/// (`SOC_RMT_SUPPORT_DMA` — the S3 and P4; the classic ESP32 has none) the whole-frame loopback capture
 /// uses it.
 ///
-/// **Flicker on LEDs that should be off** is almost always a data-line signal-integrity problem
-/// (3.3 V drive into a 5 V strip), not firmware — the "LED signal integrity" use-case guide has the
-/// confirm-firmware-innocent playbook (`loopbackFrame`, the TX-power sweep) and the electrical fixes.
+/// **Flicker on LEDs that should be off** can come from signal integrity (for example 3.3 V drive
+/// into a 5 V strip) or from a corrupted peripheral frame. First prove the source with preview and
+/// loopback capture; then inspect cache-safe ISR execution and the borrowed frame's lifetime before
+/// changing colors or effects. The "LED signal integrity" use-case guide covers the electrical path.
 /// @card RmtLedDriver.png
 class RmtLedDriver : public DriverBase {
 public:
+    // A release() timeout keeps ownership in this object for a later lifecycle retry. Destruction is
+    // the final ownership boundary, so it drains every borrowed frame before the members disappear;
+    // the calling task's watchdog remains the recovery path for a genuinely wedged peripheral.
+    ~RmtLedDriver() override {
+        while (!deinitAll()) platform::yield();
+        freeFrame();
+    }
+
     /// WS2812/SK6812 strips are physically GRB-wired, so a fresh RMT driver references the "GRB"
     /// preset by default (a strip attached to a freshly-flashed board shows correct colors). The
     /// user can pick any preset from the library.
@@ -172,7 +180,7 @@ public:
     /// Parse the config and (re)init the RMT channels. Lifecycle has two
     /// deliberately-separate concerns, so the buffer half stays host-testable and a
     /// hardware-only guard can never strand it:
-    ///   - SYMBOL BUFFER (plain heap): resizeSymbols() / freeSymbols(), run on
+    ///   - BYTE FRAME (plain heap): resizeFrame() / freeFrame(), run on
     ///     every platform.
     ///   - RMT CHANNELS (hardware): reinit() / deinitAll(), RMT-targets-only
     ///     (if constexpr).
@@ -184,22 +192,30 @@ public:
     /// in prepare(), the sole resource-lifecycle gate. Enabled-independent — the acquire
     /// happens in the prepareTree sweep that always follows.
     void setup() override { parseConfig(); }
-    /// Release the RMT channels and free the symbol buffer, then clear the shared
+    /// Release the RMT channels and free the byte frame, then clear the shared
     /// fail/config-error state (DriverBase::release()).
     void release() override {
-        deinitAll();
-        freeSymbols();
+        // A timed-out transfer still borrows frame_. Retain that compact allocation together with
+        // the channel instead of creating a DMA use-after-free; a later release/prepare retries and
+        // the destructor drains the final lease before object memory disappears.
+        if (deinitAll()) freeFrame();
         DriverBase::release();   // frees the correction scratch, clears failBuf_ + configErr_
     }
 
-    /// Pure build (see MoonModule::prepare): re-parse, resize the symbol buffer, and (re)init the
+    /// Pure build (see MoonModule::prepare): re-parse, resize the byte frame, and (re)init the
     /// RMT channels off the hot path (tick() never allocates). No enabled() check — core's applyState()
     /// only calls this when effectively-enabled and routes to release() (release) otherwise, so the
     /// channels + buffer free when the driver, or a parent, is disabled.
     void prepare() override {
+        // Teardown precedes every operation that may resize frame_. The old ordering resized first,
+        // which could free bytes an RMT encoder still borrowed after a bounded wait timed out.
+        if (!deinitAll()) {
+            setStatus(kTransferBusyMsg, Severity::Error);
+            return;
+        }
         parseConfig();
-        resizeSymbols();
-        reinit();
+        resizeFrame();
+        initAll();
         // Re-assert the resting "driving N of M lights" status after the full build. parseConfig sets it
         // too, but only when a buffer is already wired (txLightCount_ > 0); on the boot path setup()'s
         // parseConfig runs before the source buffer exists, so it's skipped and the status stays blank
@@ -215,25 +231,50 @@ public:
 
     /// Preset toggle (RGB↔RGBW) changes outChannels without a structural rebuild —
     /// the per-pin symbol offsets scale with outChannels, so re-derive them too. Skipped
-    /// while (effectively) disabled (would re-alloc the symbol buffer a disabled driver released).
-    void onCorrectionChanged() override { if (!effectivelyEnabled()) return; parseConfig(); resizeSymbols(); }
+    /// while (effectively) disabled (would re-alloc the byte frame a disabled driver released).
+    void onCorrectionChanged() override {
+        if (!effectivelyEnabled()) return;
+        if (!waitForTransfers(1000)) {
+            setStatus(kTransferBusyMsg, Severity::Error);
+            return;
+        }
+        parseConfig();
+        resizeFrame();
+    }
 
     /// Point the driver at the source frame buffer; re-parse (counts derive from its light count)
-    /// and resize the symbol buffer to match. The resize is skipped while (effectively) disabled
+    /// and resize the byte frame to match. The resize is skipped while (effectively) disabled
     /// (a disabled driver holds no buffer); the enabled prepare() sweep re-sizes it on enable.
     void setSourceBuffer(Buffer* buf) override {
         sourceBuffer_ = buf;
         parseConfig();      // counts derive from the buffer's light count
-        if (effectivelyEnabled()) resizeSymbols();
+        if (!effectivelyEnabled()) return;
+        if (!waitForTransfers(1000)) {
+            setStatus(kTransferBusyMsg, Severity::Error);
+            return;
+        }
+        resizeFrame();
     }
 
-    /// Per-tick output: fuse the correction and WS2812 symbol-encode in one pass
-    /// over this driver's window, then start every pin's transmit before waiting on
+    /// Per-tick output: correct directly into the byte frame in one pass over this
+    /// driver's window, then start every pin's transmit before waiting on
     /// any, so the tick costs the longest strand rather than the sum. Inert off RMT
     /// chips and idle until inited with a source buffer + correction.
     void tick() MM_NONBLOCKING override {
         if constexpr (platform::rmtTxChannels == 0) return;  // inert off RMT chips
         if (!inited_ || !sourceBuffer_ || !sourceBuffer_->data()) return;
+
+        // The platform byte encoder and DMA borrow frame_. A timed-out wait does
+        // not cancel that transfer, so keep the frame immutable until every
+        // outstanding channel confirms completion. Polling with zero timeout
+        // keeps the render tick nonblocking while preserving source lifetime.
+        bool waiting = false;
+        for (uint8_t i = 0; i < kMaxPins; i++) {
+            if (!inFlight_[i]) continue;
+            if (platform::rmtWs2812Wait(rmt_[i], 0)) inFlight_[i] = false;
+            else waiting = true;
+        }
+        if (waiting) return;
 
         // Encode only the lights the pins actually transmit (Σ pinCounts_), NOT the whole source
         // buffer: a strand config of e.g. 64 leds/pin on a 16K-light grid drives 64, so encoding
@@ -245,26 +286,17 @@ public:
         const nrOfLightsType n = txLightCount_ < winLen_ ? txLightCount_ : winLen_;
         const uint8_t outCh = correction_.outChannels;
         // Same defensive guard ArtNet uses: skip rather than overrun if the
-        // symbol buffer is stale (e.g. correction swapped without a resize).
+        // byte frame is stale (e.g. correction swapped without a resize).
         if (n == 0 || outCh == 0 || pinCount_ == 0
-            || !symbols_ || symbolCap_ < symbolsFor(n, outCh)
-            || !wire_ || wireCap_ < outCh) return;   // wire_ sized to outChannels — skip if not ready
+            || !frame_ || frameCap_ < bytesFor(n, outCh)) return;
 
-        // Fused single pass: correct one light into wire bytes, encode those
-        // bytes straight into the symbol buffer. No second sweep over encoded
-        // data, no per-light heap.
+        // Fused single pass: correct each source light directly into its final wire bytes. The
+        // platform byte encoder expands those bytes into RMT symbols while the peripheral drains.
         const uint8_t* src = sourceBuffer_->data();
         const uint8_t srcCh = sourceBuffer_->channelsPerLight();
-        const uint16_t t0h = nsToTicks(cfg_.t0h_ns);
-        const uint16_t t1h = nsToTicks(cfg_.t1h_ns);
-        const uint16_t period = nsToTicks(cfg_.period_ns);
-        size_t s = 0;
         for (nrOfLightsType i = 0; i < n; i++) {
-            // Read the windowed light: this driver's slice starts at winStart_. wire_ is sized to
-            // outChannels off the hot path (resizeSymbols), so apply() can't overflow it.
-            correction_.apply(src + (winStart_ + i) * srcCh, wire_);
-            encodeWs2812Symbols(wire_, outCh, t0h, t1h, period, symbols_ + s);
-            s += static_cast<size_t>(outCh) * 8;
+            correction_.apply(src + (winStart_ + i) * srcCh,
+                              frame_ + static_cast<size_t>(i) * outCh, srcCh);
         }
         // Start every pin's slice before waiting on any — the channels clock out
         // concurrently, so the tick is charged the longest strand, not the sum.
@@ -277,38 +309,40 @@ public:
         // contiguously from light 0, so pin i covers lights [pinStart, pinStart+pinCounts_[i]).
         // Normally Σ pinCounts_ == n, but if the buffer shrank since the last parseConfig (a grid
         // resize lands a tick before the config re-parse) n can be below Σ pinCounts_ — cap each
-        // pin at the encoded boundary so it never clocks out stale symbols past what we wrote.
-        const size_t wordsPerLight = static_cast<size_t>(outCh) * 8;
+        // pin at the corrected boundary so it never clocks out stale bytes past what we wrote.
+        const size_t bytesPerLight = outCh;
         bool started[kMaxPins] = {};
         for (uint8_t i = 0; i < pinCount_; i++) {
-            const nrOfLightsType pinStart = static_cast<nrOfLightsType>(pinOffsets_[i] / wordsPerLight);
+            const nrOfLightsType pinStart = static_cast<nrOfLightsType>(pinOffsets_[i] / bytesPerLight);
             if (pinStart >= n) break;  // contiguous: this pin and all later ones are past the encoded lights
             const nrOfLightsType pinLights =
                 (pinStart + pinCounts_[i] > n) ? static_cast<nrOfLightsType>(n - pinStart) : pinCounts_[i];
             if (pinLights == 0) continue;
-            started[i] = platform::rmtWs2812Transmit(rmt_[i], symbols_ + pinOffsets_[i],
-                                        static_cast<size_t>(pinLights) * wordsPerLight);
+            started[i] = platform::rmtWs2812TransmitBytes(rmt_[i], frame_ + pinOffsets_[i],
+                                        static_cast<size_t>(pinLights) * bytesPerLight);
+            inFlight_[i] = started[i];
         }
         for (uint8_t i = 0; i < pinCount_; i++) {
-            if (started[i]) platform::rmtWs2812Wait(rmt_[i], 1000 /* ms */);
+            if (started[i] && platform::rmtWs2812Wait(rmt_[i], 1000 /* ms */))
+                inFlight_[i] = false;
         }
         if (cfg_.reset_us) platform::delayUs(cfg_.reset_us);
     }
 
-    /// Test-only accessors. symbolBuffer/symbolCapacity mirror ArtNet's
+    /// Test-only accessors. frameBuffer/frameCapacity mirror ArtNet's
     /// correctedBuffer() and let unit tests pin the buffer-lifecycle invariants a
-    /// hardware bug already taught us; pinCount/pinLightCount/pinSymbolOffsetWords
+    /// hardware bug already taught us; pinCount/pinLightCount/pinByteOffset
     /// pin the multi-pin slice arithmetic (unit_RmtLedDriver_pins.cpp). Not part
     /// of any runtime API.
-    const uint32_t* symbolBuffer() const { return symbols_; }
-    /// Words allocated in the symbol buffer. Test-only.
-    size_t symbolCapacity() const { return symbolCap_; }
+    const uint8_t* frameBuffer() const { return frame_; }
+    /// Bytes allocated in the corrected frame. Test-only.
+    size_t frameCapacity() const { return frameCap_; }
     /// Number of parsed output pins (0 = idle). Test-only.
     uint8_t pinCount() const { return pinCount_; }
     /// Lights on pin `i` (0 if out of range). Test-only.
     nrOfLightsType pinLightCount(uint8_t i) const { return i < pinCount_ ? pinCounts_[i] : 0; }
-    /// Word offset of pin `i`'s slice in the symbol buffer (0 if out of range). Test-only.
-    size_t pinSymbolOffsetWords(uint8_t i) const { return i < pinCount_ ? pinOffsets_[i] : 0; }
+    /// Byte offset of pin `i`'s slice in the corrected frame (0 if out of range). Test-only.
+    size_t pinByteOffset(uint8_t i) const { return i < pinCount_ ? pinOffsets_[i] : 0; }
 
 private:
     // Source frame. The output correction (channel order + white + brightness) lives on
@@ -319,21 +353,15 @@ private:
     platform::RmtWs2812Handle rmt_[kMaxPins];
     uint16_t       pinList_[kMaxPins] = {};    // parsed pins, list order
     nrOfLightsType pinCounts_[kMaxPins] = {};  // lights per pin (slice lengths)
-    size_t         pinOffsets_[kMaxPins] = {}; // slice start in symbols_, words
+    size_t         pinOffsets_[kMaxPins] = {}; // slice start in frame_, bytes
     nrOfLightsType txLightCount_ = 0;          // Σ pinCounts_ — lights actually transmitted/encoded
     nrOfLightsType winStart_ = 0;              // first source-buffer light this driver reads (the window)
     nrOfLightsType winLen_ = 0;                // window length (lights), clamped to the buffer
     uint8_t pinCount_ = 0;                     // 0 = idle (parse error / no pins)
     bool inited_ = false;                      // all-or-nothing across the pins
-    uint32_t* symbols_ = nullptr;   // owned; one word per WS2812 data bit
-    size_t symbolCap_ = 0;          // words allocated
-    // Per-light scratch for correction_.apply(): `outChannels` bytes, one light at a time. Heap, sized
-    // to the channel count (no fixed cap — a light may carry any number of channels, RGB=3, RGBW=4,
-    // RGBCCT=5, or an N-channel fixture; the only limit is memory). Allocated off the hot path in
-    // resizeSymbols(), reused every tick (tick() never allocates). A fixed stack array here overflowed
-    // for >4-channel corrections and corrupted the stack — the SE16 bootloop, 2026-07-13.
-    // (wire_ / wireCap_ live on DriverBase — the grow-only scratch lifecycle is shared with
-    //  ParallelLedDriver; this driver sizes it to ONE light's outChannels.)
+    bool inFlight_[kMaxPins] = {};             // frame_ is borrowed until each wait succeeds
+    uint8_t* frame_ = nullptr;      // owned corrected channel bytes, one frame
+    size_t frameCap_ = 0;           // bytes allocated
 
     // The parse-error literal currently shown in the status slot (nullptr when
     // configErr_, failBuf_, kFailBufLen and the clearConfigErr/clearFailBuf/
@@ -351,16 +379,8 @@ private:
                    : kMaxPins;
     }
 
-    static size_t symbolsFor(nrOfLightsType lights, uint8_t channels) {
-        return static_cast<size_t>(lights) * channels * 8;
-    }
-
-    // Convert a ns duration to RMT ticks using the resolution the platform
-    // granted. Falls back to the requested clock when not inited (host/desktop).
-    uint16_t nsToTicks(uint32_t ns) const MM_NONBLOCKING {
-        uint32_t hz = inited_ ? platform::rmtWs2812Resolution(rmt_[0]) : kResolutionHz;
-        if (hz == 0) hz = kResolutionHz;
-        return static_cast<uint16_t>((static_cast<uint64_t>(ns) * hz) / 1'000'000'000ull);
+    static size_t bytesFor(nrOfLightsType lights, uint8_t channels) {
+        return static_cast<size_t>(lights) * channels;
     }
 
     // --- pin/count config (plain parsing; runs on every platform) ---
@@ -393,7 +413,7 @@ private:
         txLightCount_ = 0;
         for (uint8_t i = 0; i < pinCount_; i++) {
             pinOffsets_[i] = off;
-            off += static_cast<size_t>(pinCounts_[i]) * outCh * 8;
+            off += static_cast<size_t>(pinCounts_[i]) * outCh;
             txLightCount_ = static_cast<nrOfLightsType>(txLightCount_ + pinCounts_[i]);
         }
         clearConfigErr();
@@ -409,11 +429,11 @@ private:
         return true;
     }
 
-    // --- symbol buffer (plain heap; runs on every platform) ---
+    // --- corrected byte frame (plain heap; runs on every platform) ---
 
-    // (Re)allocate the symbol buffer for the current source + correction. Off the
+    // (Re)allocate the corrected frame for the current source + correction. Off the
     // hot path. Grows only — keeps a big-enough existing allocation.
-    void resizeSymbols() {
+    void resizeFrame() {
         if (!sourceBuffer_) return;
         // Size for the lights this driver actually CLOCKS OUT, not the whole window. The window (start,
         // count) can be far larger than the pins encode: `ledsPerPin` (or fewer pins than the window has
@@ -421,7 +441,7 @@ private:
         // encodes that many (n = min(txLightCount_, winLen_) there). Sizing to the window instead made an
         // 8×8 strip on one pin (ledsPerPin 64) inside a 70×82 grid (count=all, window 5740) try to alloc
         // ~550 KB of symbols for lights it never encodes — the alloc failed on a small-heap classic ESP32,
-        // symbols_ stayed null, and tick() bailed → the strip went dark even though only 64 lights were
+        // the frame stayed null, and tick() bailed → the strip went dark even though only 64 lights were
         // wanted. Bound to txLightCount_ so the buffer matches the real output. Fall back to the window
         // when no pins are parsed yet (txLightCount_ == 0), so the buffer is ready before pins are set.
         nrOfLightsType winStart, win;
@@ -430,29 +450,27 @@ private:
         if (n > win) n = win;               // never exceed the window's own light count
         const uint8_t ch = correction_.outChannels;
         if (n == 0 || ch == 0) return;
-        // Per-light correction scratch: grow to `ch` bytes when the channel count grows (off the hot
-        // path). Sized to outChannels so a >4-channel correction (RGBCCT, a fixture) can't overflow it.
-        ensureWire(ch);   // DriverBase owns the grow-only allocate/free
-        const size_t need = symbolsFor(n, ch);
-        if (symbols_ && symbolCap_ >= need) return;
-        freeSymbols();
-        symbols_ = static_cast<uint32_t*>(platform::alloc(need * sizeof(uint32_t)));
-        symbolCap_ = symbols_ ? need : 0;
-        publishHeapBytes();   // the symbol buffer grew — refresh the memory readout
+        const size_t need = bytesFor(n, ch);
+        if (frame_ && frameCap_ >= need) return;
+        freeFrame();
+        // Keep the DMA source in internal RAM even on boards with PSRAM. The byte frame is compact
+        // (lights * channels), unlike the former per-bit symbol expansion.
+        frame_ = static_cast<uint8_t*>(platform::allocInternal(need));
+        frameCap_ = frame_ ? need : 0;
+        publishHeapBytes();
     }
 
-    void freeSymbols() {
-        if (symbols_) { platform::free(symbols_); symbols_ = nullptr; symbolCap_ = 0; publishHeapBytes(); }
+    void freeFrame() {
+        if (frame_) { platform::free(frame_); frame_ = nullptr; frameCap_ = 0; publishHeapBytes(); }
     }
 
 protected:
     // Matches DriverBase's visibility — a private override would silently hide the hook from any
     // future caller holding a DriverBase*. ParallelLedDriver keeps it protected for the same reason.
-    /// This driver's heap = the base scratch + the RMT symbol buffer (one word per WS2812 data bit,
-    /// the driver's largest buffer). Summed for the per-module memory readout — see
+    /// This driver's heap = the base scratch + the corrected byte frame. Summed for the per-module memory readout — see
     /// DriverBase::driverHeapBytes.
     size_t driverHeapBytes() const override {
-        return DriverBase::driverHeapBytes() + static_cast<size_t>(symbolCap_) * sizeof(uint32_t);
+        return DriverBase::driverHeapBytes() + frameCap_;
     }
 
 private:
@@ -488,7 +506,11 @@ private:
         // channels first — this also guarantees the test's RX channel can always
         // allocate RMT memory, even with every TX channel otherwise claimed;
         // reinit() restores them after.
-        deinitAll();
+        if (!deinitAll()) {
+            clearFailBuf();
+            setStatus(kTransferBusyMsg, Severity::Error);
+            return;
+        }
         // TX override: when loopbackTxPin is set, transmit on it instead of the
         // first data pin, so the bench loopback runs on a dedicated jumper without
         // re-typing `pins`. Falls back to pins[0] when unset.
@@ -547,21 +569,32 @@ private:
     // --- RMT channels (hardware; RMT targets only) ---
 
     static constexpr const char* kInitFailMsg = "RMT init failed — check the pins";
+    static constexpr const char* kTransferBusyMsg = "RMT transfer still active";
 
     // All-or-nothing: a failing pin deinits everything and reports which pin,
     // so tick()'s guard stays a single bool and the user sees one clear error
     // instead of some strands dark, some lit.
     void reinit() {
         if constexpr (platform::rmtTxChannels == 0) return;
-        deinitAll();
+        if (!deinitAll()) {
+            clearFailBuf();
+            setStatus(kTransferBusyMsg, Severity::Error);
+            return;
+        }
+        initAll();
+    }
+
+    void initAll() {
+        if constexpr (platform::rmtTxChannels == 0) return;
         if (pinCount_ == 0) return;   // parse error — already in the status slot
         for (uint8_t i = 0; i < pinCount_; i++) {
             if (platform::rmtWs2812Init(rmt_[i], static_cast<uint8_t>(pinList_[i]),
-                                        kResolutionHz, cfg_.invert)) continue;
+                                        kResolutionHz, cfg_.invert,
+                                        {cfg_.t0h_ns, cfg_.t1h_ns, cfg_.period_ns})) continue;
             // Surface which pin failed instead of silently no-op'ing in tick() —
             // the status tells the user why output is dark (usually a bad pin),
             // rather than leaving them to wonder why nothing lights.
-            deinitAll();
+            (void)deinitAll();
             clearFailBuf();
             if (failBufEnsure()) {
                 std::snprintf(failBuf_, kFailBufLen, "RMT init failed on pin %u",
@@ -576,17 +609,35 @@ private:
         // A prior init failure recovered (e.g. a pin fixed) — drop the stale error.
         if (failBuf_ && status() == failBuf_) clearFailBuf();
         if (status() == kInitFailMsg) clearStatus();
+        if (status() == kTransferBusyMsg) clearStatus();
     }
 
-    // Releases only the RMT channels — NOT the symbol buffer (that's
-    // freeSymbols(), owned by release). reinit() calls this on every rebuild,
+    // Releases only the RMT channels — NOT the byte frame (that's
+    // freeFrame(), owned by release). reinit() calls this on every rebuild,
     // so freeing the buffer here would strand tick() — the original bug.
-    void deinitAll() {
-        if constexpr (platform::rmtTxChannels == 0) return;
-        for (uint8_t i = 0; i < kMaxPins; i++) {
-            if (rmt_[i].impl) platform::rmtWs2812Deinit(rmt_[i]);
+    bool deinitAll() {
+        bool complete = true;
+        if constexpr (platform::rmtTxChannels > 0) {
+            for (uint8_t i = 0; i < kMaxPins; i++) {
+                if (rmt_[i].impl && !platform::rmtWs2812Deinit(rmt_[i])) {
+                    complete = false;
+                    continue;
+                }
+                inFlight_[i] = false;
+            }
         }
         inited_ = false;
+        return complete;
+    }
+
+    bool waitForTransfers(uint32_t timeoutMs) {
+        bool complete = true;
+        for (uint8_t i = 0; i < kMaxPins; i++) {
+            if (!inFlight_[i]) continue;
+            if (platform::rmtWs2812Wait(rmt_[i], timeoutMs)) inFlight_[i] = false;
+            else complete = false;
+        }
+        return complete;
     }
 };
 

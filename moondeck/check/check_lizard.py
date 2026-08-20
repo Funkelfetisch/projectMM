@@ -57,7 +57,7 @@ def measure(extra=None):
     exists and hides all future growth. Baselining is this script's job, applied explicitly
     below. (Belt and braces — the baseline no longer sits at lizard's default path either.)
     """
-    cmd = ["uv", "run", "--with", "lizard", "python3", "-m", "lizard",
+    cmd = ["uv", "run", "--with", "lizard", "python", "-m", "lizard",
            *LIZARD_ARGS, "--csv", "-W", os.devnull, *(extra or [])]
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
     # lizard exits non-zero when warnings exist; that is data here, not a failure. A real
@@ -71,7 +71,8 @@ def measure(extra=None):
         try:
             out.append({"nloc": int(r[0]), "ccn": int(r[1]), "token": int(r[2]),
                         "param": int(r[3]), "length": int(r[4]),
-                        "file": r[6], "name": r[7], "start": int(r[9])})
+                        "file": r[6].replace("\\", "/"), "name": r[7],
+                        "start": int(r[9])})
         except ValueError:
             continue          # header or a malformed line
     if not out:

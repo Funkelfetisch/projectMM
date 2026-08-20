@@ -40,9 +40,7 @@ void HttpServerModule::defineControls() {
 
 void HttpServerModule::setup() {
     instance_ = this;
-    if (!server_.open(port)) {
-        std::printf("HTTP server failed to open port %u\n", port);
-    }
+    ensureListener();
     // Any module's rebuildControls() (a schema change: hidden flags / option sets, from a control
     // set, a list mutation, or an async WiFi/Hue callback) now flips the WS full-resync flag through
     // this static hook, so a metadata change the value-patch can't carry still reaches every client.
@@ -56,16 +54,57 @@ void HttpServerModule::onSchemaChanged() {
 }
 
 void HttpServerModule::release() {
-    // Drop any in-flight send before the clients go (frees an owned state-frame body; a preview frame
-    // borrows its buffer, nothing to free) — the same self-safe drop cancelBufferedSend() does.
-    cancelBufferedSend();
-    for (auto& ws : wsClients_) ws.close();
-    server_.close();
-    if (instance_ == this) { MoonModule::setSchemaChangedHook(nullptr); instance_ = nullptr; }
+    // PreviewDriver can own wsLock_ on the encode core while it arms a frame or streams coordinates.
+    // Stop that worker first; release is a cold lifecycle boundary, so after quiesce this try-lock is
+    // uncontended. Every previewSend_/client-table mutation then follows the same lock contract as
+    // upgrade, state push, polling, and drain.
+    MoonModule::notifyQuiesceRender();
+    // Release is a cold lifecycle boundary and must complete. A hot-path sender skips when this
+    // try-lock is busy; teardown yields until that already-quiesced sender drops its short lease.
+    for (;;) {
+        LockGuard lease{wsLock_};
+        if (!lease) { platform::yield(); continue; }
+        // Drop any in-flight borrowed preview send before the clients go.
+        cancelBufferedSend();
+        for (auto& ws : wsClients_) ws.close();
+        server_.close();
+        listeningPort_ = 0;
+        listenerFailureReported_ = false;
+        nextListenerAttemptMs_ = 0;
+        if (instance_ == this) { MoonModule::setSchemaChangedHook(nullptr); instance_ = nullptr; }
+        break;
+    }
     MoonModule::release();   // chain: uniform override-and-chain (no buffers/children today, but the convention holds)
 }
 
+void HttpServerModule::ensureListener() {
+    if (server_.valid() && listeningPort_ == port) return;
+    if (server_.valid()) {
+        server_.close();
+        nextListenerAttemptMs_ = 0;
+    }
+    const uint32_t now = platform::millis();
+    if (nextListenerAttemptMs_ != 0 &&
+        static_cast<int32_t>(now - nextListenerAttemptMs_) < 0) return;
+    if (server_.open(port)) {
+        listeningPort_ = port;
+        nextListenerAttemptMs_ = 0;
+        if (listenerFailureReported_) {
+            std::printf("HTTP server recovered on port %u\n", port);
+            listenerFailureReported_ = false;
+        }
+        return;
+    }
+    listeningPort_ = 0;
+    nextListenerAttemptMs_ = now + 1000;
+    if (!listenerFailureReported_) {
+        std::printf("HTTP server failed to open port %u; retrying\n", port);
+        listenerFailureReported_ = true;
+    }
+}
+
 void HttpServerModule::tick20ms() MM_NONBLOCKING {
+    ensureListener();
     // Drain the in-flight resumable preview frame on the TRANSPORT-poll cadence (20 ms), NOT the
     // per-render-tick tick(): pushing frame bytes to the socket must not be charged to the LED
     // render hot path. The render tick stays free of preview work; the preview frame rate is
@@ -242,9 +281,17 @@ void HttpServerModule::handleConnection(platform::TcpConnection& conn) {
         else if (std::strcmp(path, "/install-picker.js") == 0) serveFile(conn, "install-picker.js", "application/javascript");
         else if (std::strcmp(path, "/semver.js") == 0) serveFile(conn, "semver.js", "application/javascript");
         else if (std::strcmp(path, "/preview3d.js") == 0) serveFile(conn, "preview3d.js", "application/javascript");
+        else if (std::strcmp(path, "/heliotrace.js") == 0) serveFile(conn, "heliotrace.js", "application/javascript");
+        else if (std::strcmp(path, "/helio-preview.js") == 0) serveFile(conn, "helio-preview.js", "application/javascript");
+        else if (std::strcmp(path, "/helio-scenes.js") == 0) serveFile(conn, "helio-scenes.js", "application/javascript");
+        else if (std::strcmp(path, "/helio-orchestration.js") == 0) serveFile(conn, "helio-orchestration.js", "application/javascript");
         else if (std::strcmp(path, "/style.css") == 0) serveFile(conn, "style.css", "text/css");
         else if (std::strcmp(path, "/moonlight-logo.png") == 0) serveFile(conn, "moonlight-logo.png", "image/png");
-        else if (std::strcmp(path, "/api/state") == 0) serveState(conn);
+        else if (std::strcmp(path, "/helio-favicon.svg") == 0) serveFile(conn, "helio-favicon.svg", "image/svg+xml");
+        else if (std::strcmp(path, "/api/state") == 0) {
+            const bool compact = queryStart && std::strstr(queryStart + 1, "compact=1");
+            serveState(conn, !compact);
+        }
         else if (std::strcmp(path, "/api/system") == 0) serveSystem(conn);
         else if (std::strcmp(path, "/api/types") == 0) serveTypes(conn);
         // File Manager: GET /api/dir?path=<rel>[&hidden=1] → one directory's children as JSON
@@ -458,11 +505,10 @@ static constexpr size_t kUploadMax = 256 * 1024;   // 256 KB — sanity bound on
 // Returns false on a missing/empty path or a ".." traversal attempt.
 //
 // Deliberately NOT a `.config`/dotfile denylist (PO decision): the File Manager is a device-admin
-// tool on a trusted LAN, and reading the persisted `.config/*.json` is a feature (inspect/back up
-// the device's own config), not a leak — there are no third-party secrets on the device, and the
-// WiFi password is XOR-obfuscated in what it writes. The weak-protection is `show hidden` defaulting
-// off (FileManagerModule), so `.config` isn't shown unless the operator asks. Reviewers periodically
-// flag this as a secrets-exposure — it's an accepted design, not an oversight; leave it.
+// tool on a trusted LAN, and reading persisted `.config/*.json` supports inspection and backup.
+// Those files contain real device credentials; public module state redacts them, the filesystem
+// endpoint does not. `show hidden` defaults off for accident prevention, not authentication. Treat
+// File Manager access as administrator access and never expose this server to an untrusted network.
 bool HttpServerModule::parseFilePath(const char* query, char* out, size_t cap) {
     const char* p = query ? std::strstr(query, "path=") : nullptr;
     if (!p) return false;
@@ -805,8 +851,13 @@ void HttpServerModule::serveFile(platform::TcpConnection& conn, const char* file
     else if (std::strcmp(filename, "install-picker.js") == 0) { data = ui::installPickerJs; dataLen = ui::installPickerJsLen; gzipped = true; }
     else if (std::strcmp(filename, "semver.js") == 0) { data = ui::semverJs; dataLen = ui::semverJsLen; gzipped = true; }
     else if (std::strcmp(filename, "preview3d.js") == 0) { data = ui::preview3dJs; dataLen = ui::preview3dJsLen; gzipped = true; }
+    else if (std::strcmp(filename, "heliotrace.js") == 0) { data = ui::helioTraceJs; dataLen = ui::helioTraceJsLen; gzipped = true; }
+    else if (std::strcmp(filename, "helio-preview.js") == 0) { data = ui::helioPreviewJs; dataLen = ui::helioPreviewJsLen; gzipped = true; }
+    else if (std::strcmp(filename, "helio-scenes.js") == 0) { data = ui::helioScenesJs; dataLen = ui::helioScenesJsLen; gzipped = true; }
+    else if (std::strcmp(filename, "helio-orchestration.js") == 0) { data = ui::helioOrchestrationJs; dataLen = ui::helioOrchestrationJsLen; gzipped = true; }
     else if (std::strcmp(filename, "style.css") == 0) { data = ui::styleCss; dataLen = ui::styleCssLen; gzipped = true; }
     else if (std::strcmp(filename, "moonlight-logo.png") == 0) { data = ui::logoPng; dataLen = ui::logoPngLen; }
+    else if (std::strcmp(filename, "helio-favicon.svg") == 0) { data = ui::helioFaviconSvg; dataLen = ui::helioFaviconSvgLen; }
 
     if (!data) {
         sendResponse(conn, 404, "text/plain", "File not found");
@@ -828,22 +879,30 @@ void HttpServerModule::serveFile(platform::TcpConnection& conn, const char* file
     conn.write(data, dataLen);
 }
 
-void HttpServerModule::serveState(platform::TcpConnection& conn) {
+void HttpServerModule::serveState(platform::TcpConnection& conn, bool includeMetadata) {
     const char* header =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
         "Connection: close\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "\r\n";
-    conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header));
+    if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) {
+        resyncNoticeSent_ = false;
+        return;
+    }
 
     JsonSink sink(conn);
-    buildStateJson(sink);
+    buildStateJson(sink, includeMetadata);
     sink.flush();
+    if (!sink.failed()) {
+        baselineLeafHashes();
+        fullResyncPending_ = false;
+        resyncNoticeSent_ = false;
+    } else resyncNoticeSent_ = false;
 }
 
-void HttpServerModule::buildStateJson(JsonSink& sink) {
-    sink.append("{\"modules\":[");
+void HttpServerModule::buildStateJson(JsonSink& sink, bool includeMetadata) {
+    sink.append(includeMetadata ? "{\"modules\":[" : "{\"compact\":true,\"modules\":[");
 
     if (scheduler_) {
         bool first = true;
@@ -855,7 +914,7 @@ void HttpServerModule::buildStateJson(JsonSink& sink) {
             if (!mod || !mod->appearsInUi()) continue;
             if (!first) sink.append(",");
             first = false;
-            writeModuleJson(sink, mod);
+            writeModuleJson(sink, mod, includeMetadata);
         }
     }
 
@@ -934,7 +993,8 @@ void HttpServerModule::visitModuleLeaves(MoonModule* mod, Fn&& fn) {
     for (uint8_t i = 0; i < ctrls.count(); i++) {
         auto& c = ctrls[i];
         std::snprintf(path, sizeof(path), "%s/%s", mod->name(), c.name);
-        JsonSink vs; writeControlValue(vs, c);
+        JsonSink vs;
+        writeControlValue(vs, c, ControlValueVisibility::Public);
         fn(fnv1a(path, std::strlen(path)), fnv1a(vs.data(), vs.size()), path, vs);
     }
     // `fn`, not `std::forward<Fn>(fn)` — same reason as the caller above: forwarding inside a
@@ -989,30 +1049,39 @@ uint16_t HttpServerModule::buildStatePatch(JsonSink& sink) {
     return changed;
 }
 
-void HttpServerModule::writeModuleJson(JsonSink& sink, MoonModule* mod) {
+void HttpServerModule::writeModuleJson(JsonSink& sink, MoonModule* mod, bool includeMetadata) {
     // Per-module header: name, role, enabled, tickTimeUs (fps/ms display),
     // classSize (static C++ object bytes) + dynamicBytes (heap), controls
-    const char* roleStr = roleName(mod->role());
-    const char* type = mod->typeName();
-    if (!type) type = "";
-    sink.appendf(
-        "{\"name\":\"%s\",\"type\":\"%s\",\"role\":\"%s\",\"enabled\":%s,"
-        "\"tickTimeUs\":%u,\"classSize\":%u,\"dynamicBytes\":%u",
-        mod->name() ? mod->name() : "",
-        type,
-        roleStr,
-        mod->enabled() ? "true" : "false",
-        static_cast<unsigned>(mod->tickTimeUs()),
-        static_cast<unsigned>(mod->classSize()),
-        static_cast<unsigned>(mod->dynamicBytes()));
+    if (includeMetadata) {
+        const char* roleStr = roleName(mod->role());
+        const char* type = mod->typeName();
+        if (!type) type = "";
+        sink.appendf(
+            "{\"name\":\"%s\",\"type\":\"%s\",\"role\":\"%s\",\"enabled\":%s,"
+            "\"tickTimeUs\":%u,\"classSize\":%u,\"dynamicBytes\":%u",
+            mod->name() ? mod->name() : "",
+            type,
+            roleStr,
+            mod->enabled() ? "true" : "false",
+            static_cast<unsigned>(mod->tickTimeUs()),
+            static_cast<unsigned>(mod->classSize()),
+            static_cast<unsigned>(mod->dynamicBytes()));
+    } else {
+        sink.appendf(
+            "{\"name\":\"%s\",\"enabled\":%s,\"tickTimeUs\":%u,\"dynamicBytes\":%u",
+            mod->name() ? mod->name() : "",
+            mod->enabled() ? "true" : "false",
+            static_cast<unsigned>(mod->tickTimeUs()),
+            static_cast<unsigned>(mod->dynamicBytes()));
+    }
     writeStatus(sink, mod);
     // userEditable: omit when true (the common case) to save bytes — the UI
     // treats absent as editable, same convention as the control hidden/readonly
     // flags. Emitted only for modules that opt out (e.g. PreviewDriver), so the
     // UI hides their delete/replace affordance.
-    if (!mod->userEditable()) sink.append(",\"userEditable\":false");
+    if (includeMetadata && !mod->userEditable()) sink.append(",\"userEditable\":false");
     sink.append(",\"controls\":[");
-    writeControls(sink, mod);
+    writeControls(sink, mod, includeMetadata);
     sink.append("]");
 
     // Children
@@ -1021,7 +1090,7 @@ void HttpServerModule::writeModuleJson(JsonSink& sink, MoonModule* mod) {
         sink.append(",\"children\":[");
         for (uint8_t i = 0; i < cc; i++) {
             if (i > 0) sink.append(",");
-            writeModuleJson(sink, mod->child(i));
+            writeModuleJson(sink, mod->child(i), includeMetadata);
         }
         sink.append("]");
     }
@@ -1045,7 +1114,7 @@ void HttpServerModule::writeStatus(JsonSink& sink, MoonModule* mod) {
     sink.appendf(",\"severity\":\"%s\"", sevStr[static_cast<int>(mod->severity())]);
 }
 
-void HttpServerModule::writeControls(JsonSink& sink, MoonModule* mod) {
+void HttpServerModule::writeControls(JsonSink& sink, MoonModule* mod, bool includeMetadata) {
     auto& ctrls = mod->controls();
     for (uint8_t i = 0; i < ctrls.count(); i++) {
         if (i > 0) sink.append(",");
@@ -1053,45 +1122,31 @@ void HttpServerModule::writeControls(JsonSink& sink, MoonModule* mod) {
         // Common wrapper for every control: {"name":...,"type":...,"value":VALUE,EXTRAS,"hidden":?}
         // Per-type VALUE + EXTRAS rendering lives in Control.cpp so the
         // wire format isn't duplicated across HttpServer/FS/scenario.
-        // Password is the one exception — its API serialization XOR-obfuscates +
-        // base64-encodes (writeControlValue emits plaintext, which is what
-        // FilesystemModule's writeValue wants); handle it here in-line so
-        // writeControlValue stays sink-neutral.
-        sink.appendf("{\"name\":\"%s\",\"type\":\"%s\",\"value\":",
-                     c.name, controlTypeName(c.type));
-        if (c.type == ControlType::Password) {
-            // The password is sent XOR-obfuscated + base64-encoded, NOT
-            // in plaintext. This is deliberate obfuscation, not security:
-            // the XOR key is a fixed shared constant (also in app.js), so
-            // anyone can reverse it. It is a first line of defence — the
-            // value is not readable at a glance in `curl /api/state` — and
-            // it lets the UI's hold-to-peek reveal the stored password.
-            const char* pw = static_cast<char*>(c.ptr);
-            uint8_t scrambled[64];
-            size_t pwLen = std::strlen(pw);
-            if (pwLen > sizeof(scrambled)) pwLen = sizeof(scrambled);
-            for (size_t k = 0; k < pwLen; k++) {
-                scrambled[k] = static_cast<uint8_t>(pw[k]) ^ PASSWORD_XOR_KEY;
-            }
-            char encoded[96];
-            base64Encode(std::span(scrambled).first(pwLen), std::span(encoded));
-            sink.appendf("\"%s\"", encoded);
+        if (includeMetadata) {
+            sink.appendf("{\"name\":\"%s\",\"type\":\"%s\",\"value\":",
+                         c.name, controlTypeName(c.type));
         } else {
-            writeControlValue(sink, c);
+            sink.appendf("{\"name\":\"%s\",\"value\":", c.name);
         }
-        writeControlMetadata(sink, c);
+        writeControlValue(sink, c, ControlValueVisibility::Public);
+        if (includeMetadata) {
+            writeControlMetadata(sink, c);
+        } else if (c.type == ControlType::Progress) {
+            sink.appendf(",\"total\":%lu,\"bytes\":%s", static_cast<unsigned long>(c.aux),
+                         c.min ? "true" : "false");
+        }
         // Emit optional flags only when set (common case is false; omit to save bytes).
         if (c.readonly) sink.append(",\"readonly\":true");
-        if (c.advanced) sink.append(",\"advanced\":true");   // UI shows it only in expert mode
-        if (c.numberField) sink.append(",\"numberField\":true");   // render a plain number input, not a slider
+        if (includeMetadata && c.advanced) sink.append(",\"advanced\":true");   // UI shows it only in expert mode
+        if (includeMetadata && c.numberField) sink.append(",\"numberField\":true");   // render a plain number input, not a slider
         // An editable List (the CRUD primitive) tells the UI to show add/delete/reorder + inline
         // row editors; a plain List stays read-only. The row objects carry a stable "id" the
         // /api/list/* ops address, and each editable row's detail carries its field descriptors.
-        if (c.fader || c.encoder) {
+        if (includeMetadata && (c.fader || c.encoder)) {
             sink.append(c.fader ? ",\"fader\":true" : ",\"encoder\":true");
             if (c.faderTarget) { sink.append(",\"target\":"); sink.writeJsonString(c.faderTarget); }
         }
-        if (c.type == ControlType::List) {
+        if (includeMetadata && c.type == ControlType::List) {
             const auto* ls = static_cast<const ListSource*>(c.ptr);
             if (ls && ls->isEditableList()) sink.append(",\"editable\":true");
             if (ls && ls->listAsPads()) {
@@ -1183,7 +1238,7 @@ void HttpServerModule::serveSystem(platform::TcpConnection& conn) {
     // variant reports ~8 MB on PSRAM boards and is meaningless as a
     // pressure signal. Same rationale as main.cpp's tick log line.
     sink.appendf(
-        "{\"fps\":%u,\"tickTimeUs\":%u,\"freeHeap\":%u,\"freeInternal\":%u,\"maxBlock\":%u,\"uptime\":%u,\"modules\":[",
+        "{\"ui\":\"20260820a\",\"fps\":%u,\"tickTimeUs\":%u,\"freeHeap\":%u,\"freeInternal\":%u,\"maxBlock\":%u,\"uptime\":%u,\"modules\":[",
         static_cast<unsigned>(scheduler_ ? scheduler_->fps() : 0),
         static_cast<unsigned>(scheduler_ ? scheduler_->tickTimeUs() : 0),
         static_cast<unsigned>(platform::freeHeap()),
@@ -1936,7 +1991,23 @@ void HttpServerModule::handleReplaceModule(platform::TcpConnection& conn, const 
     parent->markDirty();
     FilesystemModule::noteDirty();
 
-    sendResponse(conn, 200, "application/json", "{\"ok\":true}");
+    // Return the replacement resource itself. A structural mutation already has the complete fresh
+    // module in hand, so making the browser fetch the entire module tree merely to learn this one
+    // subtree adds latency and serialisation work. This is the conventional REST mutation-response
+    // shape: the client can splice `module` into its local tree immediately while other clients still
+    // receive the normal resync notice.
+    const char* header =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "\r\n";
+    if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) return;
+    JsonSink sink(conn);
+    sink.append("{\"ok\":true,\"module\":");
+    writeModuleJson(sink, fresh, true);
+    sink.append("}");
+    sink.flush();
 }
 
 void HttpServerModule::serveTypes(platform::TcpConnection& conn) {
@@ -2092,9 +2163,9 @@ ListSource* HttpServerModule::resolveEditableList(platform::TcpConnection& conn,
     return nullptr;
 }
 
-// After a list mutation: persist the owning module's storage and re-run the tree so a consumer
-// (a driver referencing a preset by id) picks up the change on the next prepare. Mirrors the
-// add/delete/move module handlers' dirty + prepareTree tail.
+// After a list mutation: persist the owning module's storage and refresh every dependent control
+// and correction before the next output frame. Each caller has already parked the render worker at
+// the frame boundary, so none of these rebuilds can race a driver reading the old list storage.
 void HttpServerModule::afterListMutation() {
     // Mark the owning module dirty so its subtree is actually written — noteDirty() alone only sets
     // the debounce flag; the flush loop skips a subtree whose module isn't dirty (subtreeDirty). This
@@ -2130,6 +2201,7 @@ void HttpServerModule::handleListAddRow(platform::TcpConnection& conn, const cha
     ListSource* src = resolveEditableList(conn, tail, id, hasId);
     if (!src) return;   // response already sent
     uint32_t newId = 0;
+    MoonModule::notifyQuiesceRender();
     if (!src->addListRow(newId)) {
         sendResponse(conn, 409, "application/json", "{\"error\":\"list full or add refused\"}");
         return;
@@ -2151,7 +2223,12 @@ void HttpServerModule::handleListPatchRow(platform::TcpConnection& conn, const c
         // Bound before the uint8_t cast: a value > 255 would wrap (300 → 44) into a valid-looking
         // but wrong target index. Reject anything outside 0..255 up front; moveListRow validates the
         // remaining range against the actual row count.
-        if (to < 0 || to > 255 || !src->moveListRow(id, static_cast<uint8_t>(to))) {
+        if (to < 0 || to > 255) {
+            sendResponse(conn, 400, "application/json", "{\"error\":\"move failed\"}");
+            return;
+        }
+        MoonModule::notifyQuiesceRender();
+        if (!src->moveListRow(id, static_cast<uint8_t>(to))) {
             sendResponse(conn, 400, "application/json", "{\"error\":\"move failed\"}");
             return;
         }
@@ -2159,6 +2236,7 @@ void HttpServerModule::handleListPatchRow(platform::TcpConnection& conn, const c
         char field[32] = {};
         mm::json::parseString(jsonBody, "field", field, sizeof(field));
         if (!field[0]) { sendResponse(conn, 400, "application/json", "{\"error\":\"field required\"}"); return; }
+        MoonModule::notifyQuiesceRender();
         if (!src->setListRowField(id, field, jsonBody)) {
             sendResponse(conn, 400, "application/json", "{\"error\":\"field edit failed\"}");
             return;
@@ -2173,6 +2251,7 @@ void HttpServerModule::handleListDeleteRow(platform::TcpConnection& conn, const 
     ListSource* src = resolveEditableList(conn, tail, id, hasId);
     if (!src) return;
     if (!hasId) { sendResponse(conn, 400, "application/json", "{\"error\":\"row id required\"}"); return; }
+    MoonModule::notifyQuiesceRender();
     if (!src->deleteListRow(id)) {
         sendResponse(conn, 400, "application/json", "{\"error\":\"delete failed (bad id or protected)\"}");
         return;
@@ -2267,6 +2346,14 @@ void HttpServerModule::handleWebSocketUpgrade(platform::TcpConnection& conn, con
     char acceptKey[32];
     base64Encode(std::span<const uint8_t>(sha1Hash), std::span(acceptKey));
 
+    // The preview producer can run on the other core, so the client table and
+    // resumable-send cursors change only while holding the shared sender lease.
+    LockGuard lease{wsLock_};
+    if (!lease) {
+        conn.close();
+        return;
+    }
+
     // Send 101 response
     char response[256];
     int respLen = std::snprintf(response, sizeof(response),
@@ -2303,6 +2390,9 @@ void HttpServerModule::handleWebSocketUpgrade(platform::TcpConnection& conn, con
 }
 
 void HttpServerModule::pushStateToWebSockets() {
+    LockGuard lease{wsLock_};
+    if (!lease) return;
+
     bool hasClients = false;
     for (auto& ws : wsClients_) {
         if (ws.valid()) { hasClients = true; break; }
@@ -2310,32 +2400,23 @@ void HttpServerModule::pushStateToWebSockets() {
     if (!hasClients) return;
 
     if (fullResyncPending_) {
-        // FULL STATE — sent on connect and after a structural change (a value patch can't describe a
-        // reshaped tree). It's the one large frame (~30 KB), so route it through the resumable sender
-        // to drain in chunks on tick20ms, NOT a blocking write on the render tick. buildStateJson
-        // serialises the WHOLE tree — the expensive path — but only when fullResyncPending_, not every
-        // second.
-        // The shared send slot may hold an in-flight frame. A borrowed PREVIEW frame is a *view* — the
-        // full state is what makes a freshly-connected client usable at all, so the resync PREEMPTS a
-        // preview (otherwise continuous preview from another client could keep the new client blank;
-        // preview resumes on its next frame). An OWNED frame in flight is ITSELF a state drain from a
-        // prior push that hasn't finished — don't stomp it; let it complete and skip this push (the
-        // slot is single-occupancy, and a half-then-half state is worse than one whole one arriving a
-        // tick later). fullResyncPending_ stays TRUE until startBufferedTextSend actually accepts the
-        // new payload, so a rejected/failed start retries next tick rather than dropping the resync.
-        if (!bufferedSendIdle()) {
-            if (previewSend_.ownsBody) return;   // a state drain is already in flight — let it finish
-            cancelBufferedSend();                // preempt a borrowed preview
+        // A full state is too large to assemble contiguously on no-PSRAM boards. Send one tiny notice;
+        // each browser fetches /api/state, whose JsonSink streams straight to the socket. Keep patches
+        // paused until a successful REST response establishes the new shared baseline.
+        if (resyncNoticeSent_) return;
+        if (!bufferedSendIdle()) cancelBufferedSend();
+        static constexpr char kResync[] = "{\"resync\":true}";
+        bool sent = false;
+        for (auto& ws : wsClients_) {
+            if (!ws.valid()) continue;
+            if (sendWsTextFrame(ws, kResync, static_cast<int>(sizeof(kResync) - 1))) sent = true;
+            else ws.close();
         }
-        JsonSink sink;
-        buildStateJson(sink);
-        const size_t len = sink.size();
-        char* owned = sink.detach();   // move ownership to the sender (frees on drain-complete)
-        if (owned && startBufferedTextSend(owned, len)) {
-            baselineLeafHashes();       // the full state IS the new baseline — next tick patches from here
-            fullResyncPending_ = false;   // cleared only on a confirmed accept; a failed start retries
-        }
+        resyncNoticeSent_ = sent;
+        return;
     } else {
+        // A text frame cannot be inserted into the middle of a resumable binary preview message.
+        if (!bufferedSendIdle()) return;
         // PATCH — the steady-state path. buildStatePatch walks the tree, value-hashes each leaf, and
         // emits ONLY the ones whose value changed since the last push (typically a handful of telemetry
         // leaves, ~1–2 KB). This is the whole fix: the 30 KB of unchanging option/detail metadata is
@@ -2343,6 +2424,7 @@ void HttpServerModule::pushStateToWebSockets() {
         // small, so it sends inline (no resumable drain) — a non-blocking per-client write of ~2 KB.
         JsonSink sink;
         const uint16_t changed = buildStatePatch(sink);
+        if (sink.failed()) { requestFullResync(); return; }
         if (changed > 0) {
             for (auto& ws : wsClients_) {
                 if (!ws.valid()) continue;
@@ -2392,6 +2474,9 @@ void HttpServerModule::pushWledStateToWebSockets() {
 // small text frame we care about is handled; we ignore continuation/binary/control frames
 // (a ping/close is rare on this short-lived control socket and harmless to skip).
 void HttpServerModule::pollWledStateFromWebSockets() {
+    LockGuard lease{wsLock_};
+    if (!lease) return;
+
     for (auto& ws : wsClients_) {
         if (!ws.valid()) continue;
         uint8_t f[512];
@@ -2559,7 +2644,6 @@ bool HttpServerModule::sendBufferedFrame(const uint8_t* header, size_t headerLen
     previewSend_.hdrLen = wsLen + headerLen;
     previewSend_.body = body;
     previewSend_.bodyLen = bodyLen;
-    previewSend_.ownsBody = false;   // preview borrows its pixel buffer (kept alive by PreviewDriver)
     for (int i = 0; i < MAX_WS_CLIENTS; i++) previewSend_.sent[i] = 0;
     previewSend_.active = true;
     // Deliberately do NOT drain here. sendBufferedFrame is called from PreviewDriver's tick() on the
@@ -2568,22 +2652,6 @@ bool HttpServerModule::sendBufferedFrame(const uint8_t* header, size_t headerLen
     // header, point at the body) and let drainPreviewSend() push bytes purely on tick20ms, off the
     // render hot path. The frame starts draining within one transport poll (≤20 ms).
     return true;
-}
-
-// Queue a TEXT frame whose body this module OWNS, through the same resumable slot. Used by the state
-// push so the 20 KB JSON drains in chunks on tick20ms rather than a blocking write on the render tick.
-bool HttpServerModule::startBufferedTextSend(char* ownedBody, size_t bodyLen) {
-    // A send already in flight: drop this one and free its buffer — the next second's state is fresher.
-    if (previewSend_.active) { platform::free(ownedBody); return false; }
-    // No app header for the state frame (the JSON is the whole payload), just the WS text header.
-    const size_t wsLen = writeWsFrameHeader(previewSend_.hdr, 0x81, bodyLen);
-    previewSend_.hdrLen = wsLen;
-    previewSend_.body = reinterpret_cast<const uint8_t*>(ownedBody);
-    previewSend_.bodyLen = bodyLen;
-    previewSend_.ownsBody = true;    // we allocated this JSON buffer; the drain frees it when done
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) previewSend_.sent[i] = 0;
-    previewSend_.active = true;
-    return true;   // drained on tick20ms, same as preview — never a blocking write on the render tick
 }
 
 // Per-client cursor over the logical [hdr ++ body] stream: write whatever the socket takes now (up
@@ -2625,14 +2693,7 @@ void HttpServerModule::drainPreviewSend() {
         if (ws.valid() && cur < total) allDone = false;
     }
     // Done when every live client finished, or no client remains to send to.
-    if (!anyLiveClient || allDone) {
-        if (previewSend_.ownsBody) {   // free the state JSON buffer we allocated for this frame
-            platform::free(const_cast<uint8_t*>(previewSend_.body));
-            previewSend_.body = nullptr;
-            previewSend_.ownsBody = false;
-        }
-        previewSend_.active = false;
-    }
+    if (!anyLiveClient || allDone) previewSend_.active = false;
 }
 
 // Per-tick per-client chunk cap, derived from free contiguous memory: a tight board takes small

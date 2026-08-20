@@ -156,7 +156,7 @@ set(UI_DIR ${COMPONENT_DIR}/../../src/ui)
 add_custom_command(
     OUTPUT ${UI_DIR}/ui_embedded.h
     COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DOUT=${UI_DIR}/ui_embedded.h -DPYTHON_CMD=${Python3_EXECUTABLE} -P ${UI_DIR}/embed_ui.cmake
-    DEPENDS ${UI_DIR}/index.html ${UI_DIR}/app.js ${UI_DIR}/style.css ${UI_DIR}/install-picker.js ${UI_DIR}/semver.js ${UI_DIR}/preview3d.js ${UI_DIR}/heliotrace.js ${UI_DIR}/moonlight-logo.png ${UI_DIR}/embed_ui.cmake
+    DEPENDS ${UI_DIR}/index.html ${UI_DIR}/app.js ${UI_DIR}/style.css ${UI_DIR}/install-picker.js ${UI_DIR}/semver.js ${UI_DIR}/preview3d.js ${UI_DIR}/heliotrace.js ${UI_DIR}/helio-preview.js ${UI_DIR}/helio-scenes.js ${UI_DIR}/helio-orchestration.js ${UI_DIR}/moonlight-logo.png ${UI_DIR}/helio-favicon.svg ${UI_DIR}/embed_ui.cmake
     COMMENT "Embedding UI files"
 )
 add_custom_target(ui_embed DEPENDS ${UI_DIR}/ui_embedded.h)

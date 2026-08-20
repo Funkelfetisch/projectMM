@@ -155,11 +155,12 @@
         }
       },
       {
-        "type": "SingleRowLayout",
-        "id": "HELIO Strip",
+        "type": "RingLayout",
+        "id": "HELIO Circle",
         "parent_id": "Layouts",
         "controls": {
-          "width": 311
+          "nrOfLEDs": 222,
+          "radius": 24
         }
       },
       {
@@ -168,8 +169,8 @@
         "parent_id": "Effects"
       },
       {
-        "type": "AudioSpectrumEffect",
-        "id": "Audio Spectrum",
+        "type": "HelioRippleEffect",
+        "id": "HELIO Ripple",
         "parent_id": "Layer"
       },
       {
@@ -185,8 +186,9 @@
         "parent_id": "Drivers",
         "controls": {
           "pins": "35",
-          "ledsPerPin": "311",
-          "presetRef": "GRBW"
+          "ledsPerPin": "222",
+          "presetRef": "GRBW",
+          "whiteMode": 2
         }
       },
       {
@@ -194,9 +196,28 @@
         "id": "Audio",
         "parent_id": "Services",
         "controls": {
+          "mode": 0,
           "sckPin": 40,
           "wsPin": 38,
-          "sdPin": 39
+          "sdPin": 39,
+          "mclkPin": -1,
+          "sampleRate": 2,
+          "floor": 75,
+          "gain": 1,
+          "send audio": false,
+          "simulate": 0,
+          "syncPort": 11988
+        }
+      },
+      {
+        "type": "Bh1750Service",
+        "id": "Ambient Light",
+        "parent_id": "Services",
+        "controls": {
+          "bus": 1,
+          "sda": 26,
+          "scl": 11,
+          "address": 35
         }
       }
     ]

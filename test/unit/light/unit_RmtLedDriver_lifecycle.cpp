@@ -9,16 +9,25 @@
 #include "unit/core/conditional_controls.h"  // shared conditional-control helpers
 
 #include <cstring>  // std::strcpy (writing the pins text control directly)
+#include <atomic>
+#include <chrono>
+#include <thread>
 
-// These tests pin the symbol-buffer LIFECYCLE — the exact class of bug that
-// reached hardware: a review fix made deinit() free symbols_, and because
+using namespace std::chrono_literals;
+
+// These tests pin the corrected-frame LIFECYCLE — the exact class of bug that
+// reached hardware: a review fix made deinit() free the frame, and because
 // reinit() calls deinit(), every rebuild freed the buffer tick() needs, so the
 // driver silently stopped transmitting. None of that touches the RMT peripheral
 // (ESP32-only); it's pure host-testable buffer ownership, which is why a unit
-// test is the right guard. The symbolBuffer()/symbolCapacity() accessors are
+// test is the right guard. The frameBuffer()/frameCapacity() accessors are
 // test-only (mirror ArtNet's correctedBuffer()).
 
 namespace {
+
+struct RmtWaitGuard {
+    ~RmtWaitGuard() { mm::platform::setTestRmtWaitComplete(true); }
+};
 
 // Wire a driver up to a source buffer + correction the way the Drivers container
 // does, then run applyState (the sizing hook). Returns nothing; the caller
@@ -35,15 +44,15 @@ void wire(mm::RmtLedDriver& d, mm::Buffer& src, mm::Correction& corr,
 
 } // namespace
 
-TEST_CASE("RmtLedDriver sizes the symbol buffer in prepare") {
+TEST_CASE("RmtLedDriver sizes the byte frame in prepare") {
     mm::RmtLedDriver d;
     mm::Buffer src;
     mm::Correction corr;
     wire(d, src, corr, 64);
 
-    // 64 lights × 3 channels × 8 bits = 1536 symbols.
-    REQUIRE(d.symbolBuffer() != nullptr);
-    CHECK(d.symbolCapacity() >= static_cast<size_t>(64) * 3 * 8);
+    // 64 lights × 3 channels = 192 corrected wire bytes.
+    REQUIRE(d.frameBuffer() != nullptr);
+    CHECK(d.frameCapacity() >= static_cast<size_t>(64) * 3);
 }
 
 // The resting status is "driving N of M lights" after a build, shown by DEFAULT (the way MoonLed does) —
@@ -70,12 +79,12 @@ TEST_CASE("RmtLedDriver shows 'driving N of M' as the resting status after a bui
     CHECK(std::strstr(d.status(), "driving 64 of 256") != nullptr);
 }
 
-// The symbol buffer sizes to what the pins CLOCK OUT (txLightCount_), NOT the window. A small strip on
+// The byte frame sizes to what the pins CLOCK OUT (txLightCount_), NOT the window. A small strip on
 // one pin (ledsPerPin 64) inside a huge grid (window = all 5740 lights) must reserve symbols for 64, not
 // 5740 — else it tries to alloc ~550 KB it never encodes, the alloc fails on a small-heap board, and the
 // strip goes dark even though only 64 lights were wanted (the bug this pins; ParallelLedDriver already
 // sizes its frame to the driven count, RmtLed did not). ledsPerPin caps the pin; tick() only encodes 64.
-TEST_CASE("RmtLedDriver sizes symbols to the driven lights, not the whole window") {
+TEST_CASE("RmtLedDriver sizes bytes to the driven lights, not the whole window") {
     mm::RmtLedDriver d;
     mm::Buffer src;
     mm::Correction corr;
@@ -83,72 +92,122 @@ TEST_CASE("RmtLedDriver sizes symbols to the driven lights, not the whole window
     std::strcpy(d.ledsPerPin, "64");    // one pin, 64 lights — the physical 8×8 strip
     wire(d, src, corr, 5740);           // but a 70×82 grid in the buffer (count defaults to all)
 
-    REQUIRE(d.symbolBuffer() != nullptr);                          // allocated (64 lights fits easily)
-    CHECK(d.symbolCapacity() >= static_cast<size_t>(64) * 3 * 8);  // holds the 64 it encodes
+    REQUIRE(d.frameBuffer() != nullptr);                       // allocated (64 lights fits easily)
+    CHECK(d.frameCapacity() >= static_cast<size_t>(64) * 3);   // holds the 64 it corrects
     // The window is 5740, but the buffer must NOT be sized for it (that was the ~550 KB over-alloc).
-    CHECK(d.symbolCapacity() < static_cast<size_t>(5740) * 3 * 8);
+    CHECK(d.frameCapacity() < static_cast<size_t>(5740) * 3);
 }
 
-TEST_CASE("RmtLedDriver keeps the symbol buffer across a rebuild (reinit must not free it)") {
-    // The regression: prepare() does resizeSymbols() THEN reinit(), and a
-    // bad reinit()->deinit() freed symbols_ right after it was allocated, so the
+TEST_CASE("RmtLedDriver keeps the byte frame across a rebuild (reinit must not free it)") {
+    // The regression: prepare() does resizeFrame() THEN reinit(), and a
+    // bad reinit()->deinit() freed the frame right after it was allocated, so the
     // buffer was null by the time tick() ran. A second prepare (what a pins
     // change / topology rebuild triggers) must leave the buffer present.
     mm::RmtLedDriver d;
     mm::Buffer src;
     mm::Correction corr;
     wire(d, src, corr, 64);
-    REQUIRE(d.symbolBuffer() != nullptr);
+    REQUIRE(d.frameBuffer() != nullptr);
 
     d.applyState();   // simulate a rebuild (the path that runs reinit())
-    CHECK(d.symbolBuffer() != nullptr);   // would be null with the deinit()-frees bug
-    CHECK(d.symbolCapacity() >= static_cast<size_t>(64) * 3 * 8);
+    CHECK(d.frameBuffer() != nullptr);   // would be null with the deinit()-frees bug
+    CHECK(d.frameCapacity() >= static_cast<size_t>(64) * 3);
 }
 
-TEST_CASE("RmtLedDriver keeps the symbol buffer across a pins change") {
+TEST_CASE("RmtLedDriver keeps the byte frame across a pins change") {
     // Same regression class as above, multi-pin flavour: editing the pins list
     // triggers a rebuild that re-parses and re-inits N channels — none of which
-    // may free the symbol buffer tick() encodes into.
+    // may free the byte frame tick() fills.
     mm::RmtLedDriver d;
     mm::Buffer src;
     mm::Correction corr;
     wire(d, src, corr, 64);
-    REQUIRE(d.symbolBuffer() != nullptr);
+    REQUIRE(d.frameBuffer() != nullptr);
 
     std::strcpy(d.pins, "18,17");
     d.applyState();
-    CHECK(d.symbolBuffer() != nullptr);
+    CHECK(d.frameBuffer() != nullptr);
     CHECK(d.pinCount() == 2);
 }
 
-TEST_CASE("RmtLedDriver grows the symbol buffer when the grid grows") {
+TEST_CASE("RmtLedDriver grows the byte frame when the grid grows") {
     mm::RmtLedDriver d;
     mm::Buffer src;
     mm::Correction corr;
     wire(d, src, corr, 16);
-    const size_t cap16 = d.symbolCapacity();
-    CHECK(cap16 >= static_cast<size_t>(16) * 3 * 8);
+    const size_t cap16 = d.frameCapacity();
+    CHECK(cap16 >= static_cast<size_t>(16) * 3);
 
     // Grow the source to 256 lights and rebuild: capacity must grow to fit.
     src.allocate(256, 3);
     d.setSourceBuffer(&src);
     d.applyState();
-    CHECK(d.symbolBuffer() != nullptr);
-    CHECK(d.symbolCapacity() >= static_cast<size_t>(256) * 3 * 8);
+    CHECK(d.frameBuffer() != nullptr);
+    CHECK(d.frameCapacity() >= static_cast<size_t>(256) * 3);
 }
 
-TEST_CASE("RmtLedDriver releases the symbol buffer on release") {
+TEST_CASE("RmtLedDriver releases the byte frame on release") {
     // The leak CodeRabbit flagged: release must free the buffer (and only
     // release — not deinit, which reinit calls).
     mm::RmtLedDriver d;
     mm::Buffer src;
     mm::Correction corr;
     wire(d, src, corr, 64);
-    REQUIRE(d.symbolBuffer() != nullptr);
+    REQUIRE(d.frameBuffer() != nullptr);
 
     d.release();
-    CHECK(d.symbolBuffer() == nullptr);
-    CHECK(d.symbolCapacity() == 0);
+    CHECK(d.frameBuffer() == nullptr);
+    CHECK(d.frameCapacity() == 0);
+}
+
+TEST_CASE("RmtLedDriver retains a byte frame borrowed by a timed-out transfer") {
+    RmtWaitGuard guard;
+    mm::RmtLedDriver d;
+    mm::Buffer src;
+    mm::Correction corr;
+    std::strcpy(d.pins, "16");
+    std::strcpy(d.ledsPerPin, "64");
+    wire(d, src, corr, 64);
+    REQUIRE(d.frameBuffer() != nullptr);
+
+    mm::platform::setTestRmtWaitComplete(false);
+    d.tick();
+    const uint8_t* borrowed = d.frameBuffer();
+    d.release();
+
+    CHECK(d.frameBuffer() == borrowed);
+    CHECK(d.frameCapacity() >= static_cast<size_t>(64) * 3);
+
+    mm::platform::setTestRmtWaitComplete(true);
+    d.release();
+    CHECK(d.frameBuffer() == nullptr);
+    CHECK(d.frameCapacity() == 0);
+}
+
+TEST_CASE("RmtLedDriver destruction drains a retained transfer before owner memory disappears") {
+    RmtWaitGuard guard;
+    auto* d = new mm::RmtLedDriver();
+    mm::Buffer src;
+    mm::Correction corr;
+    std::strcpy(d->pins, "16");
+    std::strcpy(d->ledsPerPin, "64");
+    wire(*d, src, corr, 64);
+    REQUIRE(d->frameBuffer() != nullptr);
+
+    mm::platform::setTestRmtWaitComplete(false);
+    d->tick();
+    d->release();                            // lifecycle retry remains owned by the live object
+    REQUIRE(d->frameBuffer() != nullptr);
+
+    std::atomic<bool> completionPublished{false};
+    std::thread completion([&] {
+        std::this_thread::sleep_for(30ms);
+        completionPublished.store(true, std::memory_order_release);
+        mm::platform::setTestRmtWaitComplete(true);
+    });
+    delete d;                                // must wait; dropping the object would lose handle + frame
+    CHECK(completionPublished.load(std::memory_order_acquire));
+    completion.join();
 }
 
 TEST_CASE("RmtLedDriver: disabling releases the resource, re-enabling re-acquires (applyState)") {
@@ -160,7 +219,7 @@ TEST_CASE("RmtLedDriver: disabling releases the resource, re-enabling re-acquire
     mm::Buffer src;
     mm::Correction corr;
     wire(d, src, corr, 64);
-    REQUIRE(d.symbolBuffer() != nullptr);   // enabled by default → resource held
+    REQUIRE(d.frameBuffer() != nullptr);   // enabled by default → resource held
 
     // The Scheduler runs a whole-tree prepareTree() AFTER the enabled-toggle (Scheduler::setControl),
     // which calls applyState() on every module. A just-disabled one routes to release → released,
@@ -168,15 +227,15 @@ TEST_CASE("RmtLedDriver: disabling releases the resource, re-enabling re-acquire
     // enabled Parlio driver now owns).
     d.setEnabled(false);
     d.applyState();                         // disabled → release
-    CHECK(d.symbolBuffer() == nullptr);     // buffer freed (RAM back; pins released)
-    CHECK(d.symbolCapacity() == 0);
+    CHECK(d.frameBuffer() == nullptr);     // buffer freed (RAM back; pins released)
+    CHECK(d.frameCapacity() == 0);
 
     d.applyState();                         // a later unrelated sweep — STILL released
-    CHECK(d.symbolBuffer() == nullptr);
+    CHECK(d.frameBuffer() == nullptr);
 
     d.setEnabled(true);
     d.applyState();                         // enabled → prepare re-acquires
-    CHECK(d.symbolBuffer() != nullptr);     // resource re-acquired on re-enable
+    CHECK(d.frameBuffer() != nullptr);     // resource re-acquired on re-enable
 }
 
 TEST_CASE("RmtLedDriver: a DISABLED driver does not acquire through the boot sweep") {
@@ -197,11 +256,11 @@ TEST_CASE("RmtLedDriver: a DISABLED driver does not acquire through the boot swe
 
     d.setup();                    // Phase 3: pure wiring, no acquire
     d.applyState();               // Phase 4: disabled → routes to release, no acquire
-    CHECK(d.symbolBuffer() == nullptr);
+    CHECK(d.frameBuffer() == nullptr);
 
     d.setEnabled(true);           // now enable → acquire on the next sweep
     d.applyState();
-    CHECK(d.symbolBuffer() != nullptr);
+    CHECK(d.frameBuffer() != nullptr);
 }
 
 // MoonModule contract: release reverses setup, so setup→release→setup→release
@@ -218,14 +277,14 @@ TEST_CASE("RmtLedDriver setup/release is repeatable with no residual state") {
 
     for (int cycle = 0; cycle < 4; cycle++) {
         d.setup();                       // (re)init the channel
-        d.setSourceBuffer(&src);         // resizeSymbols allocates the buffer
+        d.setSourceBuffer(&src);         // resizeFrame allocates the buffer
         d.correctionForTest() = corr;
         d.applyState();                // size buffer + reinit, as the Scheduler does
-        REQUIRE(d.symbolBuffer() != nullptr);
+        REQUIRE(d.frameBuffer() != nullptr);
 
         d.release();                    // must fully reverse the above
-        CHECK(d.symbolBuffer() == nullptr);   // buffer freed (ASAN: no leak across cycles)
-        CHECK(d.symbolCapacity() == 0);
+        CHECK(d.frameBuffer() == nullptr);   // buffer freed (ASAN: no leak across cycles)
+        CHECK(d.frameCapacity() == 0);
         CHECK(d.status() == nullptr);         // no lingering status string
     }
 }

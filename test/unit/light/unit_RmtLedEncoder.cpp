@@ -105,7 +105,7 @@ TEST_CASE("encoder: RGBW preset yields 32 symbols per light") {
 
 TEST_CASE("encoder: explicit RGBW white channel reaches the last wire byte") {
     mm::Correction c;
-    c.rebuild(255, mm::LightPreset::GRBW);  // G,R,B,W
+    mm::test::rebuildFromPreset(c, 255, mm::test::PresetOrder::GRBW);
     const uint8_t logical[4] = {0, 0, 0, 0xFF};
     uint8_t wire[4] = {};
     c.apply(logical, wire, 4);

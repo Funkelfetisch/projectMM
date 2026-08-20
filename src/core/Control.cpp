@@ -80,7 +80,13 @@ bool hasDefault(ControlType t) {
     return t != ControlType::Password;
 }
 
-void writeControlValue(JsonSink& sink, const ControlDescriptor& c) {
+void writeControlValue(JsonSink& sink, const ControlDescriptor& c,
+                       ControlValueVisibility visibility) {
+    if (c.type == ControlType::Password && visibility == ControlValueVisibility::Public) {
+        const auto* password = static_cast<const char*>(c.ptr);
+        sink.append(password && password[0] ? "true" : "false");
+        return;
+    }
     switch (c.type) {
         case ControlType::Uint8:
             sink.appendf("%u", *static_cast<uint8_t*>(c.ptr));
@@ -101,9 +107,9 @@ void writeControlValue(JsonSink& sink, const ControlDescriptor& c) {
         case ControlType::TextArea:
         case ControlType::Password:
         case ControlType::ReadOnly:
-            // All char-buffer-backed. Password is rendered as a
-            // plain JSON string here; the HTTP API obfuscates separately
-            // at the writeControls call site (persistence writes plaintext).
+            // All char-buffer-backed. Stored password serialization remains a
+            // JSON string for the local persistence path; public callers return
+            // above with a configured/not-configured boolean.
             // writeJsonString walks the source straight into the sink with
             // no intermediate fixed buffer, so there's no truncation
             // ceiling regardless of the source buffer's length.

@@ -18,11 +18,6 @@
 namespace mm::platform {
 
 namespace {
-// stopPinnedTask's join deadline. A worker normally drains within a few ms of the stop-notify; this is
-// the robustness floor for the pathological case (a same-core worker that can't be scheduled, a lost
-// notify). ≫ any real per-frame job, ≪ a user-perceptible hang.
-constexpr uint32_t kStopJoinTimeoutMs = 300;
-
 // The opaque WorkerTask::impl. Holds the RTOS handle, the caller's fn/user, and a stop flag the
 // spawned trampoline checks.
 struct EspWorker {
@@ -31,26 +26,23 @@ struct EspWorker {
     void* user = nullptr;
     std::atomic<bool> stop{false};
     std::atomic<bool> finished{false};
-    // Ownership handshake for the timeout path: normally stopPinnedTask waits for `finished` and frees
-    // `w`. If it TIMES OUT (the worker couldn't be scheduled — a same-core teardown), it hands ownership
-    // to the trampoline by setting `detached`, and whichever of the two runs last frees `w`. The
-    // atomic-exchange below makes exactly one side win, so `w` is freed once and never used-after-free.
-    std::atomic<bool> detached{false};
 };
 
-// Trampoline: run the caller's fn (which owns its own loop and returns when it observes the stop flag
-// via a woken waitNotify), then self-delete the RTOS task. The fn manages its own WDT membership: the
-// encode worker subscribes itself via taskWdtSubscribe() at loop start, feeds it with taskWdtReset() each
-// frame, and unsubscribes via taskWdtUnsubscribe() before returning (the subscription is per-task, so it
-// can't ride the render task's — see taskWdtSubscribe). A fn that never subscribes leaves taskWdtReset() a
-// no-op, so this trampoline stays generic.
+// Trampoline: run the caller's fn under this worker task's own watchdog subscription. waitNotify feeds
+// the idle loop; bounded jobs return to it, while a callback stuck inside a peripheral operation trips
+// this worker's watchdog independently of a joining caller. On return the task suspends at the published
+// join point; stopPinnedTask deletes it before releasing the callback's owner.
 void workerTrampoline(void* arg) {
     auto* w = static_cast<EspWorker*>(arg);
+    taskWdtSubscribe();
     w->fn(w->user);                     // runs until stopPinnedTask flips w->stop and wakes it
+    taskWdtUnsubscribe();
+    // Publish the join point as the final access to EspWorker/user memory. The stopper deletes this
+    // suspended RTOS task and then releases `w`; it therefore returns only after the callback has
+    // ceased touching every borrowed object.
     w->finished.store(true, std::memory_order_release);
-    // If stopPinnedTask already timed out and detached, IT is gone and won't free `w` — we own it now.
-    // The exchange makes exactly one side observe `detached==true` first: whoever sees it frees `w`.
-    if (w->detached.exchange(true, std::memory_order_acq_rel)) delete w;
+    vTaskSuspend(nullptr);
+    // Defensive fallback if another task resumes this internal worker unexpectedly.
     vTaskDelete(nullptr);
 }
 }  // namespace
@@ -85,7 +77,9 @@ bool waitNotify(WorkerTask& t, uint32_t timeoutMs) {
     if (!w) return false;
     // ulTaskNotifyTake(pdTRUE, …) clears the notification count on return (the binary-semaphore
     // form). Non-zero return = a notify (or stop-wake) landed; 0 = timed out.
-    return ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeoutMs)) != 0;
+    const bool notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeoutMs)) != 0;
+    taskWdtReset();   // every generic worker feeds while parked; active jobs keep their own bound
+    return notified;
 }
 
 void stopPinnedTask(WorkerTask& t) {
@@ -93,33 +87,16 @@ void stopPinnedTask(WorkerTask& t) {
     if (!w) return;
     w->stop.store(true, std::memory_order_release);   // the fn re-checks this after its next wake
     if (w->handle) xTaskNotifyGive(w->handle);         // wake it so it observes the stop
-    // Wait for the trampoline to run its fn out and self-delete. Normally bounded by ONE wake (the fn
-    // returns after it sees `stop` via a woken waitNotify). BOUNDED, never infinite: if this stop runs
-    // on the SAME core the worker is pinned to and the worker is mid-job (not parked in waitNotify), the
-    // worker can't be scheduled until this caller yields — and an unbounded spin here would deadlock
-    // (measured: a config-change teardown of the core-0 helper hanging the whole device). vTaskDelay
-    // yields, so the worker normally drains within a few ms; the deadline is the robustness floor for
-    // the pathological case (a lost notify, a wedged job). On timeout we DETACH — leak the worker rather
-    // than free-while-running (a use-after-free is worse than a bounded leak) — and its stop flag stays
-    // set, so if it ever wakes it self-deletes cleanly against the still-live EspWorker.
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(kStopJoinTimeoutMs);
+    // This is a true join: every caller frees the worker's user object or hardware immediately after
+    // return, so a timeout/detach would turn a slow peripheral drain into a use-after-free. vTaskDelay
+    // lets a same-core worker run; the caller feeds its own watchdog while the worker's independent
+    // subscription remains the failure detector for a genuine wedge.
     while (!w->finished.load(std::memory_order_acquire)) {
-        if (xTaskGetTickCount() > deadline) {
-            // DETACH — hand `w` to the trampoline. The exchange makes exactly one side free it: if the
-            // trampoline already ran (raced us to `detached`), WE free `w` here; otherwise the trampoline
-            // frees it when it finally exits. Either way `w` is freed once, never used-after-free, and
-            // this caller returns instead of deadlocking (see the timeout rationale above).
-            if (w->detached.exchange(true, std::memory_order_acq_rel)) delete w;
-            t.impl = nullptr;
-            return;
-        }
+        taskWdtReset();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-    // NORMAL path frees through the SAME exchange as the timeout path — not a bare delete. The trampoline
-    // touches `w->detached` AFTER storing `finished` (see workerTrampoline), so once we observe finished
-    // the trampoline may still be mid-exchange on `w`; a bare delete here would free it under that access.
-    // The exchange makes exactly one side win the free, whichever runs the store last.
-    if (w->detached.exchange(true, std::memory_order_acq_rel)) delete w;
+    if (w->handle) vTaskDelete(w->handle);
+    delete w;
     t.impl = nullptr;
 }
 
@@ -132,9 +109,9 @@ void stopPinnedTask(WorkerTask& t) {
 static thread_local bool s_wdtSubscribed = false;
 
 // Subscribe the CURRENT task to the task WDT. The sdkconfig runs the TWDT with idle-task checking OFF (a
-// saturated core is healthy), so nothing is watched unless a task subscribes. Both the render loop and the
-// encode worker call this on their own task: if either stops feeding the WDT (a genuine wedge, not a busy
-// frame), it panics and reboots (the self-heal) instead of hanging silently, and leaves a backtrace.
+// saturated core is healthy), so nothing is watched unless a task subscribes. The render loop subscribes
+// directly and each generic worker is subscribed by its trampoline: if one stops feeding (a genuine wedge,
+// not a busy frame), it panics and reboots (the self-heal) instead of hanging silently, and leaves a backtrace.
 // Idempotent per task; a failure (WDT not inited) just leaves s_wdtSubscribed false and reset a no-op,
 // degrading to unwatched behavior rather than crashing.
 void taskWdtSubscribe() {

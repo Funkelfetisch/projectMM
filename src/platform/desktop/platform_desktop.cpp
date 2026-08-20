@@ -724,8 +724,10 @@ uint32_t ethFailTotal_ = 0;          // cumulative since boot; what ethSendFailC
 uint32_t ethRestarts_ = 0;           // ethRestartTx() calls, for the once-per-wedge test
 bool     ethRestartFails_ = false;   // simulated recovery failure
 // The bound raw socket, or -1 for capture mode (the default, and all any test sees).
+#ifndef _WIN32
 int      ethRawFd_ = -1;
 unsigned ethRawIfIndex_ = 0;         // Linux AF_PACKET needs the index; BPF binds by name
+#endif
 }  // namespace
 
 // Open a raw L2 socket on `ifName` so a host build drives panels for real — the deployment a Pi or
@@ -939,6 +941,8 @@ void mdnsShutdown() {}
 // OTA — no-op on desktop (no OTA partition). The /api/firmware/url route
 // guards with `if constexpr (mm::platform::hasOta)` and returns 501 here,
 // so this stub exists for compile coverage only.
+void markOtaAppValid() {}
+
 bool http_fetch_to_ota(const char* /*url*/,
                        char* statusBuf, size_t statusBufLen,
                        uint32_t* bytesReadOut, uint32_t* bytesTotalOut) {
@@ -948,6 +952,13 @@ bool http_fetch_to_ota(const char* /*url*/,
     if (bytesReadOut) *bytesReadOut = 0;
     if (bytesTotalOut) *bytesTotalOut = 0;
     return false;
+}
+
+bool http_fetch_to_ota_checked(const char* url, const char* /*expectedSha256*/,
+                               uint32_t /*expectedSize*/,
+                               char* statusBuf, size_t statusBufLen,
+                               uint32_t* bytesReadOut, uint32_t* bytesTotalOut) {
+    return http_fetch_to_ota(url, statusBuf, statusBufLen, bytesReadOut, bytesTotalOut);
 }
 
 bool otaWriteStream(FsWriteSrc /*src*/, void* /*user*/, size_t /*contentLen*/,
@@ -1076,6 +1087,11 @@ int httpRequest(const char* method, const char* host, uint16_t port, const char*
         else body[0] = '\0';
     }
     return status;
+}
+
+int httpGet(const char* /*url*/, char* body, size_t bodyLen, uint32_t /*timeoutMs*/) {
+    if (body && bodyLen) body[0] = 0;
+    return 0;
 }
 
 
@@ -1368,7 +1384,11 @@ TcpConnection TcpServer::accept() {
     if (fd_ < 0) return TcpConnection();
 #ifdef _WIN32
     SOCKET client = ::accept(sock(fd_), nullptr, nullptr);
-    if (client == INVALID_SOCKET) return TcpConnection();
+    if (client == INVALID_SOCKET) {
+        const int error = WSAGetLastError();
+        if (error != WSAEWOULDBLOCK && error != WSAEINTR) close();
+        return TcpConnection();
+    }
     int clientFd = static_cast<int>(client);
     // NON-BLOCKING (see the POSIX branch below for the full rationale): a blocking recv on
     // the single-loop server stalls the whole render loop. make_nonblocking → recv returns
@@ -1376,7 +1396,10 @@ TcpConnection TcpServer::accept() {
     make_nonblocking(clientFd);
 #else
     int clientFd = ::accept(fd_, nullptr, nullptr);
-    if (clientFd < 0) return TcpConnection();
+    if (clientFd < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) close();
+        return TcpConnection();
+    }
     // NON-BLOCKING client socket. The HTTP server is serviced from the single render loop,
     // so a blocking recv()'s timeout (we used 2 s) froze the WHOLE loop whenever a request's
     // bytes hadn't landed the instant accept() returned — UI to a crawl. Non-blocking makes
@@ -1406,15 +1429,23 @@ void TcpServer::close() {
 // timing arithmetic (which divides by it) works on real numbers instead of zero.
 // ---------------------------------------------------------------------------
 namespace {
-struct HostRmt { uint32_t resolutionHz = 0; };
+static std::atomic<bool> testRmtWaitComplete{true};
+struct HostRmt {
+    uint32_t resolutionHz = 0;
+    bool inFlight = false;
+};
 HostRmt* hostRmt(void*& impl) {
     if (!impl) impl = new HostRmt();
     return static_cast<HostRmt*>(impl);
 }
 }  // namespace
 
+void setTestRmtWaitComplete(bool complete) {
+    testRmtWaitComplete.store(complete, std::memory_order_release);
+}
+
 bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t /*gpio*/, uint32_t resolutionHz,
-                   bool /*invert*/) {
+                   bool /*invert*/, RmtWs2812Timing /*timing*/) {
     // A zero resolution would make the driver divide by zero when it converts nanoseconds to
     // ticks — refuse it here rather than hand back a channel that cannot be used.
     if (resolutionHz == 0) return false;
@@ -1427,12 +1458,27 @@ uint32_t rmtWs2812Resolution(const RmtWs2812Handle& h) MM_NONBLOCKING {
 bool rmtWs2812Transmit(RmtWs2812Handle& h, const uint32_t* symbols,
                        size_t symbolCount) {
     if (!h.impl || !symbols || symbolCount == 0) return false;
+    static_cast<HostRmt*>(h.impl)->inFlight = true;
     return true;
 }
-void rmtWs2812Wait(RmtWs2812Handle& /*h*/, uint32_t /*timeoutMs*/) {}
-void rmtWs2812Deinit(RmtWs2812Handle& h) {
+bool rmtWs2812TransmitBytes(RmtWs2812Handle& h, const uint8_t* bytes,
+                            size_t byteCount) {
+    if (!h.impl || !bytes || byteCount == 0) return false;
+    static_cast<HostRmt*>(h.impl)->inFlight = true;
+    return true;
+}
+bool rmtWs2812Wait(RmtWs2812Handle& h, uint32_t /*timeoutMs*/) {
+    auto* st = static_cast<HostRmt*>(h.impl);
+    if (!st || !st->inFlight) return true;
+    if (!testRmtWaitComplete.load(std::memory_order_acquire)) return false;
+    st->inFlight = false;
+    return true;
+}
+bool rmtWs2812Deinit(RmtWs2812Handle& h) {
+    if (!rmtWs2812Wait(h, 1000)) return false;
     delete static_cast<HostRmt*>(h.impl);
     h.impl = nullptr;
+    return true;
 }
 size_t rmtWs2812RxCapture(uint8_t /*gpio*/, uint32_t /*resolutionHz*/,
                           uint32_t* /*outSymbols*/, size_t /*maxSymbols*/,
@@ -1662,6 +1708,39 @@ void audioFft(const float* windowed, size_t n, float* outMag) {
 size_t i2cScan(uint16_t /*sda*/, uint16_t /*scl*/, uint8_t* /*out*/, size_t /*maxOut*/) {
     return kI2cBusUnavailable;
 }
+
+namespace {
+std::atomic<uint32_t> g_testI2cDelayMs{0};
+void waitTestI2cDelay() {
+    const uint32_t delay = g_testI2cDelayMs.load(std::memory_order_relaxed);
+    if (delay > 0) delayMs(delay);
+}
+}  // namespace
+
+void setTestI2cDelayMs(uint32_t delay) {
+    g_testI2cDelayMs.store(delay, std::memory_order_relaxed);
+}
+
+bool i2cDeviceInit(I2cDeviceHandle& h, uint8_t /*busIndex*/, uint16_t /*sda*/,
+                   uint16_t /*scl*/, uint8_t /*address*/, uint32_t /*frequencyHz*/) {
+    waitTestI2cDelay();
+    h = {};
+    return false;
+}
+
+bool i2cDeviceWrite(I2cDeviceHandle& /*h*/, const uint8_t* /*data*/,
+                    size_t /*length*/, uint32_t /*timeoutMs*/) {
+    waitTestI2cDelay();
+    return false;
+}
+
+bool i2cDeviceRead(I2cDeviceHandle& /*h*/, uint8_t* /*data*/,
+                   size_t /*length*/, uint32_t /*timeoutMs*/) {
+    waitTestI2cDelay();
+    return false;
+}
+
+void i2cDeviceDeinit(I2cDeviceHandle& h) { h = {}; }
 
 // No IR receiver on the host — the seam is a no-op so IrService runs (its buttons still work
 // through Scheduler::setControl); reception is ESP32-only.

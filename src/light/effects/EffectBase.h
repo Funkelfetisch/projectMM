@@ -99,6 +99,11 @@ public:
     /// effects; add similar pinning for new D3 effects with z-aware math.
     virtual Dim dimensions() const { return Dim::D3; }
 
+    /// Some effects render by physical LED index rather than by x/y/z cells. On a
+    /// sparse layout such as a ring, that lets Layer keep the real geometry for
+    /// PreviewDriver while sizing the render buffer to the real light count.
+    virtual bool usesPhysicalLightOrder() const { return false; }
+
     /// Parent is always a Layer (defined in Layer.h after Layer is complete).
     Layer* layer() const;
 

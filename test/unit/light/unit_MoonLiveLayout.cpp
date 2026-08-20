@@ -436,6 +436,7 @@ TEST_CASE("a layout that changes size mid-build cannot overrun the mapping") {
 // A control write lands directly in the module's buffer — addText binds it — so setScript() is NOT
 // called. Nothing then cleared the compiled-hash, and compile()'s early-return kept the OLD program
 // running under the new name. Found by review; the same class of bug hardware found in the effect.
+#if MM_MOONLIVE_HAS_HOST_JIT
 TEST_CASE("naming a different script through the control actually swaps the program") {
     MoonLiveLayout l;
     l.defineControls();
@@ -454,6 +455,7 @@ TEST_CASE("naming a different script through the control actually swaps the prog
     l.prepare();
     CHECK(l.lightCount() == 9);      // the new file, not the cached program
 }
+#endif
 
 // The fixed script directory is a boundary: a module names a file inside it, and cannot address the
 // filesystem. Without this, a control value of "../.config/NetworkModule.json" reads the device's

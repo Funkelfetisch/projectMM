@@ -10,10 +10,9 @@ namespace mm {
 // null-terminated string into `out`; truncates rather than overflowing if
 // the encoded form would exceed `out.size()`.
 //
-// Used in two places: the WebSocket handshake response (encoding the
-// SHA-1 of `client_key + magic_GUID`), and `/api/state`'s Password
-// serialization (XOR-then-base64 obfuscation, see HttpServerModule).
-// Both are short payloads; the encoder is straightforward not optimised.
+// Used for the WebSocket handshake response, encoding the SHA-1 of
+// `client_key + magic_GUID`. The payload is short; the encoder is
+// straightforward rather than throughput-optimised.
 inline void base64Encode(std::span<const uint8_t> in, std::span<char> out) {
     if (out.empty()) return;  // no room even for the terminator
     static constexpr char table[] =

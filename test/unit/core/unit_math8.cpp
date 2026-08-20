@@ -37,6 +37,13 @@ TEST_CASE("math8: nscale8 scales a byte by n/256") {
     CHECK(nscale8(100, 0) == 0);
 }
 
+TEST_CASE("math8: nscale8_video preserves non-zero channels") {
+    CHECK(nscale8_video(0, 39) == 0);
+    CHECK(nscale8_video(1, 0) == 0);
+    CHECK(nscale8_video(1, 39) == 1);
+    CHECK(nscale8_video(255, 255) == 255);
+}
+
 // beat8: a sawtooth completing `bpm` cycles per minute. At t=0 it's 0; halfway through a beat ~128.
 TEST_CASE("math8: beat8 ramps 0..255 once per beat") {
     CHECK(beat8(60, 0) == 0);              // start of a beat

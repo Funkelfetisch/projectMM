@@ -81,13 +81,14 @@ Detail: [technical](moxygen/PanelsLayout.md)
 
 ### Ring
 
-A single ring of LEDs evenly spaced around a circle — `nrOfLEDs` points, starting at `angleFirst`, spanning `rotation` degrees.
+A single ring of LEDs evenly spaced around a circle: `nrOfLEDs` points, starting at `angleFirst`, spanning `rotation` degrees.
 
-- `nrOfLEDs` — LEDs around the ring (1–255).
-- `angleFirst` — starting angle in degrees.
-- `rotation` — arc spanned (360 = full circle).
-- `clockwise` — direction of travel.
-- `scale` — spacing/radius scale.
+- `nrOfLEDs` - LEDs around the ring (1-1000).
+- `radius` - logical radius (0 = automatic spacing from LED count).
+- `angleFirst` - starting angle in degrees.
+- `rotation` - arc spanned (360 = full circle).
+- `clockwise` - direction of travel.
+- `scale` - spacing/radius scale.
 
 Origin: MoonLight · via [MoonLight](https://github.com/MoonModules/MoonLight/blob/main/src/MoonLight/Nodes/Layouts/L_MoonLight.h)
 

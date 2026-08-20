@@ -53,10 +53,11 @@ public:
     JsonSink& operator=(const JsonSink&) = delete;
 
     void append(const char* s) {
-        if (!s) return;
-        while (*s) {
+        if (!s || failed_) return;
+        while (*s && !failed_) {
             if (conn_) {
                 if (pos_ == STAGE_SIZE) flushStage();
+                if (failed_) return;
                 stage_[pos_++] = *s++;
             } else if (fixed_) {
                 // +1 reserves the NUL slot. Overflow stops writing; once
@@ -66,7 +67,13 @@ public:
                 fixed_[fixedLen_++] = *s++;
                 fixed_[fixedLen_] = '\0';
             } else {
-                if (!ensureHeap(heapLen_ + 1)) return;  // out of memory: drop
+                if (!ensureHeap(heapLen_ + 1)) {
+                    // A failed grow is terminal for this document. Retrying the same allocation for
+                    // every remaining byte turns one ordinary OOM into thousands of allocator calls
+                    // on a memory-tight controller and can starve both WiFi and the render loop.
+                    failed_ = true;
+                    return;
+                }
                 heap_[heapLen_++] = *s++;
             }
         }
@@ -81,6 +88,7 @@ public:
     // exceed it — e.g. an unusually long text-control value — is re-formatted
     // into a heap buffer so the output is never silently truncated.
     void appendf(const char* fmt, ...) MM_PRINTF_FORMAT(2, 3) {
+        if (failed_) return;
         char frag[FRAG_MAX];
         va_list ap;
         va_start(ap, fmt);
@@ -112,6 +120,8 @@ public:
             std::vsnprintf(big, static_cast<size_t>(n) + 1, fmt, ap2);
             append(big);
             platform::free(big);
+        } else {
+            failed_ = true;
         }
         va_end(ap2);
     }
@@ -142,6 +152,7 @@ public:
     }
     void writeBool(bool v) { append(v ? "true" : "false"); }
     void writeJsonString(const char* s) {
+        if (failed_) return;
         // Walks the source char-by-char straight into the sink — no
         // intermediate fixed buffer, so there's no truncation ceiling
         // regardless of input length. Each per-char append is a small
@@ -205,13 +216,17 @@ public:
     // Fixed-buffer mode only: did any append run out of capacity?
     bool overflowed() const { return overflowed_; }
 
+    // Did the sink fail to write or grow? Failure is terminal: serialization stops after the first
+    // socket rejection or heap OOM, so callers never send a truncated document as if it were valid.
+    bool failed() const { return failed_; }
+
 private:
     static constexpr size_t STAGE_SIZE = 1024;
     static constexpr size_t FRAG_MAX = 256;
 
     void flushStage() {
-        if (conn_ && pos_ > 0) {
-            conn_->write(reinterpret_cast<const uint8_t*>(stage_), pos_);
+        if (conn_ && pos_ > 0 && !failed_) {
+            if (!conn_->write(reinterpret_cast<const uint8_t*>(stage_), pos_)) failed_ = true;
             pos_ = 0;
         }
     }
@@ -242,6 +257,7 @@ private:
     size_t fixedLen_ = 0;
     size_t fixedCap_ = 0;
     bool overflowed_ = false;
+    bool failed_ = false;
 };
 
 // Escape a string for embedding inside a JSON string literal: " → \" and

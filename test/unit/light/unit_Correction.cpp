@@ -91,7 +91,9 @@ TEST_CASE("Correction RGBW preset: 4 channels, white = min(r,g,b)") {
 // RGBW layers carry a real W byte; preserve it instead of re-deriving white from RGB.
 TEST_CASE("Correction RGBW preset: explicit source white wins when present") {
     Correction c;
-    c.rebuild(255, LightPreset::RGBW);
+    const mm::ChannelRole roles[4] = {mm::ChannelRole::Red, mm::ChannelRole::Green,
+                                      mm::ChannelRole::Blue, mm::ChannelRole::White};
+    c.rebuild(255, roles, 4);
     const uint8_t src[4] = {10, 20, 30, 200};
     uint8_t out[4] = {};
     c.apply(src, out, 4);
@@ -99,6 +101,21 @@ TEST_CASE("Correction RGBW preset: explicit source white wins when present") {
     CHECK(out[1] == 20);
     CHECK(out[2] == 30);
     CHECK(out[3] == 200);
+}
+
+TEST_CASE("Correction RGBW preset: zero source white permits Accurate extraction") {
+    Correction c;
+    const mm::ChannelRole roles[4] = {mm::ChannelRole::Red, mm::ChannelRole::Green,
+                                      mm::ChannelRole::Blue, mm::ChannelRole::White};
+    c.rebuild(255, roles, 4);
+    c.whiteMode = mm::WhiteMode::Accurate;
+    const uint8_t src[4] = {10, 20, 30, 0};
+    uint8_t out[4] = {};
+    c.apply(src, out, 4);
+    CHECK(out[0] == 0);
+    CHECK(out[1] == 10);
+    CHECK(out[2] == 20);
+    CHECK(out[3] == 10);
 }
 
 // GRBW preset combines the GRB reorder with the W derivation (G, R, B, W=min).
@@ -118,9 +135,11 @@ TEST_CASE("Correction GRBW preset: reordered RGB + white") {
 // WGRB covers white-first RGBW pixels such as the HELIO strip order found on bench.
 TEST_CASE("Correction WGRB preset: white can be first") {
     Correction c;
-    c.rebuild(255, LightPreset::WGRB);
+    const mm::ChannelRole roles[4] = {mm::ChannelRole::White, mm::ChannelRole::Green,
+                                      mm::ChannelRole::Red, mm::ChannelRole::Blue};
+    c.rebuild(255, roles, 4);
     CHECK(c.outChannels == 4);
-    CHECK(c.deriveWhite);
+    CHECK(c.offWhite == 0);
     const uint8_t src[3] = {10, 20, 30};
     uint8_t out[4] = {};
     c.apply(src, out);

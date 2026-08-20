@@ -72,6 +72,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+/.zig-cache/
+/.zig-global-cache/
+/tmp/
 
 # MoonDeck state
 moondeck/moondeck.json

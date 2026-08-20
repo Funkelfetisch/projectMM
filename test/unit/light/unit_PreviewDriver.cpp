@@ -8,6 +8,7 @@
 #include "light/layers/Effects.h"
 #include "light/layouts/Layouts.h"
 #include "light/layouts/GridLayout.h"
+#include "light/layouts/RingLayout.h"
 #include "light/layouts/SphereLayout.h"
 
 #include <vector>
@@ -241,6 +242,24 @@ TEST_CASE("PreviewDriver keeps a sparse large-box layout at full resolution") {
     CHECK(rig.cap.coordCount() <= 4096);          // the shell fits the display cap...
     CHECK(rig.cap.coordStride() == 1);            // ...so it is sent whole, not downsampled
     CHECK(rig.cap.coordCount() == rig.cap.frameCount());
+}
+
+// HELIO's ring uses a compact physical-order buffer inside a much larger square bounding box.
+// Absence of a mapping LUT does not make that buffer a dense box: the preview must emit the real
+// ring lights and never synthesize the empty cells around and inside it.
+TEST_CASE("PreviewDriver keeps a compact ring out of the dense-grid fast path") {
+    mm::RingLayout ring;
+    ring.nrOfLEDs = 311;
+    ring.radius = 24;
+    PreviewRig rig(&ring, 4);
+    rig.produce();
+
+    CHECK(rig.layer.physicalLightCount() == 311);
+    CHECK(rig.layer.physicalWidth() * rig.layer.physicalHeight() > 311);
+    CHECK(rig.cap.coordCount() == 311);
+    CHECK(rig.cap.frameCount() == 311);
+    CHECK(rig.cap.lastCoord.size() == 10u + 311u * 3u);
+    CHECK(rig.cap.lastFrame.size() == 7u + 311u * 3u);
 }
 
 // Default fps is the rate-limited preview stream rate.

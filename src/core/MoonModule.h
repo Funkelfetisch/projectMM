@@ -80,7 +80,7 @@ inline const char* roleName(ModuleRole role) {
 /// per-class boilerplate), `dynamicBytes()` (heap set by `prepare()`), and `tickTimeUs()`
 /// (average microseconds per tick over a 1-second window; `publishTiming()` recurses the tree
 /// every second — parents time their children, the Scheduler times top-level modules). tickTimeUs
-/// is the primary performance metric; FPS is derived as `1000000 / tickTimeUs`. `setStatus(msg,
+/// is the scheduler service cost; FPS is counted from rendered frames. `setStatus(msg,
 /// severity)` carries a short user-facing message (Status / Warning / Error → ℹ️ / ⚠️ / ❌); the
 /// slot stores a pointer with no copy, so callers pass a flash literal or a module-owned buffer.
 /// `markDirty()` marks state touched so FilesystemModule can persist the subtree after a debounce.
@@ -282,11 +282,10 @@ public:
     /// enabled and reverts the toggle a second later. Safe when unwired (null hook → no-op).
     static void notifySchemaChanged() { if (schemaChangedHook_) schemaChangedHook_(); }
 
-    /// Fire the quiesce-render hook directly — for a NON-child-array mutation that still frees or reuses
+    /// Fire the quiesce-render hook directly — for a NON-child-array mutation that changes or reuses
     /// memory a render worker may be reading, so it can't go through quiesceForMutation (which is the
-    /// add/remove/replace/move path). The one case: ParallelLedDriver's live `peripheral` swap deletes
-    /// the bus backend the core-1 encode worker dereferences. Same seam as notifySchemaChanged; no-op
-    /// when unwired.
+    /// add/remove/replace/move path). Control writes, editable lists, preset application, and live
+    /// peripheral swaps all use this frame-boundary seam. No-op when unwired.
     static void notifyQuiesceRender() { if (quiesceRenderHook_) quiesceRenderHook_(); }
     void clearControlsRecursive() {
         controls_.clear();

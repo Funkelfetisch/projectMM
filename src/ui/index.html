@@ -1,17 +1,34 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="ui-booting">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>projectMM</title>
-    <link rel="icon" type="image/png" href="/moonlight-logo.png">
-    <link rel="stylesheet" href="style.css">
+    <title>Lighting Controller</title>
+    <style>
+        html.ui-booting { background: #070a10; }
+        html.ui-booting body { visibility: hidden; }
+    </style>
+    <script>
+        (function () {
+            window.setTimeout(function () {
+                document.documentElement.classList.remove("ui-booting");
+            }, 8000);
+            var host = window.location.hostname;
+            var privateLan = /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|4\.3\.2\.1$)/.test(host)
+                || /\.local$/i.test(host);
+            if (window.location.protocol === "https:" && privateLan) {
+                window.location.replace("http://" + window.location.host + window.location.pathname + window.location.search + window.location.hash);
+            }
+        }());
+    </script>
+    <link id="favicon" rel="icon">
+    <link rel="stylesheet" href="/style.css?ui=20260820a">
 </head>
 <body data-theme="dark">
     <header id="status-bar">
         <button type="button" id="nav-toggle" class="header-btn" aria-label="Toggle navigation" title="Toggle navigation">☰</button>
-        <img id="brand-logo" src="/moonlight-logo.png" alt="MoonLight">
-        <span class="brand">projectMM</span>
+        <img id="brand-logo" hidden alt="">
+        <span class="brand"></span>
         <span id="device-name"></span>
         <span id="sys-stats"></span>
         <span class="spacer"></span>
@@ -46,7 +63,7 @@
                         <button type="button" id="preview-numbers" class="preview-bar-btn" aria-label="Toggle LED sequence numbers" title="Show LED sequence numbers (when zoomed in enough to read)">№</button>
                         <button type="button" id="preview-reset" class="preview-bar-btn" aria-label="Reset preview to defaults" title="Reset preview (camera, dot size, numbers, layout)">⌖</button>
                         <button type="button" id="preview-dock" class="preview-bar-btn" aria-label="Pop preview out or dock" title="Pop preview out / dock">⤢</button>
-                        <button type="button" id="preview-close" class="preview-bar-btn" aria-label="Hide preview" title="Hide preview">✕</button>
+                        <button type="button" id="preview-close" class="preview-bar-btn preview-close-btn" aria-label="Hide preview" title="Hide preview">✕</button>
                     </div>
                     <!-- WebGL point sprites can't draw text; the sequence numbers are a 2D
                          canvas overlay (preview3d.js projects each light to screen space).
@@ -64,6 +81,6 @@
             <button type="button" id="preview-show" class="preview-show" aria-label="Show preview" title="Show preview" hidden>◳ preview</button>
         </div>
     </div>
-    <script type="module" src="app.js"></script>
+    <script type="module" src="/app.js?ui=20260820a"></script>
 </body>
 </html>

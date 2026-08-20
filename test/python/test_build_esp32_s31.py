@@ -8,15 +8,14 @@ S31 build or its CI matrix entry:
      manifest generator (CHIP_FAMILIES) can't KeyError on it.
   2. esp32s31 is in PREVIEW_TARGETS — without it `idf.py set-target esp32s31` refuses
      ("you have to append '--preview'"), so the build never starts.
-  3. The release workflow infers the IDF target from the firmware-name PREFIX. Because
-     "esp32s31" also startsWith "esp32s3", the esp32s31 check MUST come first, or CI
-     would build the S31 firmware for the WRONG target (esp32s3). We re-implement the
-     same precedence rule here and pin that esp32s31 resolves to esp32s31.
+  3. The release workflow carries each firmware's declared chip into its matrix row.
+     Product-specific firmware names therefore select the same target as local builds.
 
 Imports the real dicts from moondeck/build/build_esp32.py (no ESP-IDF needed).
 Run: `uv run --with pytest pytest test/python -q`.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -76,29 +75,22 @@ def test_s31_is_a_preview_target():
     assert "esp32s31" in PREVIEW_TARGETS
 
 
-def test_ci_target_inference_resolves_esp32s31_before_esp32s3():
-    # Re-implement the release.yml `target:` precedence: esp32s31 → esp32s3 → esp32p4 →
-    # esp32. The esp32s31 check is FIRST on purpose — "esp32s31".startswith("esp32s3") is
-    # True, so a wrong order would map the S31 firmware to the esp32s3 IDF target.
-    def infer_target(firmware: str) -> str:
-        if firmware.startswith("esp32s31"):
-            return "esp32s31"
-        if firmware.startswith("esp32s3"):
-            return "esp32s3"
-        if firmware.startswith("esp32p4"):
-            return "esp32p4"
-        return "esp32"
+def test_ci_matrix_uses_each_firmwares_declared_chip():
+    manifest = json.loads(
+        (ROOT / "web-installer" / "firmwares.json").read_text(encoding="utf-8")
+    )
+    shipping_targets = {
+        entry["name"]: entry["chip"] for entry in manifest["firmwares"] if entry["ships"]
+    }
+    declared_targets = {
+        name: spec["chip"] for name, spec in FIRMWARES.items() if spec["ships"]
+    }
+    assert shipping_targets == declared_targets
+    assert shipping_targets["helio1"] == "esp32s3"
 
-    assert infer_target("esp32s31") == "esp32s31", "S31 must NOT be misread as esp32s3"
-    assert infer_target("esp32s3-n16r8") == "esp32s3"
-    assert infer_target("esp32s3-n8r8") == "esp32s3"
-    assert infer_target("esp32p4-eth") == "esp32p4"
-    assert infer_target("esp32") == "esp32"
-    assert infer_target("esp32-16mb") == "esp32"
-
-    # Belt-and-suspenders: the rule must agree with each real firmware's declared chip.
-    for name, spec in FIRMWARES.items():
-        assert infer_target(name) == spec["chip"], (
-            f'the CI target-inference rule maps "{name}" to "{infer_target(name)}" but its '
-            f'declared chip is "{spec["chip"]}" — release.yml would set the wrong target.'
-        )
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "{firmware: .name, target: .chip}" in workflow
+    assert "target: ${{ matrix.target }}" in workflow
+    assert "startsWith(matrix.firmware" not in workflow

@@ -105,9 +105,8 @@ enum class ControlType : uint8_t {
     Text,       ///< char[N] — a text input.
     TextArea,   ///< multi-line text — same storage/persist path as Text, a resizable
                 ///< `<textarea>` in the UI (script source and other multi-line fields).
-    Password,   ///< secret text — /api/state serializes it XOR-obfuscated + base64, not
-                ///< plaintext. Obfuscation only (XOR key shared with app.js), trivially
-                ///< reversible by design — a first line of defence, not encryption.
+    Password,   ///< secret text — local persistence stores the value; public state
+                ///< serializes only whether it is configured. Writes remain set-only.
     ReadOnly,   ///< display-only text (ptr → char buffer).
     ReadOnlyInt,///< display-only signed int (ptr → int8_t, aux → a unit suffix such as
                 ///< "dBm"). Renders `<value> <suffix>`; 1 byte where a string would be
@@ -142,6 +141,13 @@ enum class ControlType : uint8_t {
 
 // Forward-declared (defined below the enum) so the descriptor can hold a pointer.
 class JsonSink;
+
+// Serialization context for a control value. Persistence needs the stored
+// value; public API responses expose only whether a password is configured.
+enum class ControlValueVisibility : uint8_t {
+    Stored,
+    Public,
+};
 
 // A ControlType::Palette control's options come from the light domain (it owns the palette set
 // and the swatch colors). The descriptor's `aux` holds a pointer to this function; core calls it
@@ -411,9 +417,8 @@ public:
                                .max = bufSize, .validate = validate};
     }
 
-    // Like addText but the value is a secret: the API serializes it
-    // XOR-obfuscated + base64-encoded (not plaintext, but trivially reversible —
-    // see ControlType::Password). Writes still set the real value.
+    // Like addText but the value is a secret: public API reads return only a
+    // configured boolean, while persistence and writes use the real value.
     void addPassword(const char* name, char* var, uint8_t bufSize = 32) {
         grow();
         controls_[count_++] = {var, name, 0, ControlType::Password, 0, bufSize};
@@ -575,9 +580,10 @@ bool hasDefault(ControlType t);
 
 // Emit just the JSON value fragment — 42, "hi", true, "1.2.3.4". No name,
 // no surrounding quotes for the key, no braces. Caller composes the wrapper.
-// Password is rendered as plaintext-JSON-string here (the obfuscation step
-// is HTTP-API-specific and stays at the writeControls call site).
-void writeControlValue(JsonSink& sink, const ControlDescriptor& c);
+// Password is a JSON string for Stored serialization and a boolean
+// "configured" marker for Public serialization.
+void writeControlValue(JsonSink& sink, const ControlDescriptor& c,
+                       ControlValueVisibility visibility = ControlValueVisibility::Stored);
 
 // Emit the per-type extras that go alongside `value` in `/api/state`:
 //   ,"min":N,"max":M   (Uint8 / Int16)

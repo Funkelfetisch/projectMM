@@ -22,12 +22,14 @@ namespace mm {
 // Author: Andrew Tuline (WLED-SR), with enhancements by @softhack007 — https://github.com/MoonModules/MoonLight/blob/main/src/MoonLight/Nodes/Effects/E_WLED.h
 //
 // 1D in spirit (a strip of `nrOfLights` pixels) but declared D2 so it spans a 2D panel as a flat run
-// along the buffer's pixel index; the dot and blur work over the whole pixel count either way.
+// along the buffer's pixel index; sparse layouts use physical light order so the dot lands on real
+// LEDs rather than empty cells in the layout's bounding box.
 /// Audio-reactive effect: blurred dots positioned by frequency band.
 class BlurzEffect : public EffectBase {
 public:
     const char* tags() const override { return "🐙📊"; }  // WLED-lineage · audio
     Dim dimensions() const override { return Dim::D2; }
+    bool usesPhysicalLightOrder() const override { return true; }
 
     // MoonLight/WLED defaults (fadeRate 48, blur 127). fadeRate 48 fades the trail fast enough that
     // each dot stays distinct and punchy rather than smearing into a wash; blur 127 spreads each dot

@@ -91,12 +91,14 @@ jobs:
   # (projected from build_esp32.py's FIRMWARES dict, drift-guarded by
   # check_firmwares.py). Emitted as a JSON array so build-esp32's matrix can
   # fromJSON() it — GitHub matrices can't read a file at parse time, so a job
-  # output is the standard bridge. This is the ONLY firmware list in CI now.
+  # output is the standard bridge. Each matrix row carries the declared chip
+  # target with the firmware name, so branded variants do not depend on naming
+  # conventions. This is the ONLY firmware list in CI now.
   firmwares:
     needs: verify-version
     runs-on: ubuntu-latest
     outputs:
-      list: ${{ steps.gen.outputs.list }}
+      entries: ${{ steps.gen.outputs.entries }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,7 +106,7 @@ jobs:
       - id: gen
         run: |
           set -euo pipefail
-          echo "list=$(jq -c '[.firmwares[] | select(.ships) | .name]' web-installer/firmwares.json)" >> "$GITHUB_OUTPUT"
+          echo "entries=$(jq -c '[.firmwares[] | select(.ships) | {firmware: .name, target: .chip}]' web-installer/firmwares.json)" >> "$GITHUB_OUTPUT"
 
   build-esp32:
     needs: [verify-version, firmwares]
@@ -112,7 +114,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        firmware: ${{ fromJSON(needs.firmwares.outputs.list) }}
+        include: ${{ fromJSON(needs.firmwares.outputs.entries) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -182,15 +184,10 @@ jobs:
           # same tree. This tracks the v6.1 line toward GA; re-pin to the `v6.1`
           # tag once it ships (a deliberate re-test pass, see docs/building.md).
           esp_idf_version: v6.1-beta1
-          # The IDF target follows the firmware-key prefix: esp32s31* → esp32s31
-          # (checked BEFORE esp32s3 — esp32s31 also startsWith 'esp32s3'),
-          # esp32s3* → esp32s3, esp32p4* → esp32p4 (the only target that pulls
-          # the ip101 PHY + esp_hosted, both manifest-gated on target == esp32p4),
-          # everything
-          # else → esp32. (The matrix is the `ships` subset of firmwares.json;
-          # esp32p4-eth-wifi has ships=False in build_esp32.py so it stays out —
-          # its C6-slave Kconfig defaults don't survive a plain CI build.)
-          target: ${{ startsWith(matrix.firmware, 'esp32s31') && 'esp32s31' || startsWith(matrix.firmware, 'esp32s3') && 'esp32s3' || startsWith(matrix.firmware, 'esp32p4') && 'esp32p4' || 'esp32' }}
+          # The generated matrix carries each firmware's declared chip from
+          # firmwares.json. Product names such as helio1 therefore select the
+          # same IDF target as the local build script.
+          target: ${{ matrix.target }}
           path: 'esp32'
           # We run our own builder (not the action's default `idf.py build`)
           # so the sdkconfig fragments and EXCLUDE_COMPONENTS go through the

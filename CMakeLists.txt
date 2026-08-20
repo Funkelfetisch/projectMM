@@ -47,7 +47,7 @@ else()
     # has no FPU, so an accidental float->double promotion is a silent softfloat call in the
     # render path, and it enforces the integer-math rule the coding standards ask for.
     # (GCC/Clang only; the MSVC branch above uses /W4 /WX, which has no direct equivalents.)
-    add_compile_options(-Wall -Wextra -Werror
+    add_compile_options(-Wall -Wextra -Werror -Wno-date-time
                         -Wshadow -Wnon-virtual-dtor -Wdouble-promotion
                         -Wimplicit-fallthrough -Wnull-dereference)
 
@@ -130,7 +130,7 @@ add_custom_target(build_info_gen ALL
 add_custom_command(
     OUTPUT ${CMAKE_SOURCE_DIR}/src/ui/ui_embedded.h
     COMMAND ${CMAKE_COMMAND} -DUI_DIR=${CMAKE_SOURCE_DIR}/src/ui -DOUT=${CMAKE_SOURCE_DIR}/src/ui/ui_embedded.h -DUV_EXECUTABLE=${UV_EXECUTABLE} -P ${CMAKE_SOURCE_DIR}/src/ui/embed_ui.cmake
-    DEPENDS ${CMAKE_SOURCE_DIR}/src/ui/index.html ${CMAKE_SOURCE_DIR}/src/ui/app.js ${CMAKE_SOURCE_DIR}/src/ui/style.css ${CMAKE_SOURCE_DIR}/src/ui/install-picker.js ${CMAKE_SOURCE_DIR}/src/ui/semver.js ${CMAKE_SOURCE_DIR}/src/ui/preview3d.js ${CMAKE_SOURCE_DIR}/src/ui/moonlight-logo.png ${CMAKE_SOURCE_DIR}/src/ui/embed_ui.cmake
+    DEPENDS ${CMAKE_SOURCE_DIR}/src/ui/index.html ${CMAKE_SOURCE_DIR}/src/ui/app.js ${CMAKE_SOURCE_DIR}/src/ui/style.css ${CMAKE_SOURCE_DIR}/src/ui/install-picker.js ${CMAKE_SOURCE_DIR}/src/ui/semver.js ${CMAKE_SOURCE_DIR}/src/ui/preview3d.js ${CMAKE_SOURCE_DIR}/src/ui/heliotrace.js ${CMAKE_SOURCE_DIR}/src/ui/helio-preview.js ${CMAKE_SOURCE_DIR}/src/ui/helio-scenes.js ${CMAKE_SOURCE_DIR}/src/ui/helio-orchestration.js ${CMAKE_SOURCE_DIR}/src/ui/moonlight-logo.png ${CMAKE_SOURCE_DIR}/src/ui/helio-favicon.svg ${CMAKE_SOURCE_DIR}/src/ui/embed_ui.cmake
     COMMENT "Embedding UI files"
 )
 add_custom_target(ui_embed DEPENDS ${CMAKE_SOURCE_DIR}/src/ui/ui_embedded.h)

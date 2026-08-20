@@ -60,6 +60,9 @@ const clampDot = (v) => Math.min(DOT_MAX, Math.max(DOT_MIN, Number.isFinite(v) ?
 // localStorage value (or a manual edit) can't push the dot size to a performance-killing extreme.
 let dotScale_ = clampDot(parseFloat(localStorage.getItem("mm_preview_dot")));
 let resetLayout_ = null;     // set by setupLayout(): restores docked/PiP state to defaults
+let refreshLayout_ = null;   // set by setupLayout(): reapplies mode after app-level class changes
+let showFloating_ = null;    // set by setupLayout(): opens the preview as a visible PiP
+let helioPreviewOpen_ = false;
 let previewBox_ = null;      // {x,y,z} bounding-box extent for camera auto-fit
 let lineProgram = null;      // separate program for the wireframe bounding box
 let lineLocs = null;
@@ -316,17 +319,27 @@ function setupLayout() {
 
     // Pick the mode from width + the manual override, apply classes, re-fit the canvas.
     function applyMode() {
-        const pip = forcePip || window.innerWidth < PIP_BELOW;
+        const helio = ws.classList.contains("helio-device");
+        const pip = helio || forcePip || window.innerWidth < PIP_BELOW;
+        const hidden = pip && (helio ? !helioPreviewOpen_ : dismissed);
         ws.classList.toggle("mode-pip", pip);
         ws.classList.toggle("mode-docked", !pip);
-        ws.classList.toggle("preview-hidden", pip && dismissed);
+        ws.classList.toggle("preview-hidden", hidden);
         const showBtn = document.getElementById("preview-show");
-        if (showBtn) showBtn.hidden = !(pip && dismissed);
+        if (showBtn) showBtn.hidden = helio || !(pip && dismissed);
         // The dock button means "pop out" when docked, "re-dock" when floating.
         const dockBtn = document.getElementById("preview-dock");
         if (dockBtn) dockBtn.textContent = pip ? "⤡" : "⤢";
         requestAnimationFrame(() => { placeCorner(); refit(); });
     }
+    refreshLayout_ = applyMode;
+    showFloating_ = () => {
+        helioPreviewOpen_ = true;
+        dismissed = false;
+        forcePip = true;
+        savePrefs({ corner, dismissed, forcePip });
+        applyMode();
+    };
 
     // Let the preview "reset" button restore the docked/PiP layout to defaults too (back to
     // auto docked-vs-PiP, not dismissed, default corner) — these vars are closure-local here.
@@ -356,6 +369,7 @@ function setupLayout() {
     // pops it out (forcePip) so the result is immediate — closing a docked preview hides
     // it now rather than only when narrow auto-PiP later kicks in.
     document.getElementById("preview-close")?.addEventListener("click", () => {
+        if (ws.classList.contains("helio-device")) helioPreviewOpen_ = false;
         dismissed = true;
         if (!ws.classList.contains("mode-pip")) forcePip = true;
         savePrefs({ corner, dismissed, forcePip });
@@ -521,6 +535,7 @@ function renderPreviewFrame(view, buf) {
     // mid-flight: the colors would land on the wrong positions (a visibly scrambled frame).
     // Skip such a frame; the matching coord table arrives within ~1 frame and they realign.
     if (count !== previewCoordCount_ || stride !== previewStride_) return;
+    notifyLiveFrame(rgb, count, stride);
     drawLights(rgb);
     measureFrameRate();
 }
@@ -533,6 +548,7 @@ function renderPreviewFrame(view, buf) {
 // high-resolution browser clock.
 const frameStamps_ = [];        // arrival times (ms) within the trailing window
 let effectiveFps_ = 0;
+const liveFrameListeners_ = new Set();
 function measureFrameRate() {
     const now = performance.now();
     frameStamps_.push(now);
@@ -542,7 +558,19 @@ function measureFrameRate() {
     updatePreviewStatus();
 }
 
-// Build the vertex buffer from previewCoords_ + per-light color and (re)start the render loop.
+function notifyLiveFrame(rgb, count, stride) {
+    if (!liveFrameListeners_.size) return;
+    const frame = { rgb, count, stride, time: performance.now() };
+    for (const listener of liveFrameListeners_) {
+        try {
+            listener(frame);
+        } catch (err) {
+            console.warn("[preview] frame listener failed", err);
+        }
+    }
+}
+
+// Build the vertex buffer from previewCoords_ + per-light colour and (re)start the render loop.
 // rgb may be null — then every light is drawn off (the shader's placeholder ring), so the grid
 // LAYOUT shows the instant the coordinate table arrives (a fresh page / UI refresh), before any
 // color frame. A color frame then calls this again with its rgb to light the scene.
@@ -922,7 +950,14 @@ export const preview = {
     init: initWebGL,
     setupLayout: setupLayout,
     setProductInfo: setProductInfo,
+    refreshLayout: () => { if (refreshLayout_) refreshLayout_(); },
+    showFloating: () => { if (showFloating_) showFloating_(); },
     onBinaryMessage: renderPreviewBinary,
+    onFrame: (listener) => {
+        if (typeof listener !== "function") return () => {};
+        liveFrameListeners_.add(listener);
+        return () => liveFrameListeners_.delete(listener);
+    },
     resetCamera: resetCamera,
     // Redraw the last frame with the current theme's background — call on a theme
     // toggle so an idle preview (no live frames) repaints to the new --bg-0

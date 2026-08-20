@@ -7,7 +7,7 @@
 # embedded-web-UI practice (WLED, ESPHome, ESP-IDF examples all pre-gzip assets).
 # Compression runs on the BUILD HOST via Python's gzip module — stdlib, so any
 # Python interpreter works (chosen over a `gzip` binary that Windows toolchains
-# may lack). The PNG is already compressed, so it stays raw.
+# may lack). Already-compressed binary assets stay raw.
 #
 # Interpreter resolution — callers pick ONE of:
 #   PYTHON_CMD       — a CMake list giving the exact argv prefix (ESP32 path
@@ -55,6 +55,10 @@ gzip_file_hex("install-picker.js" INSTALL_PICKER_JS)
 gzip_file_hex("semver.js" SEMVER_JS)
 gzip_file_hex("preview3d.js" PREVIEW3D_JS)
 gzip_file_hex("heliotrace.js" HELIOTRACE_JS)
+gzip_file_hex("helio-preview.js" HELIO_PREVIEW_JS)
+gzip_file_hex("helio-scenes.js" HELIO_SCENES_JS)
+gzip_file_hex("helio-orchestration.js" HELIO_ORCHESTRATION_JS)
+gzip_file_hex("helio-favicon.svg" HELIO_FAVICON_SVG)
 file(READ "${UI_DIR}/moonlight-logo.png" LOGO_PNG HEX)
 
 # Convert hex string to C array initializer
@@ -79,6 +83,10 @@ hex_to_c_array("${INSTALL_PICKER_JS}" "installPickerJs" INSTALL_PICKER_ARRAY)
 hex_to_c_array("${SEMVER_JS}" "semverJs" SEMVER_ARRAY)
 hex_to_c_array("${PREVIEW3D_JS}" "preview3dJs" PREVIEW3D_ARRAY)
 hex_to_c_array("${HELIOTRACE_JS}" "helioTraceJs" HELIOTRACE_ARRAY)
+hex_to_c_array("${HELIO_PREVIEW_JS}" "helioPreviewJs" HELIO_PREVIEW_ARRAY)
+hex_to_c_array("${HELIO_SCENES_JS}" "helioScenesJs" HELIO_SCENES_ARRAY)
+hex_to_c_array("${HELIO_ORCHESTRATION_JS}" "helioOrchestrationJs" HELIO_ORCHESTRATION_ARRAY)
+hex_to_c_array("${HELIO_FAVICON_SVG}" "helioFaviconSvg" HELIO_FAVICON_ARRAY)
 hex_to_c_array("${LOGO_PNG}" "logoPng" LOGO_ARRAY)
 
 string(LENGTH "${INDEX_HTML}" INDEX_HEX_LEN)
@@ -88,6 +96,10 @@ string(LENGTH "${INSTALL_PICKER_JS}" INSTALL_PICKER_HEX_LEN)
 string(LENGTH "${SEMVER_JS}" SEMVER_HEX_LEN)
 string(LENGTH "${PREVIEW3D_JS}" PREVIEW3D_HEX_LEN)
 string(LENGTH "${HELIOTRACE_JS}" HELIOTRACE_HEX_LEN)
+string(LENGTH "${HELIO_PREVIEW_JS}" HELIO_PREVIEW_HEX_LEN)
+string(LENGTH "${HELIO_SCENES_JS}" HELIO_SCENES_HEX_LEN)
+string(LENGTH "${HELIO_ORCHESTRATION_JS}" HELIO_ORCHESTRATION_HEX_LEN)
+string(LENGTH "${HELIO_FAVICON_SVG}" HELIO_FAVICON_HEX_LEN)
 string(LENGTH "${LOGO_PNG}" LOGO_HEX_LEN)
 math(EXPR INDEX_LEN "${INDEX_HEX_LEN} / 2")
 math(EXPR APP_LEN "${APP_HEX_LEN} / 2")
@@ -96,6 +108,10 @@ math(EXPR INSTALL_PICKER_LEN "${INSTALL_PICKER_HEX_LEN} / 2")
 math(EXPR SEMVER_LEN "${SEMVER_HEX_LEN} / 2")
 math(EXPR PREVIEW3D_LEN "${PREVIEW3D_HEX_LEN} / 2")
 math(EXPR HELIOTRACE_LEN "${HELIOTRACE_HEX_LEN} / 2")
+math(EXPR HELIO_PREVIEW_LEN "${HELIO_PREVIEW_HEX_LEN} / 2")
+math(EXPR HELIO_SCENES_LEN "${HELIO_SCENES_HEX_LEN} / 2")
+math(EXPR HELIO_ORCHESTRATION_LEN "${HELIO_ORCHESTRATION_HEX_LEN} / 2")
+math(EXPR HELIO_FAVICON_LEN "${HELIO_FAVICON_HEX_LEN} / 2")
 math(EXPR LOGO_LEN "${LOGO_HEX_LEN} / 2")
 
 file(WRITE "${OUT}" "// Auto-generated — do not edit. Rebuild to update.\n")
@@ -114,6 +130,14 @@ file(APPEND "${OUT}" "constexpr uint8_t preview3dJs[] = {${PREVIEW3D_ARRAY}};\n"
 file(APPEND "${OUT}" "constexpr size_t preview3dJsLen = ${PREVIEW3D_LEN};\n")
 file(APPEND "${OUT}" "constexpr uint8_t helioTraceJs[] = {${HELIOTRACE_ARRAY}};\n")
 file(APPEND "${OUT}" "constexpr size_t helioTraceJsLen = ${HELIOTRACE_LEN};\n")
+file(APPEND "${OUT}" "constexpr uint8_t helioPreviewJs[] = {${HELIO_PREVIEW_ARRAY}};\n")
+file(APPEND "${OUT}" "constexpr size_t helioPreviewJsLen = ${HELIO_PREVIEW_LEN};\n")
+file(APPEND "${OUT}" "constexpr uint8_t helioScenesJs[] = {${HELIO_SCENES_ARRAY}};\n")
+file(APPEND "${OUT}" "constexpr size_t helioScenesJsLen = ${HELIO_SCENES_LEN};\n")
+file(APPEND "${OUT}" "constexpr uint8_t helioOrchestrationJs[] = {${HELIO_ORCHESTRATION_ARRAY}};\n")
+file(APPEND "${OUT}" "constexpr size_t helioOrchestrationJsLen = ${HELIO_ORCHESTRATION_LEN};\n")
+file(APPEND "${OUT}" "constexpr uint8_t helioFaviconSvg[] = {${HELIO_FAVICON_ARRAY}};\n")
+file(APPEND "${OUT}" "constexpr size_t helioFaviconSvgLen = ${HELIO_FAVICON_LEN};\n")
 file(APPEND "${OUT}" "constexpr uint8_t logoPng[] = {${LOGO_ARRAY}};\n")
 file(APPEND "${OUT}" "constexpr size_t logoPngLen = ${LOGO_LEN};\n")
 file(APPEND "${OUT}" "} // namespace mm::ui\n")

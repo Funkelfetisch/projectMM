@@ -27,13 +27,13 @@ public:
     Dim dimensions() const override { return Dim::D3; }
 
     // Defaults match MoonLight's StarSky exactly.
-    uint8_t speed           = 1;     // fade step per frame (0..42)
-    uint8_t star_fill_ratio = 42;    // stars per 10000 lights (the pool-size lever)
-    bool    usePalette      = false; // false → white stars; true → per-star palette color
+    uint8_t  speed           = 1;     // fade step per frame (0..42)
+    uint16_t star_fill_ratio = 42;    // stars per 10000 lights (the pool-size lever)
+    bool     usePalette      = false; // false → white stars; true → per-star palette color
 
     void defineControls() override {
         controls_.addUint8("speed", speed, 0, 42);
-        controls_.addUint8("star_fill_ratio", star_fill_ratio, 0, 255);
+        controls_.addUint16("star_fill_ratio", star_fill_ratio, 0, 2500);
         controls_.addBool("usePalette", usePalette);
     }
 

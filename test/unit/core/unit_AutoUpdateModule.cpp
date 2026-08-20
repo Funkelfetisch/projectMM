@@ -72,3 +72,12 @@ TEST_CASE("AutoUpdateModule compares dev versions monotonically") {
     CHECK_FALSE(AutoUpdateModule::versionIsNewer("2.1.0-dev.6", "2.1.0-dev.7"));
     CHECK(AutoUpdateModule::versionIsNewer("2.1.0", "2.1.0-dev.9"));
 }
+
+// A bare dev suffix is the local workbench build; numbered dev builds are published OTA artifacts.
+TEST_CASE("AutoUpdateModule recognises local development builds") {
+    CHECK(AutoUpdateModule::isLocalDevelopmentBuild("2.1.0-dev"));
+    CHECK(AutoUpdateModule::isLocalDevelopmentBuild("latest-2-g866fdd7-dirty"));
+    CHECK(AutoUpdateModule::isLocalDevelopmentBuild(""));
+    CHECK_FALSE(AutoUpdateModule::isLocalDevelopmentBuild("2.1.0-dev.92"));
+    CHECK_FALSE(AutoUpdateModule::isLocalDevelopmentBuild("2.1.0"));
+}

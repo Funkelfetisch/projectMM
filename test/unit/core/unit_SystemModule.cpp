@@ -45,6 +45,18 @@ TEST_CASE("SystemModule deviceName control") {
     CHECK(found);
 }
 
+TEST_CASE("SystemModule accepts product identity defaults before setup") {
+    mm::SystemModule sys;
+    sys.setDefaultDeviceName("HELIO");
+    sys.setDefaultDeviceModel("HELIO 1");
+    sys.setDefaultDeviceName("ignored");
+    sys.setDefaultDeviceModel("ignored");
+    sys.setup();
+
+    CHECK(std::strcmp(sys.deviceName(), "HELIO") == 0);
+    CHECK(std::strcmp(sys.deviceModel(), "HELIO 1") == 0);
+}
+
 namespace {
 // Overwrite SystemModule's deviceName buffer through its bound control pointer —
 // the same buffer the persistence overlay and an /api/control write target. Lets a

@@ -151,8 +151,12 @@ public:
         // why GCC flags the pattern. snprintf terminates and truncates identically. (A 99-char SSID
         // into a 32-byte buffer DOES truncate — but an over-long SSID is invalid anyway, and a
         // truncated-but-terminated string is what the old code already produced.)
-        std::snprintf(ssid_, sizeof(ssid_), "%s", ssid);
-        std::snprintf(password_, sizeof(password_), "%s", password ? password : "");
+        char nextSsid[sizeof(ssid_)] = {};
+        char nextPassword[sizeof(password_)] = {};
+        std::snprintf(nextSsid, sizeof(nextSsid), "%s", ssid);
+        std::snprintf(nextPassword, sizeof(nextPassword), "%s", password ? password : "");
+        std::memcpy(ssid_, nextSsid, sizeof(ssid_));
+        std::memcpy(password_, nextPassword, sizeof(password_));
         markDirty();
         FilesystemModule::noteDirty();   // start the debounce so the change actually flushes
                                          // (markDirty alone only sets the bit; the save scheduler
@@ -170,6 +174,10 @@ public:
             if (state_ == State::WaitingSta || state_ == State::ConnectedSta) {
                 platform::wifiStaStop();
                 noteRadioStopped();
+            }
+            if (ssid_[0] == 0) {
+                startAP();
+                return;
             }
             if (platform::wifiStaInit(ssid_, password_)) {
                 state_ = State::WaitingSta;
@@ -276,6 +284,7 @@ public:
         if constexpr (platform::hasWiFi) {
             controls_.addText("ssid", ssid_, sizeof(ssid_));
             controls_.addPassword("password", password_, sizeof(password_));
+            controls_.addButton("connectWifi");
             // RSSI is meaningful only while associated as a STA. Hide on
             // Ethernet / AP / Idle to avoid showing a stale 0 dBm reading.
             controls_.addReadOnlyInt("rssi", rssi_, "dBm");
@@ -375,6 +384,13 @@ public:
             controls_.setHidden(controls_.count() - 1, !isSpi);
         }
         // Chain to base is at the top of this method — see comment there.
+    }
+
+    void onControlChanged(const char* controlName) override {
+        if (controlName && std::strcmp(controlName, "connectWifi") == 0) {
+            setWifiCredentials(ssid_, password_);
+        }
+        MoonModule::onControlChanged(controlName);
     }
 
     void tick1s() MM_NONBLOCKING override {

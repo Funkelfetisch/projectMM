@@ -639,6 +639,10 @@ private:
         }
         char prefix[24];
         std::snprintf(prefix, sizeof(prefix), "%s.", type);
+        // The subtree contains ordinary controls and may rebuild storage a core-1 driver reads.
+        // Park that worker before the first write; this also covers direct WLED and MQTT applies
+        // which do not pass through the editable-list HTTP handlers.
+        MoonModule::notifyQuiesceRender();
         const bool applied = fs->applySubtree(m, body, prefix);
         platform::free(body);
         if (!applied) { setStatusf(Severity::Error, "could not apply %s", presetName); return false; }

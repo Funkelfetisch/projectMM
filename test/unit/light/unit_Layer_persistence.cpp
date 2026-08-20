@@ -41,6 +41,13 @@ struct FadeOnlyEffect : mm::EffectBase {
     void tick() MM_NONBLOCKING override { layer()->fadeToBlackBy(amt); }
 };
 
+struct FillEffect : mm::EffectBase {
+    mm::RGB color{};
+    const char* tags() const override { return ""; }
+    mm::Dim dimensions() const override { return mm::Dim::D3; }
+    void tick() MM_NONBLOCKING override { mm::draw::fill(layer()->buffer(), color); }
+};
+
 struct Scene {
     mm::Layouts layouts;
     mm::GridLayout grid;
@@ -143,4 +150,29 @@ TEST_CASE("Layer: prepare clears the buffer (a rebuild wipes stale pixels)") {
     for (size_t i = 0; i < b.bytes(); i++)
         if (b.data()[i] != 0) { allBlack = false; break; }
     CHECK(allBlack);
+}
+
+TEST_CASE("Layer: a scene change clears stale pixels and renders without a black frame") {
+    Scene s(4, 4);
+    FillEffect red;
+    FillEffect green;
+    red.color = {255, 0, 0};
+    green.color = {0, 255, 0};
+    green.setEnabled(false);
+    s.layer.addChild(&red);
+    s.layer.addChild(&green);
+    s.layer.applyState();
+
+    s.layer.tick();
+    CHECK(s.layer.buffer().data()[0] == 255);
+    CHECK(s.layer.buffer().data()[1] == 0);
+
+    red.setEnabled(false);
+    green.setEnabled(true);
+    s.layer.applyState();
+    s.layer.tick();
+
+    CHECK(s.layer.buffer().data()[0] == 0);
+    CHECK(s.layer.buffer().data()[1] == 255);
+    CHECK(s.layer.buffer().data()[2] == 0);
 }

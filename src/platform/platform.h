@@ -159,8 +159,8 @@ struct WorkerTask { void* impl = nullptr; };
 using WorkerFn = void(*)(void* user);
 // Spawn `fn(user)` on a task named `name` with `stackBytes` stack, at `priority`, pinned to
 // `core` (0 or 1; -1 = no affinity). Returns false if the task couldn't be created — the caller
-// then runs the work inline (the allocate-and-degrade fallback). The spawned fn owns its loop and
-// returns only after stopPinnedTask signals it.
+// chooses its domain-appropriate degradation (an output stage can run inline; a blocking sensor
+// reports unavailable). The spawned fn owns its loop and returns only after stopPinnedTask signals it.
 bool spawnPinnedTask(WorkerTask& t, const char* name, WorkerFn fn, void* user,
                      size_t stackBytes, uint8_t priority, int core);
 // Wake the task blocked in waitNotify (producer side; safe from any task on any core).
@@ -171,9 +171,9 @@ bool waitNotify(WorkerTask& t, uint32_t timeoutMs);
 // Signal stop + wake, then block until the worker fn has returned and the task is torn down.
 void stopPinnedTask(WorkerTask& t);
 // Subscribe THIS task to the task watchdog (esp_task_wdt_add), so a wedge on it panics-and-reboots (the
-// self-heal) instead of hanging silently. Called by each task that feeds the WDT before it starts ticking:
-// the render loop, and the core-1 encode worker. The subscription is per-task (so is the feed and the flag
-// behind it), which is why a task must subscribe itself rather than inherit another task's subscription.
+// self-heal) instead of hanging silently. The render task subscribes itself; every generic worker is
+// subscribed by its platform trampoline. The subscription is per-task (so is the feed and the flag behind
+// it), which is why a task must subscribe itself rather than inherit another task's subscription.
 // The sdkconfig has idle-task checking OFF (a saturated core is healthy, not a bug), so nothing is watched
 // unless a task subscribes explicitly. No-op on desktop.
 void taskWdtSubscribe();
@@ -230,6 +230,9 @@ void clearTestGpioLiveState();
 // Lets a test force MappingLUT's paged-destinations fallback without an actual
 // fragmented heap. Production never calls this; reset to 0 in release.
 void setTestMaxAllocBlock(size_t bytes);
+// Test-only (desktop): hold RMT transfers in-flight so driver lifecycle tests can prove that
+// teardown retains a borrowed source frame. Production never calls this; true is the default.
+void setTestRmtWaitComplete(bool complete);
                                 // (scarce; use this as the memory-pressure KPI).
                                 // PSRAM blocks dominate on S3/S2 boards and make
                                 // maxAllocBlock useless as a stress signal —
@@ -562,9 +565,20 @@ void setHostname(const char* name);
 // rest of the task's lifetime. FirmwareUpdateModule polls all three at 1 Hz
 // and copies into its Control buffers so the WS state push surfaces progress
 // to the UI without extra wiring.
+// Confirm the running image after application setup completes. On ESP32 this
+// cancels bootloader rollback for an image in PENDING_VERIFY; desktop is a no-op.
+void markOtaAppValid();
+
 bool http_fetch_to_ota(const char* url,
                        char* statusBuf, size_t statusBufLen,
                        uint32_t* bytesReadOut, uint32_t* bytesTotalOut);
+
+// The manifest-driven update path additionally verifies the expected app size and SHA-256
+// before the OTA partition is committed. Empty hash and zero size disable those checks.
+bool http_fetch_to_ota_checked(const char* url, const char* expectedSha256,
+                               uint32_t expectedSize,
+                               char* statusBuf, size_t statusBufLen,
+                               uint32_t* bytesReadOut, uint32_t* bytesTotalOut);
 
 // OTA — flash a firmware image STREAMED from `src` (no URL fetch; the caller pulls the bytes,
 // e.g. straight off an HTTP upload body). Same producer callback shape as fsWriteStream: `src`
@@ -591,6 +605,10 @@ bool otaWriteStream(FsWriteSrc src, void* user, size_t contentLen,
 // fetch / the old mDNS browse). Built on raw sockets, same primitives as the HTTP server.
 int httpRequest(const char* method, const char* host, uint16_t port, const char* path,
                 const char* reqBody, uint32_t timeoutMs, char* body, size_t bodyLen);
+
+// Synchronous HTTP(S) GET into a fixed caller buffer. Follows redirects and uses the
+// platform trust store for TLS. Returns the status code, or 0 on transport failure.
+int httpGet(const char* url, char* body, size_t bodyLen, uint32_t timeoutMs);
 
 // Improv WiFi provisioning over UART0.
 // ESP32 only; desktop stub returns false. Spawns a FreeRTOS task that installs
@@ -727,6 +745,7 @@ public:
 
     bool open(uint16_t port);
     TcpConnection accept();  // non-blocking, returns invalid if none pending
+    bool valid() const { return fd_ >= 0; }
     void close();
 
 private:
@@ -750,10 +769,19 @@ private:
 // (a heap struct holding the channel + encoder); the driver never inspects it.
 struct RmtWs2812Handle { void* impl = nullptr; };
 
+// WS2812 bit timing in nanoseconds. The platform's byte encoder turns each source byte into RMT
+// symbols as it feeds the peripheral, so callers keep only their corrected channel bytes in RAM.
+struct RmtWs2812Timing {
+    uint32_t t0hNs = 350;
+    uint32_t t1hNs = 700;
+    uint32_t periodNs = 1250;
+};
+
 // Allocate + configure one RMT TX channel on `gpio`. `resolutionHz` is the tick
-// clock the caller expresses symbol durations in; `invert` flips output polarity
-// for inverting level-shifters. Returns false on failure (and on non-ESP32).
-bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t gpio, uint32_t resolutionHz, bool invert);
+// clock used to convert `timing`; `invert` flips output polarity for inverting
+// level-shifters. Returns false on failure (and on non-ESP32).
+bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t gpio, uint32_t resolutionHz, bool invert,
+                   RmtWs2812Timing timing = RmtWs2812Timing{});
 
 // The tick resolution the platform actually granted (may differ from requested).
 // The driver converts its ns timings to ticks with this. 0 if not initialised.
@@ -766,14 +794,20 @@ uint32_t rmtWs2812Resolution(const RmtWs2812Handle& h) MM_NONBLOCKING;
 // when the channel isn't initialised (and on targets without RMT).
 bool rmtWs2812Transmit(RmtWs2812Handle& h, const uint32_t* symbols, size_t symbolCount);
 
-// Block until the channel's in-flight transmission finishes, bounded by
-// `timeoutMs` so a wedged peripheral can't hang the render tick forever — a
-// timed-out frame is simply dropped and re-encoded next tick (self-heals). With
-// N channels waited sequentially the worst case is N×timeoutMs; acceptable for
-// the same self-healing reason.
-void rmtWs2812Wait(RmtWs2812Handle& h, uint32_t timeoutMs);
+// Start transmitting a corrected WS2812 byte stream through the platform byte encoder. The source
+// buffer stays byte-sized (RGB = 3 bytes/light, RGBW = 4) instead of expanding every bit to a
+// 32-bit symbol. The bytes must remain valid until rmtWs2812Wait returns.
+bool rmtWs2812TransmitBytes(RmtWs2812Handle& h, const uint8_t* bytes, size_t byteCount);
 
-void rmtWs2812Deinit(RmtWs2812Handle& h);
+// Wait for the channel's in-flight transmission, bounded by `timeoutMs` so a
+// wedged peripheral cannot hang the render tick forever. Returns true only when
+// the transfer completed; until then the caller must keep the source buffer
+// unchanged because the encoder/DMA can still be reading it.
+bool rmtWs2812Wait(RmtWs2812Handle& h, uint32_t timeoutMs);
+
+// Release a channel only after its transfer is complete. Returns false when the bounded wait
+// expires; in that case the handle and its borrowed source buffer must remain alive and unchanged.
+bool rmtWs2812Deinit(RmtWs2812Handle& h);
 
 // RX loopback capture, on-device test only (no-op stub off ESP32). Capture up to
 // `maxSymbols` pulse-duration symbols on `gpio` (jumpered from the TX pin) within
@@ -1266,6 +1300,36 @@ void audioFft(const float* windowed, size_t n, float* outMag);
 
 // Sentinel: the bus couldn't be opened (already held by another driver, or no
 // I2C on this target) — distinct from a successful scan that found 0 devices.
+// One persistent I2C device. The platform owns both opaque handles (the bus and
+// the addressed device); domain modules keep this small POD and perform bounded
+// writes/reads without knowing an ESP-IDF type. Blocking transactions belong on
+// a worker task; scheduler ticks consume only completed results.
+struct I2cDeviceHandle {
+    void* bus = nullptr;
+    void* device = nullptr;
+};
+
+// Open one 7-bit-addressed device on an I2C controller. `busIndex` selects the
+// hardware controller, while SDA/SCL remain freely routed GPIOs. Returns false
+// when the controller or pins are unavailable. Calling it on an open handle
+// first releases that handle, so live reconfiguration is idempotent.
+bool i2cDeviceInit(I2cDeviceHandle& h, uint8_t busIndex, uint16_t sda, uint16_t scl,
+                   uint8_t address, uint32_t frequencyHz);
+
+// One bounded transaction with a STOP condition. BH1750 and many registerless
+// sensors require each command byte as its own write, so write and read remain
+// separate textbook I2C operations instead of a register-specific helper.
+bool i2cDeviceWrite(I2cDeviceHandle& h, const uint8_t* data, size_t length,
+                    uint32_t timeoutMs);
+bool i2cDeviceRead(I2cDeviceHandle& h, uint8_t* data, size_t length,
+                   uint32_t timeoutMs);
+
+void i2cDeviceDeinit(I2cDeviceHandle& h);
+
+// Desktop-test seam: add latency to each I2C operation so a module test can
+// prove the scheduler-facing path stays nonblocking. No-op on hardware.
+void setTestI2cDelayMs(uint32_t delayMs);
+
 inline constexpr size_t kI2cBusUnavailable = static_cast<size_t>(-1);
 
 // Scan the I2C bus on (sda, scl); write the 7-bit addresses that ACK into

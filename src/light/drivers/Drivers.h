@@ -10,6 +10,7 @@
 #include "light/drivers/Correction.h"
 #include "light/Palette.h"   // the global active palette + its select control
 #include "core/LightSummary.h"   // the POD published for the domain-neutral WLED/MQTT consumers
+#include "core/Bh1750Service.h"  // transient ambient brightness; the manual level stays persisted here
 #include "platform/platform.h"
 
 #include <cstring>  // std::strcmp in onControlChanged
@@ -109,16 +110,13 @@ public:
     /// is the only place that can't be skipped.
     ~Drivers() override { stopEncodeTask(); }
 
-    /// Stop the core-1 encode worker so a STRUCTURAL TREE MUTATION (a module replace / delete / add) can
-    /// free tree nodes without the worker dereferencing them mid-tick. The worker ticks the driver
-    /// children, and a driver walks the whole Layouts/Layer tree (PreviewDriver::sendFrame →
-    /// Layouts::forEachCoord), so freeing ANY layout/layer/driver node while core 1 runs is a
-    /// use-after-free — a LoadProhibited fault (e.g. replacing a layout on a running split device). The
-    /// mutation path (HttpServerModule) calls this before the free; the trailing prepareTree() re-engages
-    /// the split. Idempotent + safe when the split is off (stopEncodeTask guards on the task handle).
+    /// Park at the core-1 encode frame boundary before another core mutates state the worker reads.
+    /// This covers both structural mutations and ordinary control writes: a driver walks the complete
+    /// Layouts/Layer tree and reads its correction while encoding, so changing either mid-tick is a data
+    /// race. A healthy worker stays alive and consumes the next frame normally; only a timed-out worker
+    /// is stopped and the pipeline degrades to inline output. Idempotent and safe when the split is off.
     void quiesceRenderSplit() {
-        stopEncodeTask();
-        renderSplitActive_ = false;
+        if (!quiesceEncode()) stopEncodeTask();
     }
     /// Reach the live Drivers (the one that owns the encode worker) to quiesce it around a mutation.
     static Drivers* active() { return ActiveInstance<Drivers>::active(); }
@@ -193,7 +191,11 @@ public:
 
     // The brightness actually fed to the LUT: 0 when powered off, else the set brightness. Keeping
     // `on` and `brightness` independent means "off" never clobbers the level the user chose.
-    uint8_t effectiveBrightness() const { return on ? brightness : 0; }
+    uint8_t effectiveBrightness() const {
+        uint8_t effective = brightness;
+        Bh1750Service::automaticBrightness(effective);
+        return on ? effective : 0;
+    }
 
     void defineControls() override {
         controls_.addBool("on", on);   // master power — first so it renders at the top of the card
@@ -400,6 +402,11 @@ public:
             renderWaitUs_ = static_cast<uint32_t>(platform::micros() - s0);
             if (renderWaitUs_ > renderWaitPeakUs_) renderWaitPeakUs_ = renderWaitUs_;   // the 1 s window's worst, for the KPI
         }
+        // The ambient service updates before the light pipeline in scheduler order. Observe its
+        // revision only after the previous core-1 encode is quiescent, then rebuild each driver's
+        // tiny correction LUT exactly once for a newly accepted target. The per-frame steady path
+        // is one integer comparison; sensor noise inside the service's hysteresis never reaches it.
+        refreshAmbientBrightness();
         // Composite into outputBuffer_ when one is allocated (≥2 enabled layers,
         // or a single layer with a LUT — see prepare). A null data_ means
         // prepare couldn't claim a block (heap fragmentation): skip the blend;
@@ -475,7 +482,7 @@ public:
     // If the worker does NOT come back within the timeout, the caller is about to DELETE the very
     // object it may still be inside — so tear the task down (a join) before returning. Letting a
     // timed-out quiesce return is the use-after-free this whole hook exists to prevent.
-    void quiesce() override { if (!quiesceEncode()) stopEncodeTask(); }
+    void quiesce() override { quiesceRenderSplit(); }
 
 private:
     Effects* effects_ = nullptr;  // bound container; layer_ re-resolved from it at prepareTree
@@ -506,6 +513,14 @@ private:
     uint32_t renderWaitUs_ = 0;                 // last frame's core-0 wait at the boundary (the tick-line KPI)
     uint32_t renderWaitPeakUs_ = 0;             // worst wait in the current 1 s window (what the control shows)
     char renderWaitStr_[32] = {};               // the `renderWait` read-only control's text (refreshed in tick1s)
+    uint32_t ambientBrightnessRevision_ = 0;    // transient target currently baked into corrections
+
+    void refreshAmbientBrightness() {
+        const uint32_t revision = Bh1750Service::brightnessRevision();
+        if (revision == ambientBrightnessRevision_) return;
+        ambientBrightnessRevision_ = revision;
+        rebuildAllCorrections();
+    }
 
     // Core-1 body: block for a notify, run EVERY driver child's tick() against the finished frame in
     // outputBuffer_, signal done. Reached only while renderSplitActive_. One rule, no per-driver
@@ -513,11 +528,8 @@ private:
     // dominant CPU cost) and the network send (ArtNet at 16K is the other big one) both leave the
     // render core. Each driver's tick() is unchanged; only which core calls it differs.
     void runEncodeLoop() {
-        // Subscribe THIS (core-1) task to the WDT before feeding it: the subscription is per-task, so the
-        // taskWdtReset() calls below only count once this task itself is added. Without this, feeding a
-        // subscription the render task made on a DIFFERENT task is rejected as "task not found" and floods
-        // the log every frame, starving the network stack (the WS drops → reconnect → full-state → UI churn).
-        platform::taskWdtSubscribe();
+        // The platform worker trampoline owns this task's watchdog subscription. Feeding after each job
+        // keeps long encode loops bounded without duplicating lifecycle ownership in this domain module.
         while (!encodeStop_.load(std::memory_order_acquire)) {
             if (!platform::waitNotify(encodeTask_, 100)) { platform::taskWdtReset(); continue; }
             if (encodeStop_.load(std::memory_order_acquire)) break;
@@ -527,7 +539,6 @@ private:
             platform::taskWdtReset();
             encodeDone_.store(true, std::memory_order_release);
         }
-        platform::taskWdtUnsubscribe();   // leave the WDT clean before the task exits (no dangling entry)
     }
     static void encodeTrampoline(void* self) { static_cast<Drivers*>(self)->runEncodeLoop(); }
 

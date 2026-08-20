@@ -83,6 +83,7 @@ struct Correction {
     uint8_t offUV = kAbsent;
     uint8_t outChannels = 3;        // bytes emitted per light (= channelsPerLight of the wiring)
     WhiteMode whiteMode = WhiteMode::Min;   // how white is synthesized from RGB (white lights only)
+    uint8_t previewWhitePoint[3] = {255, 255, 255};  // display RGB of the physical white emitter
 
     // Cold path: refresh the brightness LUT and DERIVE the color-role offsets from the
     // light's channel-role array (`roles`, `nChannels` entries — the driver's dynamic
@@ -116,16 +117,41 @@ struct Correction {
         outChannels = nChannels;
     }
 
+    void setPreviewWhitePoint(uint8_t red, uint8_t green, uint8_t blue) {
+        previewWhitePoint[0] = red;
+        previewWhitePoint[1] = green;
+        previewWhitePoint[2] = blue;
+    }
+
+    inline bool previewCanUseSourceRgb(uint8_t srcChannels) const {
+        return srcChannels == 3 && briLut[255] == 255
+            && offRed != kAbsent && offGreen != kAbsent && offBlue != kAbsent
+            && offWhite == kAbsent && offWarmWhite == kAbsent
+            && offYellow == kAbsent && offUV == kAbsent;
+    }
+
+    inline uint8_t previewRgb(const uint8_t* src, uint8_t srcChannels, uint8_t channel) const {
+        if (!src || channel >= 3) return 0;
+        const LogicalRgbw color = logicalRgbw(src, srcChannels);
+        uint16_t value = 0;
+        if (channel == 0 && offRed != kAbsent) value = color.r;
+        if (channel == 1 && offGreen != kAbsent) value = color.g;
+        if (channel == 2 && offBlue != kAbsent) value = color.b;
+        if (offWhite != kAbsent) value += scale8(color.w, previewWhitePoint[channel]);
+        return value > 255 ? 255 : static_cast<uint8_t>(value);
+    }
+
     // Hot path: transform one source light (3-channel RGB at `src`) into `out`
     // (`outChannels` bytes). Brightness via LUT, then place each present color role at
     // its derived offset, then synthesize white per whiteMode. No allocation, integer-only.
     // A color role the light doesn't carry (offset == kAbsent) is simply not written — so
     // a wiring that omits, say, red just doesn't emit it. Channels holding non-color roles
     // (pan/tilt) are left for their own writers; apply() never touches them.
-    inline void apply(const uint8_t* src, uint8_t* out) const {
-        uint8_t r = briLut[src[0]];
-        uint8_t g = briLut[src[1]];
-        uint8_t b = briLut[src[2]];
+    inline void apply(const uint8_t* src, uint8_t* out, uint8_t srcChannels = 3) const {
+        const LogicalRgbw color = logicalRgbw(src, srcChannels);
+        uint8_t r = color.r;
+        uint8_t g = color.g;
+        uint8_t b = color.b;
         // Every synthesized emitter (white + warm-white/yellow/UV) is gated by the ONE whiteMode:
         // None zeroes them (never a stale value — corrected_ is reused, not re-zeroed, frame to
         // frame), otherwise each is a best-effort approximation from RGB. Accurate additionally
@@ -133,36 +159,69 @@ struct Correction {
         // the other emitters are additive stand-ins only (no colorimetric model yet), so they don't
         // subtract. See the offWarmWhite/offYellow/offUV field comment for the approximation rationale.
         if (whiteMode == WhiteMode::None) {
-            if (offWhite != kAbsent)     out[offWhite] = 0;
+            if (offWhite != kAbsent)     out[offWhite] = color.w;
             if (offWarmWhite != kAbsent) out[offWarmWhite] = 0;
             if (offYellow != kAbsent)    out[offYellow] = 0;
             if (offUV != kAbsent)        out[offUV] = 0;
         } else {
-            const uint8_t w = r < g ? (r < b ? r : b) : (g < b ? g : b);  // min(r,g,b): the white component
+            const uint8_t sourceR = srcChannels >= 1 ? briLut[src[0]] : uint8_t{0};
+            const uint8_t sourceG = srcChannels >= 2 ? briLut[src[1]] : uint8_t{0};
+            const uint8_t sourceB = srcChannels >= 3 ? briLut[src[2]] : uint8_t{0};
+            const uint8_t derivedWhite = min3(sourceR, sourceG, sourceB);
             // The additive stand-ins (warm-white/yellow/UV) approximate from the CORRECTED RGB — the
             // values BEFORE Accurate pulls white out below. Compute them here, off the pre-subtraction
             // r/g/b, so Accurate's `r -= w` (which only rebalances the RGB emitters) can't corrupt them.
             // warm white ≈ the white component (same as cold white for a warm-white-only strip).
-            if (offWarmWhite != kAbsent) out[offWarmWhite] = w;
+            if (offWarmWhite != kAbsent) out[offWarmWhite] = derivedWhite;
             // yellow ≈ min(R,G) (the shared red+green component).
-            if (offYellow != kAbsent)    out[offYellow] = r < g ? r : g;
+            if (offYellow != kAbsent)    out[offYellow] = sourceR < sourceG ? sourceR : sourceG;
             // UV is out of gamut (no RGB pre-image), but it reads to the eye as deep blue/violet, so
             // drive it from the BLUE component that has no red/green to pair with — the violet-ish
             // excess `max(0, B - max(R,G))`. So UV fires on blues/purples, stays dark on warm colors.
             if (offUV != kAbsent) {
-                const uint8_t rg = r > g ? r : g;
-                out[offUV] = b > rg ? static_cast<uint8_t>(b - rg) : 0;
+                const uint8_t rg = sourceR > sourceG ? sourceR : sourceG;
+                out[offUV] = sourceB > rg ? static_cast<uint8_t>(sourceB - rg) : 0;
             }
             // White last: it's the only emitter that (in Accurate) rebalances RGB, so it must run
             // after the stand-ins have read the pre-subtraction values.
             if (offWhite != kAbsent) {
-                if (whiteMode == WhiteMode::Accurate) { r -= w; g -= w; b -= w; }  // pull white out of RGB
-                out[offWhite] = w;
+                out[offWhite] = color.w;
             }
         }
         if (offRed != kAbsent)   out[offRed] = r;
         if (offGreen != kAbsent) out[offGreen] = g;
         if (offBlue != kAbsent)  out[offBlue] = b;
+    }
+
+private:
+    struct LogicalRgbw { uint8_t r, g, b, w; };
+
+    inline LogicalRgbw logicalRgbw(const uint8_t* src, uint8_t srcChannels) const {
+        LogicalRgbw color{
+            srcChannels >= 1 ? briLut[src[0]] : uint8_t{0},
+            srcChannels >= 2 ? briLut[src[1]] : uint8_t{0},
+            srcChannels >= 3 ? briLut[src[2]] : uint8_t{0},
+            srcChannels >= 4 ? briLut[src[3]] : uint8_t{0},
+        };
+        // A non-zero source W is explicit and wins. A four-channel layer whose effect leaves W at
+        // zero still uses whiteMode, so ordinary RGB effects benefit from a physical white emitter.
+        if ((srcChannels < 4 || color.w == 0) && offWhite != kAbsent && whiteMode != WhiteMode::None) {
+            color.w = min3(color.r, color.g, color.b);
+            if (whiteMode == WhiteMode::Accurate) {
+                color.r = static_cast<uint8_t>(color.r - color.w);
+                color.g = static_cast<uint8_t>(color.g - color.w);
+                color.b = static_cast<uint8_t>(color.b - color.w);
+            }
+        }
+        return color;
+    }
+
+    static inline uint8_t min3(uint8_t a, uint8_t b, uint8_t c) {
+        return a < b ? (a < c ? a : c) : (b < c ? b : c);
+    }
+
+    static inline uint8_t scale8(uint8_t value, uint8_t scale) {
+        return static_cast<uint8_t>((static_cast<uint16_t>(value) * scale) / 255);
     }
 };
 

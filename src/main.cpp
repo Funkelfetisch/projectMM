@@ -41,6 +41,7 @@
 #include "light/effects/GEQ3DEffect.h"
 #include "light/effects/HelioWledPresetsEffect.h"
 #include "light/effects/PaintBrushEffect.h"
+#include "light/effects/PixelblazeCompatEffect.h"
 #include "light/effects/SolidEffect.h"
 #include "light/effects/StarSkyEffect.h"
 #include "light/effects/SdfShapesEffect.h"
@@ -135,6 +136,7 @@
 #include "core/ControlModule.h"
 #include "core/Services.h"
 #include "core/AudioService.h"
+#include "core/Bh1750Service.h"
 #include "core/I2cScanModule.h"
 #include "core/TasksModule.h"
 #include "core/PinsModule.h"
@@ -156,7 +158,7 @@
 
 namespace {
 
-constexpr uint16_t kHelioDefaultLedCount = 311;
+constexpr uint16_t kHelioDefaultLedCount = 222;
 
 bool isHelioProduct() {
     return std::strcmp(mm::kProductName, "helio1") == 0 ||
@@ -164,13 +166,74 @@ bool isHelioProduct() {
            std::strcmp(mm::kBrandName, "HELIO") == 0;
 }
 
-void setText(char* dst, size_t dstLen, const char* value) {
-    if (!dst || dstLen == 0) return;
-    if (!value) { dst[0] = 0; return; }
-    size_t len = std::strlen(value);
-    if (len >= dstLen) len = dstLen - 1;
-    std::memcpy(dst, value, len);
-    dst[len] = 0;
+bool keepOneEnabledEffect(mm::MoonModule* layer) {
+    if (!layer) return false;
+    int keepIndex = -1;
+    bool changed = false;
+    for (uint8_t i = 0; i < layer->childCount(); i++) {
+        auto* child = layer->child(i);
+        if (!child || child->role() != mm::ModuleRole::Effect) continue;
+        if (child->enabled()) keepIndex = i;
+    }
+    if (keepIndex >= 0) {
+        for (uint8_t i = 0; i < layer->childCount(); i++) {
+            auto* child = layer->child(i);
+            if (!child || child->role() != mm::ModuleRole::Effect) continue;
+            if (static_cast<int>(i) == keepIndex || !child->enabled()) continue;
+            child->setEnabled(false);
+            changed = true;
+        }
+    } else {
+        for (uint8_t i = 0; i < layer->childCount(); i++) {
+            auto* child = layer->child(i);
+            if (!child || child->role() != mm::ModuleRole::Effect) continue;
+            child->setEnabled(true);
+            changed = true;
+            break;
+        }
+    }
+    if (changed) {
+        layer->markDirty();
+        mm::FilesystemModule::noteDirty();
+    }
+    return changed;
+}
+
+bool migrateHelioRipple(mm::MoonModule* layer) {
+    if (!layer) return false;
+    for (uint8_t i = 0; i < layer->childCount(); i++) {
+        auto* child = layer->child(i);
+        if (!child || std::strcmp(child->name(), "HELIO Ripple") != 0 ||
+            std::strcmp(child->typeName(), "RingsEffect") != 0) {
+            continue;
+        }
+
+        auto* fresh = mm::ModuleFactory::create("HelioRippleEffect");
+        if (!fresh) return false;
+        fresh->setName("HELIO Ripple");
+        fresh->setEnabled(child->enabled());
+        auto* old = layer->replaceChildAt(i, fresh);
+        fresh->defineControls();
+        fresh->setup();
+        fresh->applyState();
+        if (old) {
+            old->release();
+            mm::Scheduler::deleteTree(old);
+        }
+        layer->markDirty();
+        mm::FilesystemModule::noteDirty();
+        return true;
+    }
+    return false;
+}
+
+mm::MoonModule* firstLayerChild(mm::MoonModule* layersContainer) {
+    if (!layersContainer) return nullptr;
+    for (uint8_t i = 0; i < layersContainer->childCount(); i++) {
+        auto* child = layersContainer->child(i);
+        if (child && child->role() == mm::ModuleRole::Layer) return child;
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -229,6 +292,25 @@ static void registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::GEQEffect>("GEQEffect", "light/effects.md#geq");
     mm::ModuleFactory::registerType<mm::GEQ3DEffect>("GEQ3DEffect", "light/effects.md#geq3d");
     mm::ModuleFactory::registerType<mm::HelioWledPresetsEffect>("HelioWledPresetsEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioCandleMultiEffect>("HelioCandleMultiEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioColorTwinklesEffect>("HelioColorTwinklesEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioFreqMapAmberEffect>("HelioFreqMapAmberEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioLakeEffect>("HelioLakeEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioLoadingEffect>("HelioLoadingEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioPinkPaletteEffect>("HelioPinkPaletteEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioPhasedEffect>("HelioPhasedEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioRippleEffect>("HelioRippleEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioRunningEffect>("HelioRunningEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioStarburstEffect>("HelioStarburstEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioGravCenterEffect>("HelioGravCenterEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioJugglesEffect>("HelioJugglesEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioMultiCometEffect>("HelioMultiCometEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioNoiseMeterEffect>("HelioNoiseMeterEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioPlasmoidEffect>("HelioPlasmoidEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioFreqMapWideEffect>("HelioFreqMapWideEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioGEQEffect>("HelioGEQEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioGravFreqEffect>("HelioGravFreqEffect", "light/effects.md#heliowledpresets");
+    mm::ModuleFactory::registerType<mm::HelioFreqWaveEffect>("HelioFreqWaveEffect", "light/effects.md#heliowledpresets");
     mm::ModuleFactory::registerType<mm::LavaLampEffect>("LavaLampEffect", "light/effects.md#lavalamp");
     mm::ModuleFactory::registerType<mm::LinesEffect>("LinesEffect", "light/effects.md#lines");
     mm::ModuleFactory::registerType<mm::LissajousEffect>("LissajousEffect", "light/effects.md#lissajous");
@@ -240,6 +322,7 @@ static void registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::NoiseMeterEffect>("NoiseMeterEffect", "light/effects.md#noisemeter");
     mm::ModuleFactory::registerType<mm::PaintBrushEffect>("PaintBrushEffect", "light/effects.md#paintbrush");
     mm::ModuleFactory::registerType<mm::ParticlesEffect>("ParticlesEffect", "light/effects.md#particles");
+    mm::ModuleFactory::registerType<mm::PixelblazeCompatEffect>("PixelblazeCompatEffect", "light/effects.md#pixelblazecompat");
     mm::ModuleFactory::registerType<mm::PlasmaEffect>("PlasmaEffect", "light/effects.md#plasma");
     mm::ModuleFactory::registerType<mm::PraxisEffect>("PraxisEffect", "light/effects.md#praxis");
     mm::ModuleFactory::registerType<mm::RainbowEffect>("RainbowEffect", "light/effects.md#rainbow");
@@ -310,6 +393,7 @@ static void registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::ControlModule>("ControlModule", "core/control.md#control");
     mm::ModuleFactory::registerType<mm::Services>("Services", "core/services.md#services");
     mm::ModuleFactory::registerType<mm::AudioService>("AudioService", "core/services.md#audio");
+    mm::ModuleFactory::registerType<mm::Bh1750Service>("Bh1750Service", "core/services.md#bh1750");
     mm::ModuleFactory::registerType<mm::I2cScanModule>("I2cScanModule", "core/system.md#i2c-scan");
     mm::ModuleFactory::registerType<mm::TasksModule>("TasksModule", "core/system.md#tasks");
     mm::ModuleFactory::registerType<mm::PinsModule>("PinsModule", "core/system.md#pins");
@@ -324,20 +408,6 @@ static void registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::FilesystemModule>("FilesystemModule", "core/supporting.md#filesystem");
 }
 
-static void printModuleMetrics(mm::MoonModule* mod, int depth) {
-    if (!mod) return;
-    if (mod->dynamicBytes() > 0) {
-        std::printf("  %s:%uus/%uKB", mod->name() ? mod->name() : "?",
-                    static_cast<unsigned>(mod->tickTimeUs()),
-                    static_cast<unsigned>(mod->dynamicBytes() / 1024));
-    } else {
-        std::printf("  %s:%uus", mod->name() ? mod->name() : "?",
-                    static_cast<unsigned>(mod->tickTimeUs()));
-    }
-    for (uint8_t i = 0; i < mod->childCount(); i++) {
-        printModuleMetrics(mod->child(i), depth + 1);
-    }
-}
 void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     registerModuleTypes();
     mm::Scheduler scheduler;
@@ -379,7 +449,6 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     if (helioProduct) {
         systemModule->setDefaultDeviceName("HELIO");
         systemModule->setDefaultDeviceModel("HELIO 1");
-        systemModule->setDefaultFpsCap(35);
     }
     systemModule->setScheduler(&scheduler);
 
@@ -430,11 +499,34 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     if (helioProduct) {
         helioAudioModule = static_cast<mm::AudioService*>(mm::ModuleFactory::create("AudioService"));
         helioAudioModule->setName("Audio");
+        helioAudioModule->mode = 0;
         helioAudioModule->sckPin = 40;
         helioAudioModule->wsPin = 38;
         helioAudioModule->sdPin = 39;
+        helioAudioModule->mclkPin = -1;
+        helioAudioModule->sampleRateSel = 2;
+        helioAudioModule->floor = 75;
+        helioAudioModule->gain = 1;
+        helioAudioModule->send = false;
+        helioAudioModule->simulate = 0;
+        helioAudioModule->syncPort = 11988;
         helioAudioModule->markWiredByCode();
-        systemModule->addChild(helioAudioModule);
+        servicesModule->addChild(helioAudioModule);
+    }
+
+    // Every HELIO 1 carries the same ambient-light sensor on its second I2C bus. Keep it
+    // code-wired like the microphone so an OTA over an older persisted Services tree gains the
+    // hardware automatically. Its controls remain editable for calibration and board bring-up.
+    if (helioProduct) {
+        auto* ambient = static_cast<mm::Bh1750Service*>(
+            mm::ModuleFactory::create("Bh1750Service"));
+        ambient->setName("Ambient Light");
+        ambient->bus = 1;
+        ambient->sda = 26;
+        ambient->scl = 11;
+        ambient->address = 0x23;
+        ambient->markWiredByCode();
+        servicesModule->addChild(ambient);
     }
 
     // FirmwareUpdate — surfaces OTA status as two read-only controls.
@@ -497,18 +589,19 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     }
 
     // Layouts: top-level container; one or more layouts. Generic projectMM boots
-    // with one GridLayout; helio1 boots with its one circular-strip source layout.
+    // with one GridLayout; helio1 boots with its circular 2D source layout.
     // Persistence overlays saved dimensions before setup(), unless a stale file
-    // describes a different child type and the code-wired HELIO strip protects itself.
+    // describes a different child type and the code-wired HELIO layout protects itself.
     auto* layouts = static_cast<mm::Layouts*>(mm::ModuleFactory::create("Layouts"));
     mm::GridLayout* grid = nullptr;
-    mm::SingleRowLayout* helioStrip = nullptr;
+    mm::RingLayout* helioRing = nullptr;
     if (helioProduct) {
-        helioStrip = static_cast<mm::SingleRowLayout*>(mm::ModuleFactory::create("SingleRowLayout"));
-        helioStrip->setName("HELIO Strip");
-        helioStrip->width = kHelioDefaultLedCount;
-        helioStrip->markWiredByCode();
-        layouts->addChild(helioStrip);
+        helioRing = static_cast<mm::RingLayout*>(mm::ModuleFactory::create("RingLayout"));
+        helioRing->setName("HELIO Circle");
+        helioRing->nrOfLEDs = kHelioDefaultLedCount;
+        helioRing->radius = 24;
+        helioRing->markWiredByCode();
+        layouts->addChild(helioRing);
     } else {
         grid = static_cast<mm::GridLayout*>(mm::ModuleFactory::create("GridLayout"));
         layouts->addChild(grid);
@@ -525,10 +618,12 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
 
     // One default effect so a bare device (no catalog inject) still shows lights out
     // of the box, but NO default modifier. Generic projectMM uses Noise; helio1
-    // starts on its migrated WLED audio playlist over the strip. A device-model
-    // catalog entry can still replace this with its own effects/modifiers.
-    auto* defaultEffect = mm::ModuleFactory::create(helioProduct ? "HelioWledPresetsEffect" : "NoiseEffect");
-    if (helioProduct) defaultEffect->setName("HELIO WLED Presets");
+    // starts on one normal scene module; the HELIO product UI can orchestrate
+    // playlists without locking the effect itself into autoplay.
+    auto* defaultEffect = mm::ModuleFactory::create(helioProduct ? "HelioRippleEffect" : "NoiseEffect");
+    if (helioProduct) {
+        defaultEffect->setName("HELIO Ripple");
+    }
     layer->addChild(defaultEffect);
 
     // Drivers: top-level container; one or more Driver children. Bound to the
@@ -561,7 +656,9 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     if (helioProduct) {
         auto* helioRmt = static_cast<mm::RmtLedDriver*>(mm::ModuleFactory::create("RmtLedDriver"));
         helioRmt->setName("RmtLed");
-        setText(helioRmt->pins, sizeof(helioRmt->pins), "35");
+        helioRmt->setDefaultCorrection("GRBW", mm::WhiteMode::Accurate);
+        helioRmt->setPreviewWhitePoint(255, 176, 110);
+        std::snprintf(helioRmt->pins, sizeof(helioRmt->pins), "%s", "35");
         std::snprintf(helioRmt->ledsPerPin, sizeof(helioRmt->ledsPerPin), "%u",
                       static_cast<unsigned>(kHelioDefaultLedCount));
         helioRmt->markWiredByCode();
@@ -569,11 +666,11 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     }
 #endif
 
-    // PreviewDriver is the one driver that stays boot-wired: it needs the HTTP
+    // ProjectMM keeps PreviewDriver boot-wired because it needs the HTTP
     // server's WS broadcaster (set below, once httpServer exists), a reference only
     // main.cpp has and the catalog can't supply. It reads the active Layer (resolved
     // by the Drivers container's setEffects above) for the light positions and the
-    // sparse buffer it streams; it owns its own scratch buffers.
+    // sparse buffer it streams; HELIO consumes those same true LED frames inside HelioTrace.
     // The light-preset library: a boot-wired singleton under Drivers (child role `preset`). It owns
     // the named channel-role wirings every driver references by id; exactly one exists, so drivers
     // resolve it via its ActiveInstance seat. Wired-by-code so a persistence load keeps the seeded
@@ -582,7 +679,6 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         static_cast<mm::LightPresetsModule*>(mm::ModuleFactory::create("LightPresetsModule"));
     drivers->addChild(lightPresets);
     lightPresets->markWiredByCode();
-
     auto* preview = static_cast<mm::PreviewDriver*>(mm::ModuleFactory::create("PreviewDriver"));
     drivers->addChild(preview);
     // Marked wired-by-code so a persistence load can't replace the wired instance
@@ -642,13 +738,22 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     scheduler.addModule(httpServer);
 
     scheduler.setup();
+    if (helioProduct) {
+        auto* firstLayer = firstLayerChild(effectsContainer);
+        const bool migrated = migrateHelioRipple(firstLayer);
+        const bool normalized = keepOneEnabledEffect(firstLayer);
+        if (migrated || normalized) scheduler.prepareTree();
+    }
+    // Confirm an OTA image only after the complete module tree and any product
+    // migration prepared successfully. A boot failure before this point remains
+    // eligible for the bootloader's rollback path.
     mm::platform::markOtaAppValid();
 
     uint32_t lights = layouts->totalLightCount();
     uint32_t bufBytes = lights * 3;
-    if (helioProduct && helioStrip) {
+    if (helioProduct && helioRing) {
         std::printf("projectMM running — HELIO strip %u, %lu lights, buffer %lu bytes\n",
-                    static_cast<unsigned>(helioStrip->width),
+                    static_cast<unsigned>(helioRing->nrOfLEDs),
                     static_cast<unsigned long>(lights),
                     static_cast<unsigned long>(bufBytes));
     } else if (grid) {

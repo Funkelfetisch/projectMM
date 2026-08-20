@@ -9,6 +9,10 @@
     "Layouts",
     "Layer"
   ],
+  "skip_on": [
+    "desktop-windows",
+    "desktop-linux"
+  ],
   "description": "Drive a WHOLE pipeline whose layout, effect and modifier are all live scripts, and verify it keeps rendering across every edit. This is the end-to-end proof the unit tests cannot give: they exercise each binding against a stub, while here a scripted layout decides where the lights are, a scripted effect colours them, and a scripted modifier folds the mapping, composed in one Layer feeding a real driver. The steps walk the live-authoring loop a user performs: start on the default 16x16 script, add a scripted effect and see it colour the fixture, then replace the layout script with a 24-light row and watch the buffer resize under a running effect; add a scripted modifier and edit it live; break the layout script and confirm the device degrades to zero lights rather than dying; recover it and confirm the fixture comes back. A scripted layout is the demanding case because the pipeline asks it for a light COUNT before asking where any light is, and both answers come from running the same script, so a mismatch shows up here as a wrong buffer size or a wedged tick rather than a compile error. The compile + emit path is pinned by unit_moonlive_compiler / unit_MoonLiveLayout; this is the wired-pipeline gate.",
   "fixture": [
     {

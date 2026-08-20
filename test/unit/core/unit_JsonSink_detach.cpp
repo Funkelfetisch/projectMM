@@ -42,3 +42,17 @@ TEST_CASE("JsonSink::detach on an empty buffer-mode sink returns null, not a dan
     mm::JsonSink sink;                     // nothing appended → no heap allocated yet
     CHECK(sink.detach() == nullptr);
 }
+
+TEST_CASE("JsonSink latches a failed socket write") {
+    mm::platform::TcpConnection disconnected;
+    mm::JsonSink sink(disconnected);
+    char payload[1100];
+    std::memset(payload, 'x', sizeof(payload) - 1);
+    payload[sizeof(payload) - 1] = '\0';
+
+    sink.append(payload);
+    CHECK(sink.failed());
+
+    sink.append("ignored after failure");
+    CHECK(sink.failed());
+}

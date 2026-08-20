@@ -22,7 +22,69 @@ struct Stub : public mm::MoonModule {
     // No role needed for these tests; default Generic is fine.
 };
 
+struct ControlStub : public mm::MoonModule {
+    uint8_t value = 7;
+    bool callbackSawQuiesce = false;
+
+    void defineControls() override { controls_.addUint8("value", value, 0, 255); }
+    void onControlChanged(const char*) override { callbackSawQuiesce = g_controlQuiesced; }
+
+    static inline bool g_controlQuiesced = false;
+};
+
+ControlStub* g_controlProbe = nullptr;
+bool g_hookSawOldState = false;
+bool g_probeEnabled = false;
+
+void controlQuiesceHook() {
+    ControlStub::g_controlQuiesced = true;
+    if (!g_controlProbe) return;
+    g_hookSawOldState = g_probeEnabled ? g_controlProbe->enabled()
+                                      : g_controlProbe->value == 7;
+}
+
+struct ControlHookGuard {
+    explicit ControlHookGuard(ControlStub* probe) {
+        g_controlProbe = probe;
+        ControlStub::g_controlQuiesced = false;
+        g_hookSawOldState = false;
+        g_probeEnabled = false;
+        mm::MoonModule::setQuiesceRenderHook(&controlQuiesceHook);
+    }
+    ~ControlHookGuard() {
+        mm::MoonModule::setQuiesceRenderHook(nullptr);
+        g_controlProbe = nullptr;
+    }
+};
+
 } // namespace
+
+TEST_CASE("Scheduler::setControl quiesces the render worker before writing control state") {
+    mm::Scheduler s;
+    auto* module = new ControlStub();
+    module->setName("Probe");
+    module->rebuildControls();
+    s.addModule(module);
+
+    {
+        ControlHookGuard hook(module);
+        REQUIRE(s.setControl("Probe", "value", "{\"value\":42}") ==
+                mm::Scheduler::SetControlResult::Ok);
+        CHECK(g_hookSawOldState);                 // hook ran while the stored value was still 7
+        CHECK(module->callbackSawQuiesce);        // onControlChanged ran after that boundary
+        CHECK(module->value == 42);
+
+        ControlStub::g_controlQuiesced = false;
+        g_hookSawOldState = false;
+        g_probeEnabled = true;
+        REQUIRE(s.setControl("Probe", "enabled", "{\"value\":false}") ==
+                mm::Scheduler::SetControlResult::Ok);
+        CHECK(g_hookSawOldState);                 // hook observed enabled=true before the write
+        CHECK_FALSE(module->enabled());
+    }
+
+    s.deleteTree(module);
+}
 
 // A name with no collision is returned unchanged.
 TEST_CASE("Scheduler::ensureUniqueName leaves unique names alone") {

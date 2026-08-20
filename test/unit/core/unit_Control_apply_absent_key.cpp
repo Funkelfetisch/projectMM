@@ -25,6 +25,26 @@
 #include <cstring>
 #include <string>   // std::string — the overlong-label regression builds its JSON
 
+TEST_CASE("password serialization keeps stored values private on public APIs") {
+    mm::ControlList controls;
+    char password[32] = "private-value";
+    controls.addPassword("password", password, sizeof(password));
+
+    mm::JsonSink stored;
+    mm::writeControlValue(stored, controls[0], mm::ControlValueVisibility::Stored);
+    CHECK(std::strcmp(stored.data(), "\"private-value\"") == 0);
+
+    mm::JsonSink publicValue;
+    mm::writeControlValue(publicValue, controls[0], mm::ControlValueVisibility::Public);
+    CHECK(std::strcmp(publicValue.data(), "true") == 0);
+    CHECK(std::strstr(publicValue.data(), "private-value") == nullptr);
+
+    password[0] = 0;
+    mm::JsonSink emptyPublicValue;
+    mm::writeControlValue(emptyPublicValue, controls[0], mm::ControlValueVisibility::Public);
+    CHECK(std::strcmp(emptyPublicValue.data(), "false") == 0);
+}
+
 // hasKey distinguishes an absent key from one whose value is 0 — the capability the
 // fix relies on. parseInt alone can't (returns 0 for both).
 TEST_CASE("json::hasKey detects presence independent of value") {

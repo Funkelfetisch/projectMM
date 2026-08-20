@@ -6,7 +6,7 @@ The user-added **Service** modules — capability bridges the device provides or
 
 ## Services
 
-The top-level container the Service modules hang under — a grouping node with no controls of its own, the same shape as `Effects`/`Drivers` in the light domain. Adds/removes its children (Audio, IR) at runtime via the generic module machinery.
+The top-level container the Service modules hang under — a grouping node with no controls of its own, the same shape as `Effects`/`Drivers` in the light domain. Adds/removes its children (Audio, ambient light, IR) at runtime via the generic module machinery.
 
 Detail: [technical](moxygen/Services.md)
 
@@ -31,6 +31,25 @@ A Service (added by the user, not auto-wired): the audio source that feeds the F
 Detail: [technical](moxygen/AudioService.md)
 
 [Tests](../../tests/unit-tests.md#audioservice)
+
+<a id="bh1750"></a>
+
+### BH1750 ambient light
+
+A Service for the BH1750FVI digital ambient-light sensor. It keeps the sensor in continuous high-resolution mode, publishes the measured illuminance, and optionally supplies a transient global brightness to `Drivers`. The persisted `Drivers.brightness` remains the manual fallback, so ordinary light changes do not write sensor samples to flash. A missing sensor leaves output unchanged and reports the I2C failure.
+
+- `automatic` — use the sensor-derived brightness; off immediately restores `Drivers.brightness`.
+- `lux` — current measured ambient illuminance.
+- `darkLux` / `darkBrightness` — the low-light anchor and its output brightness.
+- `brightLux` / `brightBrightness` — the high-light anchor and its output brightness. Brightness endpoints may be reversed for an inverse response.
+- `hysteresisLux` — minimum illuminance change accepted after a reading, preventing noise around one level from repeatedly changing output. HELIO defaults to 15 lx.
+- `bus` / `sda` / `scl` / `address` — I2C wiring. HELIO 1 uses bus 1, GPIO26, GPIO11, and `0x23`.
+
+Readings between the two anchors use linear interpolation and clamp outside them. The service requests a reading once per second; the BH1750's high-resolution integration rejects 50/60 Hz lighting noise before the software hysteresis is applied. Device open, command writes, and reads execute on a worker task. The scheduler tick consumes only an atomic completion result, so an I2C timeout cannot stall LED rendering.
+
+Detail: [technical](moxygen/Bh1750Service.md)
+
+[Tests](../../tests/unit-tests.md#bh1750service)
 
 <a id="ir"></a>
 

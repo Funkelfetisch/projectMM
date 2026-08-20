@@ -4,7 +4,7 @@ Every effect, one block each: its preview, what it does, and what each control m
 
 Effects are built from the shared [power functions](power-functions.md) — the drawing, field and motion routines every effect composes; that page lists each one with its callers.
 
-**Jump to:** [MoonLight](#moonlight-effects) · [MoonModules](#moonmodules-effects) · [WLED](#wled-effects) · [FastLED](#fastled-effects) · [projectMM-native](#projectmm-native-effects)
+**Jump to:** [MoonLight](#moonlight-effects) · [MoonModules](#moonmodules-effects) · [WLED](#wled-effects) · [FastLED](#fastled-effects) · [Pixelblaze](#pixelblaze-compatible-effects) · [projectMM-native](#projectmm-native-effects)
 
 > Some WLED-origin effects show a preview gif from [WLED-Utils](https://github.com/scottrbailey/WLED-Utils) by scottrbailey (the canonical WLED effect gif set, cross-linked with credit); these show WLED's rendering. Effects with a local `../../assets/…` gif show our own output.
 
@@ -520,7 +520,7 @@ Detail: [technical](moxygen/StarFieldEffect.md)
 Twinkling stars at random light positions, each fading in and out independently over a dark background.
 
 - `speed` — fade rate per frame (how fast each star brightens/dims).
-- `star_fill_ratio` — how many stars (as a fraction of the light count).
+- `star_fill_ratio` — active stars per 10,000 lights.
 - `usePalette` — color the stars from the active palette instead of white.
 
 Origin: MoonLight · by [limpkin](https://github.com/limpkin) · via [MoonLight](https://github.com/MoonModules/MoonLight/blob/main/src/MoonLight/Nodes/Effects/E_MoonLight.h)
@@ -723,13 +723,18 @@ Detail: [technical](moxygen/FreqMatrixEffect.md)
 
 ### HelioWledPresets · 3D
 
-HELIO product preset player for the migrated WLED `helio1` bundle. It renders the saved WLED effect presets directly over the HELIO strip order and carries both original playlists: `Static Animations` (`Ripple`, `Lake`, `Phased`, `Running`, `Candle Multi`, `Loading`, `Colortwinkles`, `Pink Palette`) and `Audio` (`GEQ`, `Gravfreq`, `Noisemeter`, `Freqmap`, `Freqwave`, `Juggles`, `Gravcenter`, `Multi Comet`, `Plasmoid`, `Fw Starburst`). The audio playlist is the boot default, matching the WLED config's default preset 11.
+HELIO product scene family for the migrated WLED `helio1` bundle. Each saved WLED preset has a dedicated ProjectMM effect module except Ripple, whose card uses the native [Rings](#rings) field: Candle Glow, Color Sparkles, Amber Bands, Lake, Orbit, Pink Glow, Phase Shimmer, Chase, Starburst, Gravity Center, Juggling Dots, Comets, Level Meter, Plasmoid, Wide Spectrum, Equalizer, Gravity Bands, and Frequency Wave. The ports retain WLED's oscillator, trail, gravity, palette, audio-gate, and default-control behaviour while writing directly into ProjectMM's physical light buffer. Palette defaults resolve by WLED palette name because WLED and ProjectMM use different numeric palette indexes. Frame-persistent scenes own their previous-frame state, so trails and outward motion survive between ticks. The static Amber Bands scene uses a smooth spatial idle trace; Wide Spectrum reads the live dominant frequency. The HELIO UI owns one native scene slot and replaces its module type when a card or playlist advances, so inactive scene instances cannot overlap the current frame or multiply state metadata. The Static and Audio playlists preserve the saved source order. Sphere Optics samples native 2D fields around `RingLayout`'s circular path: Ripple supplies expanding reflected arcs, Orbiting Lobes uses [LavaLamp](#lavalamp), Harmonic Halo uses [DistortionWaves](#distortionwaves), Liquid Mirror uses [Plasma](#plasma), and Twin Suns uses [Metaballs](#metaballs). Fresh HELIO builds start on Ripple, and audio scenes read the live `AudioService` frame without synthetic input unless `idleBeat` is enabled.
 
-- `playlist` - choose `Static Animations` or `Audio`.
+- `playlist` - choose `Static Animations` or `Audio` on the compatibility player; the HELIO dashboard also exposes the native `Sphere Optics` playlist.
 - `preset` - choose the specific migrated WLED preset when `autoPlay` is off.
 - `autoPlay` - advance through the selected playlist with the WLED durations (10s static, 30s audio).
-- `idleBeat` - synthesize a small 120 BPM signal when no mic level is present so audio scenes still preview and idle gracefully.
-- `intensity` - output gain for the generated preset frame.
+- `idleBeat` - synthesize a beat when no mic level is present.
+- `speed` - source effect rate.
+- `effect intensity` - source effect amount.
+- `palette`, `red` / `green` / `blue`, `white`, `secondary red` / `secondary green` / `secondary blue` - scene colour controls.
+- `custom 1` / `custom 2` / `custom 3`, `option 1` / `option 2` / `option 3` - scene-specific source controls.
+- `sound simulation`, `audio map` - optional idle-beat shape and band mapping for scenes that use them.
+- `output` - output gain for the generated scene frame.
 
 Origin: HELIO private product layer, on the WLED helio1 preset bundle and WLED/SR effect behaviours.
 
@@ -823,6 +828,23 @@ Origin: FastLED · inoise field (Mark Kriegsman)
 Detail: [technical](moxygen/NoiseEffect.md)
 
 [Tests](../../tests/unit-tests.md#noiseeffect)
+
+## Pixelblaze-compatible effects
+
+<a id="pixelblazecompat"></a>
+
+### PixelblazeCompat PB · 2D
+
+Runs common Pixelblaze-style pattern source, including Electromage PatternDB sources, inside a bounded ProjectMM effect. The supported subset covers globals, numeric arrays, `beforeRender(delta)`, `render(index)`, `render2D(index,x,y)`, loops, conditionals, arithmetic, comparisons, `hsv`/`rgb`, transform helpers, and the usual math helpers (`time`, `wave`, `triangle`, `random`, `floor`, `min`, `max`, `clamp`, `pow`, `abs`, `sin`, `cos`). Unsupported source reports a module status and renders dark.
+
+- `source` - Pixelblaze-style source text.
+- `slider*` exported functions - each `export function sliderName(v)` appears as a `Name` control and is called with the control value scaled to 0..1.
+
+Origin: Pixelblaze language compatibility, on Electromage PatternDB's public source format. Source is imported by user choice rather than vendored into the firmware.
+
+Detail: [technical](moxygen/PixelblazeCompatEffect.md)
+
+The interpreter applies one instruction budget across `beforeRender`, every pixel, nested loops, and nested function calls in a frame. Exceeding it marks the program invalid and clears the effect buffer, so a hostile or accidental loop cannot wedge the render scheduler or leave a stale frame. Dynamic arrays use the platform allocator, contribute to the module's reported heap usage, and initialize only in top-level source. A frame-time array request or allocation failure marks the program invalid and renders dark.
 
 ## projectMM-native effects
 

@@ -9,6 +9,7 @@
 #include "light/draw.h"              // draw::fade — the once-per-frame collected fade (fadeToBlackBy)
 #include "platform/platform.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>  // std::memcpy in extrude()
 
@@ -131,6 +132,7 @@ public:
         // clear here (cold path, not per frame) means a new effect starts black; then persistence takes
         // over frame to frame.
         buffer_.clear();
+        lastEnabledEffectSignature_ = 0;
         ensureLiveScratch();   // size the live-pass snapshot here, on the cold path
 
         // Neutral status: the LOGICAL box the effects render into (width_×height_×
@@ -155,6 +157,20 @@ public:
         // children rather than going through the Scheduler.
         //
         elapsed_ = platform::millis();
+        // Persistence is for a stable active effect set only. Clear when the
+        // enabled set changes so the incoming effect cannot inherit stale
+        // pixels, then let it render immediately so a scene switch has no
+        // deliberate black frame. With no enabled effect, publish black.
+        const uint32_t effectSignature = enabledEffectSignature();
+        if (effectSignature == 0) {
+            buffer_.clear();
+            fadeBy_ = 0;
+            lastEnabledEffectSignature_ = 0;
+        } else if (effectSignature != lastEnabledEffectSignature_) {
+            buffer_.clear();
+            fadeBy_ = 0;
+            lastEnabledEffectSignature_ = effectSignature;
+        }
         // The buffer PERSISTS frame-to-frame — the Layer does NOT clear it. This is the FastLED /
         // WLED / MoonLight convention: the buffer holds the previous frame so an effect can fade it
         // for trails (fadeToBlackBy, a "tail" control) or read prior pixels (draw::get, Game-of-Life,
@@ -384,6 +400,18 @@ public:
         // build, which drops the gap slots from the LUT (they stay black). No gaps → unchanged.
         const bool anyGap = layouts_ && layouts_->hasBlackPixels();
 
+        // Physical-order effects already address the real strip index. A sparse geometric
+        // layout therefore keeps a one-dimensional identity buffer instead of allocating its
+        // mostly-empty bounding box and remapping the effect output.
+        if (!dense && staticCount == 0 && effectsUsePhysicalLightOrder()) {
+            width_ = driverCount;
+            height_ = driverCount ? 1 : 0;
+            depth_ = driverCount ? 1 : 0;
+            lut_.setIdentity(driverCount);
+            allocateBuffer(driverCount);
+            return;
+        }
+
         // Fast path — no static modifiers, dense grid in natural order, no gaps: box cell i
         // IS driver light i, so the mapping is the identity memcpy. This is the FPS
         // floor for the common case; keep it before any allocation.
@@ -435,6 +463,37 @@ public:
             if (driverIdx != box) k->ok = false;
         }, nullptr, &ctx});
         return ctx.ok;
+    }
+
+    bool effectsUsePhysicalLightOrder() const {
+        bool hasEffect = false;
+        for (uint8_t i = 0; i < childCount(); i++) {
+            if (child(i)->role() != ModuleRole::Effect || !child(i)->enabled()) continue;
+            hasEffect = true;
+            auto* eff = static_cast<EffectBase*>(child(i));
+            if (!eff->usesPhysicalLightOrder()) return false;
+        }
+        return hasEffect;
+    }
+
+    uint32_t enabledEffectSignature() const {
+        uint32_t sig = 2166136261u;
+        bool any = false;
+        for (uint8_t i = 0; i < childCount(); i++) {
+            if (child(i)->role() != ModuleRole::Effect || !child(i)->enabled()) continue;
+            any = true;
+            const auto ptr = reinterpret_cast<uintptr_t>(child(i));
+            sig ^= static_cast<uint32_t>(i) + 1u;
+            sig *= 16777619u;
+            sig ^= static_cast<uint32_t>(ptr >> 4);
+            sig *= 16777619u;
+            const char* type = child(i)->typeName();
+            while (type && *type) {
+                sig ^= static_cast<uint8_t>(*type++);
+                sig *= 16777619u;
+            }
+        }
+        return any ? sig : 0;
     }
 
     // Build the mapping by folding PHYSICAL lights to LOGICAL cells (physical→logical).
@@ -589,6 +648,7 @@ private:
     lengthType depth_ = 0;
     uint32_t elapsed_ = 0;
     uint8_t  fadeBy_ = 0;   // per-frame fade collected from effects (MIN), consumed once at frame start
+    uint32_t lastEnabledEffectSignature_ = 0;
     char statusBuf_[20] = {};  // "999×999×999" fits; owned (setStatus borrows the pointer)
     bool     hasLive_ = false;          // any enabled modifier animates per frame (gates the live pass)
     uint8_t* liveScratch_ = nullptr;    // snapshot for the live pass; allocated only when hasLive_

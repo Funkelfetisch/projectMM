@@ -17,6 +17,13 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # refilling during SPI-flash writes) and calls gdma_stop at frame end — a flash-resident gdma_stop
 # would fault exactly then. The IDF option that exists for this case.
 CONFIG_GDMA_CTRL_FUNC_IN_IRAM=y
+
+# RMT's WS2812 byte encoder refills long frames from its TX interrupt. A LittleFS/NVS write
+# disables the flash cache; deferring that interrupt can then clock an incomplete or corrupt
+# frame into the strip. Keep the RMT ISR, encoder, and driver state cache-safe so output remains
+# continuous across those writes. ESP-IDF's RMT cache-safe option selects the IRAM encoder path.
+CONFIG_RMT_TX_ISR_CACHE_SAFE=y
+
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_LWIP_SO_REUSE=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
@@ -104,3 +111,4 @@ CONFIG_PARLIO_RX_ISR_CACHE_SAFE=y
 # MALLOC_CAP_DEFAULT and stay PSRAM-eligible, which the same ISR dereferences the moment our
 # callback returns. An IRAM handler reading a PSRAM queue is the same fault one frame later.
 CONFIG_PARLIO_OBJ_CACHE_SAFE=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

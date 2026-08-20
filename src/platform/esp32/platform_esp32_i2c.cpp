@@ -25,9 +25,65 @@
 
 namespace mm::platform {
 
+void setTestI2cDelayMs(uint32_t) {}
+
 namespace {
 const char* I2C_TAG = "mm_i2c";
 }  // namespace
+
+void i2cDeviceDeinit(I2cDeviceHandle& h) {
+    auto device = static_cast<i2c_master_dev_handle_t>(h.device);
+    auto bus = static_cast<i2c_master_bus_handle_t>(h.bus);
+    if (device) i2c_master_bus_rm_device(device);
+    if (bus) i2c_del_master_bus(bus);
+    h.device = nullptr;
+    h.bus = nullptr;
+}
+
+bool i2cDeviceInit(I2cDeviceHandle& h, uint8_t busIndex, uint16_t sda, uint16_t scl,
+                   uint8_t address, uint32_t frequencyHz) {
+    i2cDeviceDeinit(h);
+    if (busIndex >= SOC_I2C_NUM || address > 0x7Fu || frequencyHz == 0) return false;
+
+    i2c_master_bus_config_t busCfg = {};
+    busCfg.i2c_port = static_cast<i2c_port_num_t>(busIndex);
+    busCfg.sda_io_num = static_cast<gpio_num_t>(sda);
+    busCfg.scl_io_num = static_cast<gpio_num_t>(scl);
+    busCfg.clk_source = I2C_CLK_SRC_DEFAULT;
+    busCfg.glitch_ignore_cnt = 7;
+    busCfg.flags.enable_internal_pullup = true;
+
+    i2c_master_bus_handle_t bus = nullptr;
+    if (i2c_new_master_bus(&busCfg, &bus) != ESP_OK) return false;
+
+    i2c_device_config_t deviceCfg = {};
+    deviceCfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    deviceCfg.device_address = address;
+    deviceCfg.scl_speed_hz = frequencyHz;
+
+    i2c_master_dev_handle_t device = nullptr;
+    if (i2c_master_bus_add_device(bus, &deviceCfg, &device) != ESP_OK) {
+        i2c_del_master_bus(bus);
+        return false;
+    }
+    h.bus = bus;
+    h.device = device;
+    return true;
+}
+
+bool i2cDeviceWrite(I2cDeviceHandle& h, const uint8_t* data, size_t length,
+                    uint32_t timeoutMs) {
+    if (!h.device || !data || length == 0) return false;
+    return i2c_master_transmit(static_cast<i2c_master_dev_handle_t>(h.device), data, length,
+                               static_cast<int>(timeoutMs)) == ESP_OK;
+}
+
+bool i2cDeviceRead(I2cDeviceHandle& h, uint8_t* data, size_t length,
+                   uint32_t timeoutMs) {
+    if (!h.device || !data || length == 0) return false;
+    return i2c_master_receive(static_cast<i2c_master_dev_handle_t>(h.device), data, length,
+                              static_cast<int>(timeoutMs)) == ESP_OK;
+}
 
 size_t i2cScan(uint16_t sda, uint16_t scl, uint8_t* out, size_t maxOut) {
     if (!out || maxOut == 0) return 0;
@@ -69,6 +125,13 @@ namespace mm::platform {
 
 // No I2C peripheral on this target — report the bus as unavailable, distinct from a
 // successful scan that found nothing (the module shows "bus in use / unavailable").
+bool i2cDeviceInit(I2cDeviceHandle&, uint8_t, uint16_t, uint16_t, uint8_t, uint32_t) {
+    return false;
+}
+bool i2cDeviceWrite(I2cDeviceHandle&, const uint8_t*, size_t, uint32_t) { return false; }
+bool i2cDeviceRead(I2cDeviceHandle&, uint8_t*, size_t, uint32_t) { return false; }
+void i2cDeviceDeinit(I2cDeviceHandle& h) { h = {}; }
+
 size_t i2cScan(uint16_t, uint16_t, uint8_t*, size_t) { return kI2cBusUnavailable; }
 
 }  // namespace mm::platform

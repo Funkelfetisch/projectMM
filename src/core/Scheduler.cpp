@@ -217,6 +217,10 @@ Scheduler::SetControlResult Scheduler::setControl(const char* moduleName,
     // Module-level "enabled" pseudo-control — toggles the flag, then a full rebuild so the
     // disabled subtree stops/starts ticking.
     if (std::strcmp(controlName, "enabled") == 0) {
+        // The output worker may be inside a driver that reads this module or its controls. Reach
+        // the common frame-boundary hook BEFORE changing even the first byte; prepareTree() below
+        // is too late because setEnabled itself would otherwise race the active encode.
+        MoonModule::notifyQuiesceRender();
         target->setEnabled(mm::json::parseBool(valueJson, "value"));
         target->markDirty();
         if (noteDirtyHook_) noteDirtyHook_();
@@ -233,6 +237,12 @@ Scheduler::SetControlResult Scheduler::setControl(const char* moduleName,
         auto& c = ctrls[i];
         if (std::strcmp(c.name, controlName) != 0) continue;
 
+        // Control storage is ordinary module state, intentionally allocation-free in the hot path.
+        // The core-1 output worker can read that state (correction, layout, preview geometry) while
+        // the scheduler handles HTTP/MQTT/IR on core 0, so park it at the frame boundary before the
+        // generic parser writes the value. The hook waits only for the current encode and preserves
+        // a healthy worker; structural controls still run prepareTree() below.
+        MoonModule::notifyQuiesceRender();
         // Per-type parse + validate + apply lives in Control.cpp. A non-Ok result leaves
         // the storage untouched, so there is no rollback to do.
         switch (applyControlValue(c, valueJson, "value")) {

@@ -21,6 +21,8 @@ This page covers only what those don't: the browser-side rendering behaviour.
 
 ## Layout
 
+The initial document keeps the application shell visually hidden against a neutral dark background until the first device-state snapshot identifies the product, applies its branding, and renders its initial view. The complete branded UI becomes visible on the next animation frame, so the generic projectMM logo and colors never appear as an intermediate frame on branded firmware. A bounded HTML-side fallback removes this paint gate if application startup fails, keeping recovery controls accessible.
+
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │  Status bar: ☰ · logo · brand · device name · sys stats     │
@@ -76,10 +78,12 @@ A left column listing the root modules, one entry per top-level MoonModule.
 - **Footer** pinned to the bottom of the nav: social links (GitHub, Discord, Reddit, YouTube — inline
   SVG) and a `© <year> MoonLight` line.
 
-The WS state push carries the full module tree; only the selected root is rendered, and
-`updateValues()` patches just the visible cards (non-rendered roots have no DOM nodes, so their data
-is silently ignored). Per-root server-side filtering was evaluated and deferred — the 1 Hz push is
-cheap and the JSON is built through a streaming sink, so tree size is not a buffer-limit concern.
+`GET /api/state` streams the full module tree when the page opens or the device reports a schema
+change. WebSocket carries small value patches between snapshots and a small resync notice when the
+tree shape changes. Only the selected root is rendered, and `updateValues()` patches just the visible
+cards; non-rendered roots have no DOM nodes, so their data is silently ignored. The device never
+assembles the full snapshot in a contiguous WebSocket buffer, which keeps the same protocol usable on
+controllers without PSRAM.
 
 ## Module card
 
@@ -140,7 +144,7 @@ how each *renders*.)
 | `toggle` (bool) | switch (pill + thumb; hidden `<input type=checkbox>` is the source of truth) | sends on change | none |
 | `select` | dropdown | sends immediately; server may rebuild controls (dynamic `defineControls`) | none |
 | `text` | text input | sends debounced | 500 ms |
-| `password` | password input | masked; hold-to-peek reveals the stored value | 500 ms |
+| `password` | set-only password input | blank with a saved/not-saved placeholder; hold-to-peek reveals only newly typed text | 500 ms |
 | `display` (read-only) | static text | WS push updates in place | n/a |
 | `display-int` (read-only int + unit) | formatted text (`-58 dBm`) | unit suffix set device-side at `addReadOnlyInt` time, carried in the descriptor's `aux` slot | n/a |
 | `time` (read-only seconds) | formatted text (`1d 4h 27m 13s`) | WS push updates | n/a |
@@ -153,12 +157,10 @@ how each *renders*.)
   default.
 - **Hidden controls.** `hidden: true` on a descriptor → the UI skips rendering it (conditional
   controls like NetworkModule's static-IP fields under DHCP).
-- **Password controls are obfuscated, not encrypted.** A `password` control serializes in `/api/state`
-  as `{"type":"password","value":"<encoded>"}` where `<encoded>` is the password XOR'd with a fixed key
-  then base64-encoded; the UI decodes it (`decodePassword()`) so the input holds the real value (masked,
-  hold-to-peek). A **first line of defence only**: the XOR key is a shared constant in both the firmware
-  and `app.js`, so it's trivially reversible — it stops the password being plainly readable in a raw
-  `curl /api/state`, not a determined reader.
+- **Password controls are set-only.** Public state and value patches serialize a password as a boolean:
+  `true` means configured and `false` means empty. The browser never receives the stored text. Leaving a
+  Wi-Fi password field untouched preserves the stored credential; entering text replaces it, and entering
+  an explicit empty draft clears it. Local persistence writes the real value to the device configuration.
 
 ## Type picker
 
@@ -198,6 +200,36 @@ renderer, everything after is the domain's choice; the UI ignores types it doesn
 - The canvas is sticky just below the status bar, scroll-shrinks 0→50 % over 300 px.
 - `width: 100%` + `aspect-ratio: 1 / 1` derives the height from the column width; `max-height: 50vh`
   caps it.
+
+The HELIO renderer treats a physical LED package and emitted light as separate signals. An inactive
+package remains directly visible at 30% of the package floor, while only lit pixels enter internal
+bounces, rim reflections, and the optional wall reflection. Every bounce samples the same physical
+package-and-gap texture as the direct strip, so reflections stay aligned with individual emitters.
+The optional wall is a fixed 3 × 3 m world-space surface behind the size-derived sphere, with an
+adjustable gap measured from the rear glass surface. Lit packages and their mirror images project
+localized light through a 110° emission cone instead of applying an average scene color, so a moving
+light produces a moving, diffuse wall spot. The equatorial rim occludes that projection and casts a
+soft shadow. Camera motion changes the perspective of the sphere and wall together; an optional
+smooth tilt traverses the full top-to-bottom 180° arc and eases to zero velocity at both poles and the
+equator. The main trace,
+floating trace, and active scene card consume only the `0x02` RGB frames emitted by `PreviewDriver`;
+a missing or stale frame shows the unlit sphere instead of substituting a browser-generated effect.
+For these device frames, exact RGB zero is off and every nonzero channel contributes light. The
+preview frame folds the configured RGBW white die into display RGB before transmission; HELIO uses
+the strip's 3000 K white point. Because `PreviewDriver` reads the final composed layer buffer, frames produced by a native effect or received
+through Art-Net, E1.31, or DDP use the same live-preview path. Full-size traces redraw from delivered
+LED frames at the configured preview rate and on camera input; an enabled camera tilt redraws at the
+display cadence while sampling the latest delivered frame. The main trace runs only while it is in
+the viewport; opening the floating trace stops the main trace and pauses covered scene-card previews
+until the floating trace closes.
+- The product dashboard uses the two playlists as its scene catalog. Each playlist is a full-width
+  section with Play/Stop controls and complete scene preview cards in playlist order. Those cards form
+  a two-column grid on desktop and one column on narrow screens; there is no duplicate standalone
+  scene gallery or aggregate playlist preview. Selecting a scene manually stops playlist playback.
+- Inactive scene cards use browser simulations with the native effects' 8-bit fixed-point wave and
+  beat arithmetic. Only cards in the viewport render; one two-card row is submitted per browser frame
+  at a 30 FPS target. Each card owns a monotonic scene clock with bounded catch-up, so a delayed
+  browser frame pauses briefly instead of jumping the animation forward.
 - The last received frame is cached so camera gestures (orbit/pan/zoom) redraw instantly without a new
   frame; `touch-action: none` keeps gestures off native scroll/zoom.
 - WebGL clear color `(0, 0, 0, 0)` — a transparent canvas blends into either theme with no per-frame
@@ -227,13 +259,19 @@ lookup must use `findIndex(c => c.name === mod.name)`, not `indexOf(mod)`.
 ## Communication client behaviour
 
 The endpoints, the `/ws` frame shape, and the streaming state sink are owned by
-[HttpServerModule](moxygen/HttpServerModule.md); `/api/control` is `{module, control, value}`. The
+[HttpServerModule](moxygen/HttpServerModule.md); `/api/control` is `{module, control, value}`. WebSocket sends a small resync notice when the browser needs static control metadata such as select and palette options; the browser then fetches one streamed `GET /api/state` snapshot. Subsequent value-only refreshes use `GET /api/state?compact=1`; the UI merges that compact tree into the metadata-rich state by module and control name, using the same merge path as WebSocket updates. The
 **browser-side** socket behaviour the server doesn't dictate:
 
-- URL `ws://<host>/ws` (same port as HTTP); the server pushes a full-state snapshot ~1/s.
+- URL `ws://<host>/ws` (same port as HTTP); the server pushes a compact value/status snapshot ~1/s.
+- On the HELIO dashboard, that snapshot patches only dashboard fields. Generic module-card controls
+  are patched when the advanced module view is open, so hidden controls do not interrupt preview
+  animation on the one-second cadence.
 - Client sends `"ping"` every 25 s as keepalive (Safari kills idle sockets otherwise).
 - Auto-reconnect on close with exponential backoff (500 ms → 5 s ceiling).
 - Pause on `document.visibilityState === 'hidden'`, resume on `pageshow` (Safari bfcache survival).
+- The sidebar diagnostics download fetches state and system sequentially but emits only an explicit
+  allowlist: scalar runtime health plus aggregate module/error counts. It excludes raw module names,
+  controls, statuses, origin, credentials, network configuration, topology, and calibration.
 
 ## localStorage keys
 

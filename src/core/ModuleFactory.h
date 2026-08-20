@@ -4,6 +4,7 @@
 #include "platform/platform.h"
 
 #include <cstring>
+#include <new>
 
 namespace mm {
 
@@ -18,8 +19,10 @@ using CreateModuleFn = MoonModule*(*)();
 class ModuleFactory {
 public:
     // Template registration: captures sizeof(T), role(), tags(), and dim()
-    // automatically from a single stack-allocated probe instance. Registration
-    // runs once at boot. docPath is the module's spec page relative to
+    // automatically from a temporary probe instance. The probe lives on the heap
+    // because some modules carry sizeable parser/runtime buffers; boot-time
+    // registration runs on a small task stack on ESP32. Registration runs once at
+    // boot. docPath is the module's spec page relative to
     // docs/moonmodules/ (e.g. "light/effects/NoiseEffect.md"); the UI builds a
     // help link from it. It is a flash string literal — no per-instance RAM cost.
     // "" means no help link.
@@ -42,18 +45,22 @@ public:
         for (uint8_t i = 0; i < count_; i++)
             if (std::strcmp(types_[i].name, typeName) == 0) return true;
         if (!grow()) return false;
-        T probe;
+        void* storage = platform::alloc(sizeof(T));
+        if (!storage) return false;
+        T* probe = ::new (storage) T();
         uint8_t dim = 0;
         if constexpr (requires(const T& t) { static_cast<uint8_t>(t.dimensions()); }) {
-            dim = static_cast<uint8_t>(probe.dimensions());
+            dim = static_cast<uint8_t>(probe->dimensions());
         }
         types_[count_++] = {typeName,
                             []() -> MoonModule* { return new T(); },
-                            sizeof(T), probe.role(),
+                            sizeof(T), probe->role(),
                             docPath ? docPath : "",
-                            probe.tags() ? probe.tags() : "",
+                            probe->tags() ? probe->tags() : "",
                             dim,
-                            probe.acceptsChildRoles() ? probe.acceptsChildRoles() : ""};
+                            probe->acceptsChildRoles() ? probe->acceptsChildRoles() : ""};
+        probe->~T();
+        platform::free(storage);
         return true;
     }
 

@@ -13,6 +13,7 @@ add_executable(mm_tests
     unit/core/unit_fields.cpp
     unit/core/unit_crc.cpp
     unit/core/unit_AudioService_sync.cpp
+    unit/core/unit_Bh1750Service.cpp
     unit/core/unit_IrService.cpp
     unit/core/unit_TcpConnect.cpp
     unit/core/unit_MqttPacket.cpp
@@ -72,6 +73,8 @@ add_executable(mm_tests
     unit/light/unit_draw.cpp
     unit/light/unit_GameOfLifeEffect.cpp
     unit/light/unit_DemoReelEffect.cpp
+    unit/light/unit_HelioWledPresetsEffect.cpp
+    unit/light/unit_PixelblazeCompatEffect.cpp
     unit/light/unit_TextEffect.cpp
     unit/light/unit_Coord3D.cpp
     unit/light/unit_effects_render.cpp

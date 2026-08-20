@@ -133,7 +133,7 @@ public:
     // buildAndSendCoordTable() resizes keptIdx_. Both are real and both are on the render path,
     // so clang-hotpath lists them rather than hiding them. Backlogged (backlog-core: hot path).
     void tick() MM_NONBLOCKING override {
-        if (fps == 0) return;
+        if (!broadcaster_ || fps == 0) return;
         uint32_t now = platform::millis();
         uint32_t interval = 1000 / fps;
         if (now - lastSendTime_ < interval) return;  // fps CEILING (max rate); link may be slower
@@ -378,6 +378,7 @@ public:
         const uint8_t cpl = sourceBuffer_->channelsPerLight();
         const nrOfLightsType n = sourceBuffer_->count();
         const nrOfLightsType s = previewStride_;
+        const Correction* correction = previewCorrection();
 
         // Header: [0x02][count:u32 LE][stride:u16 LE]  (7 bytes). count = the kept lights.
         uint8_t header[7];
@@ -389,7 +390,8 @@ public:
         header[5] = static_cast<uint8_t>(s & 0xFF);
         header[6] = static_cast<uint8_t>(s >> 8);
 
-        if (s == 1 && cpl == 3 && coordCount_ <= n) {
+        if (s == 1 && cpl == 3 && coordCount_ <= n &&
+            (!correction || correction->previewCanUseSourceRgb(cpl))) {
             // FULL RES, RGB: the producer buffer IS the payload. Hand it to the RESUMABLE buffered
             // send (header copied, body = the producer buffer, a stable pointer) — it drains across
             // transport ticks without a copy and without spinning this loop, the fix for the
@@ -420,7 +422,7 @@ public:
         // buffer. `emit` is shared; the sink is chosen once here so the walk/loop below is path-agnostic.
         struct ColCtx {
             mm::BinaryBroadcaster* bc; uint8_t* stage; const uint8_t* src; nrOfLightsType n; uint8_t cpl;
-            bool resumable; uint8_t buf[1536]; uint16_t fill; size_t staged;
+            const Correction* correction; bool resumable; uint8_t buf[1536]; uint16_t fill; size_t staged;
             void put(uint8_t b) {
                 if (resumable) { stage[staged++] = b; return; }
                 buf[fill++] = b;
@@ -428,16 +430,16 @@ public:
             }
             void emit(nrOfLightsType idx) {
                 const uint8_t* px = (idx < n) ? src + static_cast<size_t>(idx) * cpl : nullptr;
-                put(px ? px[0] : 0);
-                put((px && cpl >= 2) ? px[1] : 0);
-                put((px && cpl >= 3) ? px[2] : 0);
+                put(PreviewDriver::previewRgb(px, cpl, 0, correction));
+                put(PreviewDriver::previewRgb(px, cpl, 1, correction));
+                put(PreviewDriver::previewRgb(px, cpl, 2, correction));
             }
         };
         if (!resumable) {
             broadcaster_->beginBinaryFrame(sizeof(header) + bodyBytes);
             broadcaster_->pushBinaryFrame(header, sizeof(header));
         }
-        ColCtx col{broadcaster_, stage_, src, n, cpl, resumable, {}, 0, 0};
+        ColCtx col{broadcaster_, stage_, src, n, cpl, correction, resumable, {}, 0, 0};
         if (denseGrid()) {
             const lengthType W = layer_->physicalWidth(), H = layer_->physicalHeight();
             const lengthType az = layer_->physicalDepth() > 0 ? layer_->physicalDepth() : 1;
@@ -547,14 +549,43 @@ private:
     // a fragmented classic downscales SOONER (less contiguous RAM) while a roomy PSRAM board goes
     // far higher — one rule, every board, measured not assumed. The spatial-lattice downsample is
     // the graceful fallback above the cap.
-    // True when the source is a dense grid in natural box order (no mapping LUT): driver index i is
+    // True when the source is a dense grid in natural box order: driver index i is
     // exactly box cell i, so the kept-light set + each light's buffer index are CLOSED-FORM from the
     // box dimensions and the stride — no forEachCoord walk needed (the count, the coord positions,
     // and the downsampled colors all stride the box directly). A LUT means a sparse / serpentine /
     // modified layout whose index↔position map is arbitrary, so those paths must walk forEachCoord.
-    // Mirrors the Layer's own dense-vs-LUT decision (Layer::isNaturalOrder gates lut_.setIdentity),
-    // so the two agree: no LUT ⇔ Drivers passed the dense box buffer ⇔ closed-form is valid here.
-    bool denseGrid() const { return layer_ && !layer_->lut().hasLUT(); }
+    // No LUT alone is insufficient: an indexed sparse layout such as RingLayout can feed a compact
+    // physical-order buffer without a LUT while its bounding box still contains many empty cells.
+    // Both the physical layout count and the actual driver source must therefore fill the box.
+    bool denseGrid() const {
+        if (!layer_ || !sourceBuffer_ || layer_->lut().hasLUT()) return false;
+        const lengthType w = layer_->physicalWidth() > 0 ? layer_->physicalWidth() : 1;
+        const lengthType h = layer_->physicalHeight() > 0 ? layer_->physicalHeight() : 1;
+        const lengthType d = layer_->physicalDepth() > 0 ? layer_->physicalDepth() : 1;
+        const size_t boxCount = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(d);
+        return layer_->physicalLightCount() == boxCount && sourceBuffer_->count() == boxCount;
+    }
+
+    static uint8_t previewRgb(const uint8_t* px, uint8_t channels, uint8_t channel,
+                              const Correction* correction) {
+        if (correction) return correction->previewRgb(px, channels, channel);
+        if (!px || channel >= 3 || channels <= channel) return 0;
+        uint16_t value = px[channel];
+        if (channels >= 4) value += px[3];
+        return value > 255 ? 255 : static_cast<uint8_t>(value);
+    }
+
+    const Correction* previewCorrection() const {
+        MoonModule* owner = parent();
+        if (!owner) return nullptr;
+        for (uint8_t i = 0; i < owner->childCount(); i++) {
+            MoonModule* candidate = owner->child(i);
+            if (!candidate || candidate == this || candidate->role() != ModuleRole::Driver) continue;
+            auto* driver = static_cast<DriverBase*>(candidate);
+            if (driver->hasCorrectionControls()) return &driver->outputCorrection();
+        }
+        return nullptr;
+    }
 
     nrOfLightsType maxPreviewPoints() const {
         // TWO independent bounds, take the smaller:

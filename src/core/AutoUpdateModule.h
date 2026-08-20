@@ -64,7 +64,7 @@ public:
         else clearStatus();
     }
 
-    void onBuildControls() override {
+    void defineControls() override {
         controls_.addText("manifestUrl", manifestUrl_, sizeof(manifestUrl_), validateUrl);
         controls_.addBool("autoInstall", autoInstall_);
         controls_.addUint16("checkIntervalMin", checkIntervalMin_, 15, 1440);
@@ -74,7 +74,7 @@ public:
         controls_.addReadOnly("lastCheck", lastCheckStr_, sizeof(lastCheckStr_));
     }
 
-    void onUpdate(const char* name) override {
+    void onControlChanged(const char* name) override {
         if (!name) return;
         if (std::strcmp(name, "manifestUrl") == 0 ||
             std::strcmp(name, "autoInstall") == 0 ||
@@ -85,13 +85,17 @@ public:
         }
     }
 
-    void loop1s() override {
+    void tick1s() MM_NONBLOCKING override {
         if (!enabled()) return;
         if (!manifestUrl_[0]) {
             clearStatus();
             return;
         }
         if (!autoInstall_) { clearStatus(); return; }
+        if (isLocalDevelopmentBuild(kVersion)) {
+            setStatusf(Severity::Status, "manual development build");
+            return;
+        }
         if (otaInFlight()) return;
         if (!platform::networkReady()) {
             setStatusf(Severity::Status, "waiting for network");
@@ -113,6 +117,12 @@ public:
         if (!a.prerelease) return false;
         if (a.dev != b.dev) return a.dev > b.dev;
         return std::strcmp(a.pre, b.pre) > 0;
+    }
+
+    static bool isLocalDevelopmentBuild(const char* version) {
+        SemVer v = parseVersion(version);
+        if (!v.valid) return true;
+        return v.valid && v.prerelease && std::strcmp(v.pre, "dev") == 0;
     }
 
     static Decision selectCandidate(const char* manifestJson,
@@ -178,7 +188,8 @@ private:
     char latestVersion_[32] = "";
     char lastCheckStr_[24] = "never";
     char statusBuf_[96] = {};
-    char manifestBuf_[json::kMaxJsonLen] = {};
+    static constexpr size_t kManifestBufferSize = 4096;
+    char manifestBuf_[kManifestBufferSize] = {};
 
     static bool validateUrl(const char* s) {
         return !s || !*s || std::strncmp(s, "https://", 8) == 0 || std::strncmp(s, "http://", 7) == 0;
@@ -187,6 +198,17 @@ private:
     static void copyString(char* dst, size_t dstLen, const char* src) {
         if (!dst || dstLen == 0) return;
         std::snprintf(dst, dstLen, "%s", src ? src : "");
+    }
+
+    static size_t appendString(char* dst, size_t dstLen, size_t offset,
+                               const char* src, size_t srcLen) {
+        if (!dst || dstLen == 0) return 0;
+        if (offset >= dstLen) offset = dstLen - 1;
+        size_t count = 0;
+        while (src && count < srcLen && src[count] && offset + count + 1 < dstLen) count++;
+        if (count > 0) std::memcpy(dst + offset, src, count);
+        dst[offset + count] = '\0';
+        return offset + count;
     }
 
     void setStatusf(Severity sev, const char* fmt, ...) {
@@ -395,15 +417,19 @@ private:
         const char* firstSlash = std::strchr(host, '/');
         if (path[0] == '/') {
             const size_t prefix = firstSlash ? static_cast<size_t>(firstSlash - base) : std::strlen(base);
-            std::snprintf(out, outLen, "%.*s%s", static_cast<int>(prefix), base, path);
+            size_t used = appendString(out, outLen, 0, base, prefix);
+            appendString(out, outLen, used, path, std::strlen(path));
             return;
         }
         const char* lastSlash = std::strrchr(base, '/');
         if (!lastSlash || lastSlash < host) {
-            std::snprintf(out, outLen, "%s/%s", base, path);
+            size_t used = appendString(out, outLen, 0, base, std::strlen(base));
+            used = appendString(out, outLen, used, "/", 1);
+            appendString(out, outLen, used, path, std::strlen(path));
         } else {
             const size_t prefix = static_cast<size_t>(lastSlash + 1 - base);
-            std::snprintf(out, outLen, "%.*s%s", static_cast<int>(prefix), base, path);
+            size_t used = appendString(out, outLen, 0, base, prefix);
+            appendString(out, outLen, used, path, std::strlen(path));
         }
     }
 };

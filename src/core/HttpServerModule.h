@@ -25,15 +25,19 @@ class Scheduler;
 /// is permitted here. Implementation lives in HttpServerModule.cpp; this header is the interface
 /// only. The `port` control defaults to 8080 on desktop, 80 on ESP32.
 ///
+/// The listener retries after a bind failure and rebinds when the live `port` control changes.
+/// Existing accepted WebSocket connections keep their own socket lifecycle.
+///
 /// **REST API:** `GET /` serves index.html and the UI assets (`/app.js`, `/style.css`,
-/// `/moonlight-logo.png`). `GET /api/state` returns the full module-tree JSON (each entry
+/// `/moonlight-logo.png`, `/helio-favicon.svg`). `GET /api/state` returns the full module-tree JSON (each entry
 /// carries name, type, role, enabled, tickTimeUs, classSize, dynamicBytes, `controls[]`,
 /// status + severity when set, and `userEditable:false` only when the module opts out of
 /// UI delete/replace). `GET /api/system` returns fps, tickTimeUs, freeHeap, freeInternal,
 /// maxBlock, uptime. `GET /api/types` returns the type catalog (stable factory `name`,
 /// role-suffix-stripped `displayName`, `acceptsChildRoles`, and per-type `defaults` captured
 /// from a fresh probe instance). Mutations: `POST /api/control` `{module,control,value}`,
-/// `POST /api/modules` create, `POST /api/modules/{name}/move` reorder, `.../replace` swap,
+/// `POST /api/modules` create, `POST /api/modules/{name}/move` reorder, `.../replace` swaps and
+/// returns the fresh module resource,
 /// `POST /api/reboot`, `DELETE /api/modules/{name}`. File Manager: `GET /api/dir?path=` lists a
 /// directory, `POST /api/dir?path=` creates a folder, `DELETE /api/dir?path=` removes a file or
 /// empty folder, `GET|POST /api/file?path=` reads / writes a file body (the path rides the query,
@@ -52,23 +56,25 @@ class Scheduler;
 /// **State push — diff on the wire (the recognizable snapshot-then-patch model, cf. Redux /
 /// Firestore sync, JSON Patch RFC 6902):** the state a client needs is the full module tree
 /// (~30 KB, mostly *unchanging* option/detail metadata), but re-serializing all of it every
-/// `tick1s()` — inline on the render thread — stole render budget and stuttered the LEDs at 1 Hz.
-/// Instead: a client gets the **full** `{modules:[…]}` state ONCE on connect (chunk-drained via
-/// the resumable sender, off the render tick), then each second a **patch** `{patch:[{path,value},
-/// …]}` of only the values that changed. Change is found by value-compare, not a dirty flag:
+/// `tick1s()` — inline on the render thread — steals render budget and stutters the LEDs at 1 Hz.
+/// A client receives a tiny `{"resync":true}` notice on connect or schema change, fetches the full
+/// state through the streaming `GET /api/state` path, then receives a **patch**
+/// `{patch:[{path,value},…]}` each second with only the values that changed. This avoids a
+/// frame-sized contiguous state allocation on memory-tight boards. Change is found by
+/// value-compare, not a dirty flag:
 /// `buildStatePatch` serializes each leaf's value, hashes it (FNV-1a), and compares to a cached
 /// hash — so a value the device mutates itself (telemetry `@tickTimeUs`, status, a driver) is
 /// caught the same as a `setControl` write, with no per-write instrumentation. A leaf path is
 /// `"<module>/<control>"` (or `"<module>/@<field>"` for live per-card header telemetry); module
 /// names are unique tree-wide, so the path is stable. The hash cache is one global baseline (not
-/// per-client) in a growable `ScratchBuffer<LeafHash>`; `requestFullResync()` re-sends the full
-/// state + re-baselines on connect and after any structural change (a value patch can't describe
-/// a reshaped tree). A **schema change** (a `rebuildControls()` from any trigger — a control set, a
+/// per-client) in a growable `ScratchBuffer<LeafHash>`; a successful streamed state response
+/// re-baselines it after any structural change (a value patch can't describe a reshaped tree).
+/// A **schema change** (a `rebuildControls()` from any trigger — a control set, a
 /// list mutation, an async WiFi/Hue callback) also forces a resync via a static schema-changed hook
 /// (`MoonModule::setSchemaChangedHook`), since the value patch can't carry changed hidden flags /
-/// option sets. A pending resync is fast-pathed on `tick20ms` (not just `tick1s`) and **preempts**
-/// an in-flight preview frame, so a freshly-connected client gets its state — and therefore its
-/// preview — within a few tens of ms instead of up to a second. Net: the per-second push drops from
+/// option sets. A pending resync notice is fast-pathed on `tick20ms` (not just `tick1s`) and
+/// **preempts** an in-flight preview frame, so a freshly-connected client fetches its state — and
+/// therefore its preview — within a few tens of ms instead of up to a second. Net: the per-second push drops from
 /// ~34 KB to ~1–2 KB and the expensive full-tree serialize runs only on connect / schema change. The
 /// UI applies a patch in place (no rebuild) and re-renders on a full frame. This is the "sub-hot path
 /// is a hot path" rule (CLAUDE.md) applied: a periodic tick shares the render thread, so its work
@@ -105,7 +111,7 @@ class Scheduler;
 /// they all read `this->wsClients_`, `this->scheduler_`, or other module state, or call other
 /// HttpServerModule members. Three pieces of this module's helpers live in their own headers:
 /// JsonSink + jsonEscape() in core/JsonSink.h, sha1() (RFC 3174, WS handshake) in core/Sha1.h,
-/// base64Encode() (WS handshake + Password obfuscation) in core/Base64.h — all in `namespace mm`
+/// base64Encode() (WS handshake) in core/Base64.h — all in `namespace mm`
 /// so the call sites are unchanged.
 ///
 /// **Prior art:** the WLED-compatibility shim's exact field requirements were reverse-engineered
@@ -135,20 +141,12 @@ public:
     bool sendBufferedFrame(const uint8_t* header, size_t headerLen,
                            const uint8_t* body, size_t bodyLen) override;
     bool bufferedSendIdle() const override { return !previewSend_.active; }
-    // Drop the in-flight buffered send. Frees the body first when the frame OWNS it (a state frame
-    // owns its ~30 KB JSON; a preview frame borrows its pixel buffer) — same rule as release(), so
-    // this is self-safe for any caller, not only ones that know a borrowed frame is in flight.
-    // A cancelled OWNED frame is a state resync that was still draining (a preview-geometry rebuild
-    // can cancel mid-drain); re-arm fullResyncPending_ so the resync is retried on the next push
-    // rather than silently lost — a client that already saw a partial state must not be left stale.
+    // Drop the in-flight buffered preview send. The body is borrowed from PreviewDriver and remains
+    // caller-owned; clearing the pointer makes a geometry rebuild safe immediately after cancellation.
     void cancelBufferedSend() override {
-        if (previewSend_.ownsBody) {
-            platform::free(const_cast<uint8_t*>(previewSend_.body));
-            previewSend_.body = nullptr;
-            previewSend_.ownsBody = false;
-            fullResyncPending_ = true;   // a state drain was interrupted → retry it
-        }
         previewSend_.active = false;
+        previewSend_.body = nullptr;
+        previewSend_.bodyLen = 0;
     }
     /// Bumped on each new WS client (see handleWebSocketUpgrade). PreviewDriver watches it to
     /// re-stream its coordinate table the moment a fresh page connects, so a refresh shows the
@@ -238,6 +236,9 @@ public:
 
 private:
     platform::TcpServer server_;
+    uint16_t listeningPort_ = 0;
+    bool listenerFailureReported_ = false;
+    uint32_t nextListenerAttemptMs_ = 0;
     Scheduler* scheduler_ = nullptr;
     const char* uiPath_ = "src/ui";
 
@@ -260,7 +261,7 @@ private:
     // Max TOTAL WouldBlock spins for one span in sendAllOrClose before a stuck client is closed.
     // Used by the begin/push/end stream (coord table + downsampled color frame); the full-res
     // color frame goes through the resumable sendBufferedFrame instead, which never spins.
-    static constexpr int kDirectSendSpins = 2000;
+    static constexpr int kDirectSendSpins = 2;
 
     // Resumable full-frame send (BinaryBroadcaster::sendBufferedFrame). One WS message = a copied
     // header + a pointer into the caller's STABLE body buffer (the PreviewDriver producer buffer),
@@ -272,15 +273,10 @@ private:
     struct PreviewSend {
         uint8_t hdr[16] = {};                 // WS + app header, copied (caller's may be a stack local)
         size_t hdrLen = 0;
-        const uint8_t* body = nullptr;        // the frame body — see ownsBody for lifetime
+        const uint8_t* body = nullptr;        // borrowed frame body; caller keeps it stable while active
         size_t bodyLen = 0;
         size_t sent[MAX_WS_CLIENTS] = {};     // per-client cursor over [hdr ++ body]; a slow client lags
         bool active = false;
-        // Body lifetime: the preview path BORROWS body (PreviewDriver keeps its pixel buffer alive),
-        // so ownsBody is false and the drain frees nothing. The state push builds a fresh JSON buffer
-        // per second that must outlive the chunked drain, so it hands OWNERSHIP (ownsBody true) and the
-        // drain frees it on completion / on release. One slot serves both large-frame producers.
-        bool ownsBody = false;
     };
     PreviewSend previewSend_;
     // Guards the WS sender — previewSend_ AND the wsClients_ socket writes — because it has TWO
@@ -293,26 +289,22 @@ private:
     // same back-off its adaptive frame rate takes when the link is busy — so a lost race costs one
     // preview frame, never a stalled render or encode.
     mutable TryLock wsLock_;
-    // Queue a TEXT frame (opcode 0x81) whose body this module OWNS, through the same resumable slot the
-    // preview binary send uses — so the (20 KB) state JSON drains in chunks on tick20ms instead of a
-    // blocking write on the render tick. Takes ownership of `ownedBody` (freed on drain-complete /
-    // release). Returns false (and frees ownedBody) if a send is already in flight — drop-new, the next
-    // second's state is fresher. Internal (not the BinaryBroadcaster interface, which stays binary).
-    bool startBufferedTextSend(char* ownedBody, size_t bodyLen);
     // Drain one memory-adaptive chunk per client of the in-flight resumable send; mark it done when
-    // every live client has the whole frame, freeing an owned body then. Called from tick20ms. No-op
-    // when none is active.
+    // every live client has the whole frame. Called from tick20ms. No-op when none is active.
     void drainPreviewSend();
     // Largest chunk to push per client per drain tick, derived from free contiguous memory so a
     // tight board takes small bites (bounded tick occupancy) and a roomy board drains fast.
     size_t previewChunkBytes() const;
 
+    void ensureListener();
+
     // All JSON API responses (/api/state, /api/types, /api/system) and the WS
     // state push stream through a JsonSink — no shared fixed-size buffer.
 
     // --- Diff-on-the-wire state push -----------------------------------------
-    // The periodic WS push sends the FULL state once (on connect / after a structural change), then a
-    // PATCH of only the controls whose value changed — because a full re-serialize of the whole tree
+    // The periodic WS push asks the browser for a streamed full state once (on connect / after a
+    // structural change), then sends a PATCH of only the controls whose value changed — because a full
+    // buffered re-serialize of the whole tree
     // (~34 KB, mostly unchanging option/detail metadata) every second on the render thread is the 1 Hz
     // LED stutter (a periodic tick shares the render thread — see CLAUDE.md "sub-hot path"). Change is
     // detected by value-compare, not a dirty flag: buildStatePatch serializes each control's VALUE,
@@ -327,7 +319,8 @@ private:
     // not per tick); the per-tick patch build only reads it. 8 bytes/leaf (path-hash + value-hash).
     ScratchBuffer<LeafHash> leafHashes_{*this};
     uint16_t leafHashCount_ = 0;
-    bool fullResyncPending_ = true;    // send a full state next push (set on connect / structural change)
+    bool fullResyncPending_ = true;    // browser needs a streamed REST snapshot before patches resume
+    bool resyncNoticeSent_ = false;    // suppress repeated notices while that snapshot is in flight
     // Build a patch of changed control values into `sink` as {"patch":[{"path":"<mod>/<ctrl>","value":V},…]};
     // returns the number of changed leaves (0 → nothing to send). Walks the tree, value-hashes each
     // control, updates the cache. Emits a control ONLY when its value-hash differs from the cache.
@@ -341,21 +334,15 @@ private:
     template <class Fn> void forEachStateLeaf(Fn&& fn);
     template <class Fn> void visitModuleLeaves(MoonModule* mod, Fn&& fn);
     LeafHash* findLeaf(uint32_t pathHash);
-    // Mark that the next push must be a full state + fresh baseline (a client connected, or the tree
+    // Mark that clients need a streamed state + fresh baseline (a client connected, or the tree
     // structure changed so a value patch can't describe it).
-    void requestFullResync() { fullResyncPending_ = true; }
+    void requestFullResync() { fullResyncPending_ = true; resyncNoticeSent_ = false; }
 
     // Static sink for MoonModule::setSchemaChangedHook: routes any module's rebuildControls() (a
     // schema change) to the live instance's requestFullResync(). instance_ mirrors the
     // FilesystemModule::noteDirty singleton pattern — set in setup(), cleared in release().
     static void onSchemaChanged();
     static inline HttpServerModule* instance_ = nullptr;
-
-    // XOR key for Password-control obfuscation in /api/state. NOT a secret — the
-    // same value lives in src/ui/app.js (PW_XOR_KEY). This only stops the
-    // password being plainly readable in a raw API response; it is trivially
-    // reversible by design (see the ControlType::Password serialization).
-    static constexpr uint8_t PASSWORD_XOR_KEY = 0x5A;
 
     // -----------------------------------------------------------------------
     // HTTP handling
@@ -384,10 +371,10 @@ private:
     // -----------------------------------------------------------------------
     // JSON state
     // -----------------------------------------------------------------------
-    void serveState(platform::TcpConnection& conn);
-    void buildStateJson(JsonSink& sink);
-    void writeModuleJson(JsonSink& sink, MoonModule* mod);
-    void writeControls(JsonSink& sink, MoonModule* mod);
+    void serveState(platform::TcpConnection& conn, bool includeMetadata = true);
+    void buildStateJson(JsonSink& sink, bool includeMetadata = true);
+    void writeModuleJson(JsonSink& sink, MoonModule* mod, bool includeMetadata = true);
+    void writeControls(JsonSink& sink, MoonModule* mod, bool includeMetadata = true);
     // Emit `,"status":"…","severity":"…"` for a module that has a status set;
     // no-op when status is null. Shared by writeModuleJson (/api/state) and
     // writeModuleMetricsJson (/api/system) so the two endpoints stay in sync.

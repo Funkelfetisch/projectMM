@@ -28,6 +28,15 @@ class GenericStub : public mm::MoonModule {
     // No override — inherits ModuleRole::Generic.
 };
 
+class LargeProbeStub : public mm::MoonModule {
+public:
+    mm::ModuleRole role() const MM_NONBLOCKING override { return mm::ModuleRole::Effect; }
+    const char* tags() const override { return "large"; }
+
+private:
+    [[maybe_unused]] char scratch_[16 * 1024] = {};
+};
+
 } // namespace
 
 // NOTE: ModuleFactory is a global singleton (static inline state). The doctest harness
@@ -116,4 +125,13 @@ TEST_CASE("ModuleFactory: dynamic capacity grows past initial size") {
         CHECK(m != nullptr);
         delete m;
     }
+}
+
+TEST_CASE("ModuleFactory: registration probe is heap-backed for large modules") {
+    REQUIRE(mm::ModuleFactory::registerType<LargeProbeStub>("__test_large_probe"));
+
+    auto* mod = mm::ModuleFactory::create("__test_large_probe");
+    REQUIRE(mod != nullptr);
+    CHECK(mod->role() == mm::ModuleRole::Effect);
+    delete mod;
 }

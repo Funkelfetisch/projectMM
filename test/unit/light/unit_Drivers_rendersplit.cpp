@@ -354,6 +354,7 @@ TEST_CASE("render-split: mutating a LAYOUT while core 1 runs is safe via the qui
 
     CHECK(releaseFired.load());               // it waited for the encode (fails without the hook)
     CHECK_FALSE(slow->isInTick());            // the worker is provably out
+    CHECK(r.drivers.renderSplitActive());      // a healthy quiesce parks; it does not tear down the split
 
     releaser.join();
 

@@ -5,6 +5,10 @@
 
 namespace mm {
 
+namespace {
+constexpr uint32_t kUsageRefreshMs = 5u * 60u * 1000u;
+}
+
 void FileManagerModule::defineControls() {
     // Only `show hidden` is a control: the whole File Manager surface is the tree panel (app.js
     // renderFileManager), which lists over /api/dir and reads the gauges from /api/state; the
@@ -13,17 +17,8 @@ void FileManagerModule::defineControls() {
     // `show hidden` flag keeps it bound for the API while the generic control list skips it.
     controls_.addBool("show hidden", showHidden_);      // reveal dot-prefixed entries (e.g. .config)
     controls_.setHidden(controls_.count() - 1, true);
-    // Filesystem-usage gauge (used / total bytes), read from the platform. Shown below the tree in
-    // the panel — the File Manager is where filesystem space is relevant, so it owns the control.
-    // Bound only when the platform reports a real partition (desktop / a no-data-partition chip
-    // reports 0). Read the total ONCE (it's fixed) the first time controls are built; the used value
-    // is refreshed only on the throttled tick1s. defineControls() is re-runnable (a Select can rebuild
-    // the control set on any control write), so it must NOT re-scan the filesystem here — a LittleFS
-    // usage scan walks blocks and isn't free. Rebuild from the cached values instead.
-    if (totalBytes_ == 0) {
-        totalBytes_ = static_cast<uint32_t>(platform::filesystemTotal());
-        usedBytes_ = static_cast<uint32_t>(platform::filesystemUsed());
-    }
+    // Filesystem-usage gauge (used / total bytes). setup()/tick1s refresh the cached values;
+    // control rebuilds only rebind descriptors, so a UI write never pays a LittleFS scan.
     if (totalBytes_ > 0) {
         controls_.addProgress("filesystem", usedBytes_, totalBytes_);
         controls_.setHidden(controls_.count() - 1, true);   // renders as the usage bar in the panel, not generically
@@ -42,7 +37,12 @@ void FileManagerModule::defineControls() {
 }
 
 void FileManagerModule::tick1s() MM_NONBLOCKING {
-    if (totalBytes_ > 0) usedBytes_ = static_cast<uint32_t>(platform::filesystemUsed());
+    const uint32_t now = platform::millis();
+    if (lastUsageRefreshMs_ != 0 && now - lastUsageRefreshMs_ < kUsageRefreshMs) return;
+
+    // LittleFS usage accounting can take tens of milliseconds on ESP32; do not poll it every
+    // second while LED output is active.
+    refreshUsage();
 }
 
 void FileManagerModule::setup() {
@@ -51,6 +51,19 @@ void FileManagerModule::setup() {
     // regardless of any persisted value (setup() runs after persistence overlays it). A file manager
     // opens with hidden entries hidden; the user re-toggles per session.
     showHidden_ = false;
+    refreshUsage();
+    rebuildControls();
+}
+
+void FileManagerModule::refreshUsage() {
+    totalBytes_ = static_cast<uint32_t>(platform::filesystemTotal());
+    if (totalBytes_ == 0) {
+        usedBytes_ = 0;
+        lastUsageRefreshMs_ = 0;
+        return;
+    }
+    usedBytes_ = static_cast<uint32_t>(platform::filesystemUsed());
+    lastUsageRefreshMs_ = platform::millis();
 }
 
 // mkdir/delete are HTTP endpoints (POST/DELETE /api/dir?path=) in HttpServerModule: a create/delete

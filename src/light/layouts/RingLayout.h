@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cmath>    // sinf, cosf, fmodf
+#include <cstdint>
+#include <numbers>  // std::numbers::pi_v, portable pi (M_PI is a non-standard <cmath> extension)
 #include "light/layouts/LayoutBase.h"
 
 namespace mm {
@@ -14,24 +17,25 @@ namespace mm {
 // Geometry (getRadius = n / 2π, the PI + 2πi/n + 2π·angleFirst/360 placement angle,
 // the 1.1× centre offset, the clockwise/counter-clockwise partial-arc filter, and
 // the integer truncation of every coordinate) is reproduced exactly. MoonLight's
-// pin/wiring plumbing (doNextPin/nextPin) is dropped — a projectMM layout emits
+// pin/wiring plumbing (doNextPin/nextPin) is dropped; a projectMM layout emits
 // coordinates only; the driver owns pins.
 //
 // Float trig runs on the cold build path (forEachCoord / lightCount, called from a
 // rebuild), never the hot render loop, so it's allowed here.
-// Author: MoonLight — https://github.com/MoonModules/MoonLight/blob/main/src/MoonLight/Nodes/Layouts/L_MoonLight.h
+// Author: MoonLight, https://github.com/MoonModules/MoonLight/blob/main/src/MoonLight/Nodes/Layouts/L_MoonLight.h
 /// Layout of a single ring of evenly-spaced LEDs.
 class RingLayout : public LayoutBase {
 public:
-    // MoonLight defaults and ranges, preserved verbatim.
-    uint8_t  nrOfLEDs   = 24;    // 1..255
-    uint16_t angleFirst = 0;     // 0..359 — angle of the first LED (0 = top)
-    uint16_t rotation   = 360;   // 0..360 — arc span; <360 emits a partial ring
+    uint16_t nrOfLEDs   = 24;    // 1..1000
+    uint16_t radius     = 0;     // 0 = auto from nrOfLEDs
+    uint16_t angleFirst = 0;     // 0..359, angle of the first LED (0 = top)
+    uint16_t rotation   = 360;   // 0..360, arc span; <360 emits a partial ring
     bool     clockwise  = true;
-    uint8_t  scale      = 1;     // 1..10 — spacing multiplier out from the centre
+    uint8_t  scale      = 1;     // 1..10, spacing multiplier out from the centre
 
     void defineControls() override {
-        controls_.addUint8("nrOfLEDs",    nrOfLEDs,   1, 255);
+        controls_.addUint16("nrOfLEDs",   nrOfLEDs,   1, 1000);
+        controls_.addUint16("radius",     radius,     0, 512);
         controls_.addUint16("angleFirst", angleFirst, 0, 359);
         controls_.addUint16("rotation",   rotation,   0, 360);
         controls_.addBool("clockwise",    clockwise);
@@ -52,8 +56,12 @@ public:
 
 private:
     // MoonLight: getRadius(n) = n / TWO_PI.
-    static float getRadius(uint8_t n) {
+    static float getRadius(uint16_t n) {
         return static_cast<float>(n) / (2.0f * std::numbers::pi_v<float>);
+    }
+
+    float effectiveRadius() const {
+        return radius > 0 ? static_cast<float>(radius) : getRadius(nrOfLEDs);
     }
 
     // Single source of truth for the ring geometry: walks the nrOfLEDs candidate
@@ -63,7 +71,7 @@ private:
         const float PI_F     = std::numbers::pi_v<float>;
         const float TWO_PI_F = 2.0f * PI_F;
 
-        // nrOfLEDs is a uint8_t control (1..255) but can be 0 if set directly; the
+        // nrOfLEDs is validated by the control but can be 0 if set directly; the
         // loop below never runs then and every division by nrOfLEDs is guarded by
         // it, so a degenerate ring emits zero lights without dividing by zero.
         if (nrOfLEDs == 0) {
@@ -77,13 +85,14 @@ private:
         // rebuilds fresh each build, so ringCenter is derived inline here from
         // nrOfLEDs. Behaviourally identical; the int truncation is preserved so
         // the emitted coordinates match MoonLight exactly. z is always 0.
-        const lengthType ringCenterX = static_cast<lengthType>(1.1f * getRadius(nrOfLEDs));
-        const lengthType ringCenterY = static_cast<lengthType>(1.1f * getRadius(nrOfLEDs));
+        const float effective = effectiveRadius();
+        const lengthType ringCenterX = static_cast<lengthType>(1.1f * effective);
+        const lengthType ringCenterY = static_cast<lengthType>(1.1f * effective);
 
-        const float radius = getRadius(nrOfLEDs);
+        const float ringRadius = effective;
 
         nrOfLightsType idx = 0;
-        for (int i = 0; i < nrOfLEDs; i++) {
+        for (uint16_t i = 0; i < nrOfLEDs; i++) {
             float x = scale * ringCenterX;
             float y = scale * ringCenterY;
 
@@ -96,8 +105,8 @@ private:
                 PI_F + (TWO_PI_F * i) / nrOfLEDs + TWO_PI_F * angleFirst / 360.0f;
 
             if (nrOfLEDs != 1) {
-                x -= scale * sinf(angleRad) * radius;
-                y += scale * cosf(angleRad) * radius;
+                x -= scale * sinf(angleRad) * ringRadius;
+                y += scale * cosf(angleRad) * ringRadius;
             }
 
             // Partial-circle inclusion test (MoonLight, verbatim logic). rotation

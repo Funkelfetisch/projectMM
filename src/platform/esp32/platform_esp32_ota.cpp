@@ -32,6 +32,15 @@ namespace mm::platform {
 // the size the HTTP path already streams in.
 constexpr size_t kOtaChunkBytes = 4096;
 
+void markOtaAppValid() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (running && esp_ota_get_state_partition(running, &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_ota_mark_app_valid_cancel_rollback();
+    }
+}
+
 namespace {
 
 // Heap-allocated task parameters. Task owns this and frees it on exit.
@@ -375,6 +384,9 @@ bool otaWriteStream(FsWriteSrc src, void* user, size_t contentLen,
         }
         written += static_cast<uint32_t>(n);
         *bytesReadOut = written;
+        // This maintenance path runs synchronously on the render task. A completed flash write is
+        // proof of forward progress, so keep that task's watchdog alive across a slow LAN upload.
+        taskWdtReset();
     }
     // Guard a truncated upload: if the client sent fewer bytes than Content-Length, the image is
     // incomplete — don't commit a half-image. (contentLen 0 = unknown; skip the check then.)

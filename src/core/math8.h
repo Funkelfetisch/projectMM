@@ -82,6 +82,13 @@ constexpr uint8_t qsub8(uint8_t a, uint8_t b) {
 // is the recognisable in-place-channel-scale spelling; one definition, two names.
 constexpr uint8_t nscale8(uint8_t val, uint8_t scale) { return scale8(val, scale); }
 
+// Video scaling keeps a non-zero channel visible when both inputs are non-zero. This prevents
+// repeated fixed-point fades from stalling because a small value rounded down to zero.
+constexpr uint8_t nscale8_video(uint8_t val, uint8_t scale) {
+    const uint8_t scaled = static_cast<uint8_t>((static_cast<uint16_t>(val) * scale) >> 8);
+    return val != 0 && scale != 0 ? static_cast<uint8_t>(scaled + 1u) : scaled;
+}
+
 // map8: rescale a 0..255 input onto the range [rangeStart, rangeEnd]. FastLED documents this as
 // map8(in, lo, hi) == map(in, 0, 255, lo, hi), i.e. the input top (255) reaches `hi` exactly. The
 // earlier `lo + scale8(in, hi-lo)` form used scale8's /256, which made `hi` unreachable and

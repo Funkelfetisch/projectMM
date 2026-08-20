@@ -292,8 +292,22 @@ public:
     /// derive from it). Guaranteed a valid, non-empty hostname — coerced every tick.
     const char* deviceName() const { return deviceName_; }
 
+    /// Product-specific boot default. Persistence overlays this during the
+    /// scheduler's load phase, so a user-assigned name still wins.
+    void setDefaultDeviceName(const char* value) {
+        if (!value || deviceName_[0] != 0) return;
+        std::snprintf(deviceName_, sizeof(deviceName_), "%s", value);
+    }
+
     /// The physical-hardware identity (device-model catalog entry name), pushed by tooling.
     const char* deviceModel() const { return deviceModel_; }
+
+    /// Product-specific boot default. Installer and persistence writes use the
+    /// same validated control and may overwrite it normally.
+    void setDefaultDeviceModel(const char* value) {
+        if (!value || deviceModel_[0] != 0 || !validateDeviceModel(value)) return;
+        std::snprintf(deviceModel_, sizeof(deviceModel_), "%s", value);
+    }
 
     /// Per-control validator for `deviceModel`, applied on EVERY write path (HTTP
     /// /api/control, APPLY_OP over serial, persistence load) via ControlDescriptor::validate.

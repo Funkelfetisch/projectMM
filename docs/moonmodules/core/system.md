@@ -31,7 +31,8 @@ WiFi / Ethernet connectivity, static-IP configuration, RSSI and TX-power reporti
 <img src="../../assets/core/NetworkModule.png" width="300" alt="Network module controls">
 
 - `mode` — WiFi / Ethernet / off.
-- `ssid` / `password` — WiFi credentials.
+- `ssid` / `password` - WiFi credentials. The device UI keeps edits as one browser-side draft, so pausing while typing cannot activate or persist a partial SSID. Password state is set-only: the API reports whether one is stored but never returns it.
+- `connectWifi` - writes the complete SSID and a newly entered password, then starts the connection attempt. An untouched blank password field preserves the stored password. External provisioning paths call `setWifiCredentials()` with both values together.
 - `mDNS` — the `<name>.local` hostname.
 - `addressing` — DHCP or static; static exposes IP / gateway / subnet / DNS fields.
 - `ethType` / `ethPhyAddr` / `ethRstGpio` / … — Ethernet PHY configuration.
@@ -77,7 +78,7 @@ Bridges the light to an MQTT broker so a home-automation hub (Homebridge) can co
 
 - `broker` — the broker hostname (e.g. `homeassistant.lan`) or IP. A hostname is resolved via DNS.
 - `port` — broker port (default 1883).
-- `username` / `password` — broker credentials (optional; the password is stored obfuscated like the WiFi password).
+- `username` / `password` — broker credentials (optional). The password persists in the device configuration and is set-only over public state APIs.
 - `haDiscovery` — announce a Home Assistant MQTT-discovery light (default off, opt-in). HA already auto-discovers the device over the WLED `/json` shim (color + palette + sensors, no broker), so this stays off to avoid a duplicate entity; turn it on for broker-only / cross-subnet setups where mDNS doesn't reach. When on, HA auto-creates a wired entity; toggling it off removes it. See the [home-automation guide](../../usecases/home-automation.md).
 - read-only — `mqtt_status` (`disabled` / `idle` / `connecting` / `connected` / `disconnected` / an error).
 
@@ -99,6 +100,23 @@ Over-the-air firmware flashing — the one operation that swaps the binary and n
 Detail: [technical](moxygen/FirmwareUpdateModule.md)
 
 [Tests](../../tests/unit-tests.md#firmwareupdatemodule)
+
+<a id="auto-update"></a>
+
+### Auto Update
+
+Checks a product manifest after boot and installs a newer compatible firmware image through the normal OTA path. A manifest entry must identify a newer semantic version and may restrict the ESP32 chip model; malformed, incompatible, older, and development-build results remain visible in module status instead of starting an update.
+
+- `manifestUrl` — HTTPS or HTTP URL of the product firmware manifest; empty disables checks.
+- `autoInstall` — install an accepted newer image automatically. Branded firmware defaults this on only when it supplies a manifest URL.
+- `checkIntervalMin` — minutes between successful checks, from 15 to 1440.
+- `retryMin` — minutes before retrying a network or manifest failure, from 1 to 240.
+- `bootDelaySec` — initial delay before the first check, from 10 to 3600 seconds, leaving boot and network association undisturbed.
+- read-only — `latest` (candidate version) and `lastCheck` (age of the last attempt).
+
+Detail: [technical](moxygen/AutoUpdateModule.md)
+
+[Tests](../../tests/unit-tests.md#autoupdatemodule)
 
 <a id="file-manager"></a>
 

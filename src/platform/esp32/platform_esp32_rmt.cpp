@@ -1,15 +1,12 @@
 // RMT WS2812 LED output — the peripheral half of the LED driver.
 //
-// The driver (src/light/drivers/RmtLedDriver.h) does all the domain work:
-// applies Correction and encodes each pixel into RMT symbols. This file owns
-// only the peripheral — channel setup, the copy-encoder that streams the
-// pre-built symbols, transmit + wait, and the RX side the on-device loopback
-// test uses. No domain logic here.
+// The driver (src/light/drivers/RmtLedDriver.h) does all the domain work and
+// applies Correction into a byte frame. This file owns only the peripheral:
+// channel setup, the standard byte encoder, transmit + wait, and the copy
+// encoder/RX side the on-device loopback test uses. No domain logic here.
 //
-// Pre-encoded path: the driver hands us a flat array of WS2812 symbols already
-// in rmt_symbol_word_t layout (our makeRmtSymbol() in RmtSymbol.h packs exactly
-// that 32-bit format), so the TX path uses a *copy* encoder — it just DMAs the
-// bytes out, no per-call symbol generation.
+// Normal frames use ESP-IDF's byte encoder. The copy encoder remains for the
+// loopback rig, which deliberately transmits already-built RMT symbols.
 
 #include "platform/platform.h"
 
@@ -31,23 +28,75 @@
 #include <cstring>
 #include <functional>  // the transmit callback the shared frame loopback takes
 #include <new>      // std::nothrow
+#include <atomic>
 
 namespace mm::platform {
 
 namespace {
 
+#if SOC_RMT_SUPPORT_DMA
+// ESP-IDF uses this size in its large-transfer RMT DMA test. Each ping-pong half
+// carries 512 WS2812 symbols (640 us), leaving ample refill time while WiFi is active.
+constexpr size_t kTxDmaBufferSymbols = 1024;
+#endif
+
 // Per-channel peripheral state, hidden behind RmtWs2812Handle::impl so the
-// domain header never sees an ESP type. One TX channel + the copy encoder it
-// streams symbols through, both allocated once at init.
+// domain header never sees an ESP type. The byte encoder drives normal frames;
+// the copy encoder remains for the raw-symbol loopback test.
 struct RmtTxState {
     rmt_channel_handle_t channel = nullptr;
-    rmt_encoder_handle_t encoder = nullptr;
+    rmt_encoder_handle_t byteEncoder = nullptr;
+    rmt_encoder_handle_t symbolEncoder = nullptr;
     uint32_t resolutionHz = 0;
 };
 
+// A timed-out diagnostic transfer still owns both an RMT channel and its borrowed source bytes.
+// Keep that pair in a fixed reclamation table and retry it on later RMT initialization. The table
+// matches the hardware TX-channel ceiling: every retained entry consumes one channel, so another
+// valid handle cannot exceed this capacity.
+struct QuarantinedLoopbackTx {
+    RmtWs2812Handle handle;
+    void* source = nullptr;
+};
+constexpr size_t kLoopbackQuarantineSlots = rmtTxChannels > 0 ? rmtTxChannels : 1;
+QuarantinedLoopbackTx s_loopbackQuarantine[kLoopbackQuarantineSlots];
+
+void reapLoopbackTransfers() {
+    for (auto& entry : s_loopbackQuarantine) {
+        if (!entry.handle.impl || !rmtWs2812Deinit(entry.handle)) continue;
+        heap_caps_free(entry.source);
+        entry.source = nullptr;
+    }
+}
+
+void releaseLoopbackTransfer(RmtWs2812Handle& handle, void* source) {
+    if (rmtWs2812Deinit(handle)) {
+        heap_caps_free(source);
+        return;
+    }
+    reapLoopbackTransfers();
+    for (auto& entry : s_loopbackQuarantine) {
+        if (entry.handle.impl) continue;
+        entry.handle.impl = handle.impl;
+        entry.source = source;
+        handle.impl = nullptr;
+        return;
+    }
+
+    // This path requires more live TX handles than the SoC exposes and is therefore unreachable for
+    // valid driver state. Preserve ownership even under a broken platform report: wait for completion
+    // instead of dropping the only references to an active DMA source.
+    while (!rmtWs2812Deinit(handle)) vTaskDelay(pdMS_TO_TICKS(1));
+    heap_caps_free(source);
+}
+
 } // namespace
 
-bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t gpio, uint32_t resolutionHz, bool invert) {
+bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t gpio, uint32_t resolutionHz, bool invert,
+                   RmtWs2812Timing timing) {
+    reapLoopbackTransfers();
+    if (resolutionHz == 0 || timing.periodNs <= timing.t0hNs || timing.periodNs <= timing.t1hNs)
+        return false;
     auto* st = new (std::nothrow) RmtTxState();
     if (!st) return false;
 
@@ -55,29 +104,75 @@ bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t gpio, uint32_t resolutionHz, bool
     txCfg.gpio_num = static_cast<gpio_num_t>(gpio);
     txCfg.clk_src = RMT_CLK_SRC_DEFAULT;
     txCfg.resolution_hz = resolutionHz;
-    // Two memory blocks of symbols ping-pong so the DMA-less channel can refill
-    // while sending — the classic anti-glitch shape. The per-channel block size
-    // is a chip fact (64 words classic, 48 on the S3 — a hardcoded 64 makes
-    // rmt_new_tx_channel reject S3); the copy encoder streams from our buffer
-    // regardless.
+    // Long LED frames need enough refill headroom to survive WiFi and preview traffic. On chips
+    // with RMT DMA, use a large software ping-pong buffer; the S3's single hardware block leaves
+    // only 24 symbols (30 us) per half and can otherwise insert a latch-sized gap mid-frame.
+#if SOC_RMT_SUPPORT_DMA
+    txCfg.mem_block_symbols = kTxDmaBufferSymbols;
+    txCfg.flags.with_dma = 1;
+#else
     txCfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+#endif
     txCfg.trans_queue_depth = 4;
     txCfg.flags.invert_out = invert ? 1 : 0;
 
-    if (rmt_new_tx_channel(&txCfg, &st->channel) != ESP_OK) {
+    esp_err_t channelErr = rmt_new_tx_channel(&txCfg, &st->channel);
+#if SOC_RMT_SUPPORT_DMA
+    // Some chips expose only one DMA-capable TX channel per RMT group. Keep multi-pin drivers
+    // functional by giving the first available lane DMA and using hardware ping-pong thereafter.
+    if (channelErr != ESP_OK) {
+        txCfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+        txCfg.flags.with_dma = 0;
+        channelErr = rmt_new_tx_channel(&txCfg, &st->channel);
+    }
+#endif
+    if (channelErr != ESP_OK) {
         delete st;
         return false;
     }
 
     rmt_copy_encoder_config_t copyCfg = {};
-    if (rmt_new_copy_encoder(&copyCfg, &st->encoder) != ESP_OK) {
+    if (rmt_new_copy_encoder(&copyCfg, &st->symbolEncoder) != ESP_OK) {
+        rmt_del_channel(st->channel);
+        delete st;
+        return false;
+    }
+
+    auto durationTicks = [resolutionHz](uint32_t ns) -> uint16_t {
+        uint64_t ticks = (static_cast<uint64_t>(ns) * resolutionHz) / 1'000'000'000ull;
+        if (ticks == 0) ticks = 1;
+        if (ticks > 0x7FFFu) ticks = 0x7FFFu;
+        return static_cast<uint16_t>(ticks);
+    };
+    const uint16_t periodTicks = durationTicks(timing.periodNs);
+    const uint16_t t0hTicks = durationTicks(timing.t0hNs);
+    const uint16_t t1hTicks = durationTicks(timing.t1hNs);
+    if (periodTicks <= t0hTicks || periodTicks <= t1hTicks) {
+        rmt_del_encoder(st->symbolEncoder);
+        rmt_del_channel(st->channel);
+        delete st;
+        return false;
+    }
+    rmt_bytes_encoder_config_t byteCfg = {};
+    byteCfg.bit0.level0 = 1;
+    byteCfg.bit0.duration0 = t0hTicks;
+    byteCfg.bit0.level1 = 0;
+    byteCfg.bit0.duration1 = static_cast<uint16_t>(periodTicks - t0hTicks);
+    byteCfg.bit1.level0 = 1;
+    byteCfg.bit1.duration0 = t1hTicks;
+    byteCfg.bit1.level1 = 0;
+    byteCfg.bit1.duration1 = static_cast<uint16_t>(periodTicks - t1hTicks);
+    byteCfg.flags.msb_first = 1;
+    if (rmt_new_bytes_encoder(&byteCfg, &st->byteEncoder) != ESP_OK) {
+        rmt_del_encoder(st->symbolEncoder);
         rmt_del_channel(st->channel);
         delete st;
         return false;
     }
 
     if (rmt_enable(st->channel) != ESP_OK) {
-        rmt_del_encoder(st->encoder);
+        rmt_del_encoder(st->byteEncoder);
+        rmt_del_encoder(st->symbolEncoder);
         rmt_del_channel(st->channel);
         delete st;
         return false;
@@ -105,39 +200,53 @@ bool rmtWs2812Transmit(RmtWs2812Handle& h, const uint32_t* symbols, size_t symbo
     // clock out concurrently, which is what makes a multi-pin frame cost the
     // longest strand instead of the sum. The caller pairs this with
     // rmtWs2812Wait and owns the inter-frame latch after the last wait.
-    return rmt_transmit(st->channel, st->encoder, symbols,
+    return rmt_transmit(st->channel, st->symbolEncoder, symbols,
                         symbolCount * sizeof(uint32_t), &txCfg) == ESP_OK;
 }
 
-void rmtWs2812Wait(RmtWs2812Handle& h, uint32_t timeoutMs) {
+bool rmtWs2812TransmitBytes(RmtWs2812Handle& h, const uint8_t* bytes, size_t byteCount) {
     auto* st = static_cast<RmtTxState*>(h.impl);
-    if (!st) return;
+    if (!st || !bytes || byteCount == 0) return false;
+
+    rmt_transmit_config_t txCfg = {};
+    txCfg.loop_count = 0;
+    return rmt_transmit(st->channel, st->byteEncoder, bytes, byteCount, &txCfg) == ESP_OK;
+}
+
+bool rmtWs2812Wait(RmtWs2812Handle& h, uint32_t timeoutMs) {
+    auto* st = static_cast<RmtTxState*>(h.impl);
+    if (!st) return true;
     // Finite timeout so a wedged DMA can't hang the render tick forever. Even the
-    // longest realistic frame (thousands of pixels) clocks out well under 1 s; a
-    // timeout here means the peripheral is stuck, and the driver re-encodes the
-    // whole frame next tick anyway, so a dropped frame self-heals.
+    // longest realistic frame (thousands of pixels) clocks out well under 1 s.
+    // On timeout the caller retains the source frame and polls again, because the
+    // byte encoder or DMA can still hold a pointer into that frame.
     //
     // We deliberately do NOT cancel a timed-out transfer with rmt_disable(): on
     // classic ESP32, rmt_disable() while a transmission is still active triggers an
     // interrupt-WDT panic (espressif/esp-idf#17692, classic-only — S3/C6/P4 are
     // unaffected). A panic is a worse failure than a dropped frame, so we leave the
-    // stuck transfer alone. It self-heals safely: the next tick re-encodes symbols_
-    // and calls rmt_transmit again; if the channel is still busy, rmt_transmit
-    // returns an error, rmtWs2812Transmit returns false, and RmtLedDriver::tick()
-    // skips waiting on that channel (its started[] guard) — no crash, no corruption.
-    rmt_tx_wait_all_done(st->channel, timeoutMs);
+    // stuck transfer alone. The driver keeps its frame immutable until a later
+    // poll reports completion, preventing a half-old/half-new wire frame.
+    return rmt_tx_wait_all_done(st->channel, timeoutMs) == ESP_OK;
 }
 
-void rmtWs2812Deinit(RmtWs2812Handle& h) {
+bool rmtWs2812Deinit(RmtWs2812Handle& h) {
     auto* st = static_cast<RmtTxState*>(h.impl);
-    if (!st) return;
+    if (!st) return true;
+    // The encoder borrows the caller's byte frame. Disabling an active classic-ESP32 channel can
+    // panic in the interrupt watchdog, and freeing that frame first is a DMA use-after-free on every
+    // target. A bounded failed teardown therefore keeps the complete channel state intact so the
+    // owner can retry after a later completion poll.
+    if (!rmtWs2812Wait(h, 1000)) return false;
     if (st->channel) {
         rmt_disable(st->channel);
         rmt_del_channel(st->channel);
     }
-    if (st->encoder) rmt_del_encoder(st->encoder);
+    if (st->byteEncoder) rmt_del_encoder(st->byteEncoder);
+    if (st->symbolEncoder) rmt_del_encoder(st->symbolEncoder);
     delete st;
     h.impl = nullptr;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +400,70 @@ uint32_t* allocLoopbackCapture(size_t dataBytes) {
         64, capMax * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
 }
 
+// Intrusive two-owner context for an RX task and its caller. The task may finish after the caller's
+// bounded diagnostic wait; reference counting keeps both the context and DMA capture buffer alive
+// until the last side exits. `done` is the release/acquire publication point for the written symbols.
+struct LoopbackCapture {
+    std::atomic<uint8_t> refs{1};
+    uint8_t rxGpio = 0;
+    uint32_t resolutionHz = 0;
+    uint32_t* symbols = nullptr;
+    size_t capacity = 0;
+    size_t need = 0;
+    bool ride = false;
+    std::atomic<size_t> got{0};
+    std::atomic<bool> done{false};
+
+    void retain() { refs.fetch_add(1, std::memory_order_relaxed); }
+    void release() {
+        if (refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+        heap_caps_free(symbols);
+        delete this;
+    }
+};
+
+LoopbackCapture* makeLoopbackCapture(uint8_t rxGpio, uint32_t resolutionHz,
+                                     size_t capacity, size_t need, bool ride,
+                                     uint32_t* symbols = nullptr) {
+    if (!symbols) {
+        symbols = static_cast<uint32_t*>(heap_caps_aligned_alloc(
+            64, capacity * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    }
+    if (!symbols) return nullptr;
+    auto* capture = new (std::nothrow) LoopbackCapture();
+    if (!capture) { heap_caps_free(symbols); return nullptr; }
+    capture->rxGpio = rxGpio;
+    capture->resolutionHz = resolutionHz;
+    capture->symbols = symbols;
+    capture->capacity = capacity;
+    capture->need = need;
+    capture->ride = ride;
+    return capture;
+}
+
+bool startLoopbackCapture(LoopbackCapture& capture, const char* taskName) {
+    capture.retain();   // task ownership is published before the task can start
+    auto task = [](void* arg) {
+        auto* c = static_cast<LoopbackCapture*>(arg);
+        const int attempts = c->ride ? 40 : 1;
+        const uint32_t perArmTimeoutMs = c->ride ? 100 : 1000;
+        size_t fullest = 0;
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            const size_t got = rmtWs2812RxCapture(
+                c->rxGpio, c->resolutionHz, c->symbols, c->capacity, perArmTimeoutMs);
+            if (got > fullest) fullest = got;
+            if (got >= c->need) break;
+        }
+        c->got.store(fullest, std::memory_order_relaxed);
+        c->done.store(true, std::memory_order_release);
+        c->release();
+        vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(task, taskName, 4096, &capture, 5, nullptr) == pdPASS) return true;
+    capture.release();   // task creation failed: return its reserved ownership
+    return false;
+}
+
 void captureAndVerifyFrame(uint16_t rxGpio, size_t frameBytes, size_t dataBytes,
                            uint8_t rowBits, uint32_t pclkHz, bool pinExpanderMode, const char* tag,
                            const std::function<void()>& transmitOnce,
@@ -307,46 +480,21 @@ void captureAndVerifyFrame(uint16_t rxGpio, size_t frameBytes, size_t dataBytes,
     const uint16_t threshTicks = static_cast<uint16_t>(slotTicks + slotTicks / 2);
     const size_t kBits = dataBytes / 3;
     const size_t capMax = kBits + 16;
-    if (!rxSymbols) rxSymbols = allocLoopbackCapture(dataBytes);   // caller didn't pre-allocate
-    if (!rxSymbols) {
+    auto* cap = makeLoopbackCapture(static_cast<uint8_t>(rxGpio), kCapResHz,
+                                    capMax, kBits, rideMode, rxSymbols);
+    if (!cap) {
         ESP_LOGE(tag, "loopback: capture buffer alloc failed (%u B)",
                  (unsigned)(capMax * sizeof(uint32_t)));
         return;
     }
-
-    struct Cap {
-        uint8_t rxGpio; uint32_t* buf; size_t max; size_t need;
-        bool ride; volatile size_t got = 0; volatile bool done = false;
-    };
-    // HEAP, not stack: the rx task holds this pointer, and the wedged-task exit below returns while the
-    // task may still be running — a stack Cap would then be a use-after-return. Heap lets that path leak
-    // the context alongside rxSymbols (the deliberate failure mode) instead of dangling it.
-    auto* cap = new (std::nothrow) Cap{static_cast<uint8_t>(rxGpio), rxSymbols, capMax, kBits, rideMode};
-    if (!cap) { heap_caps_free(rxSymbols); return; }
+    rxSymbols = cap->symbols;
     // Each rmt_receive captures ONE run of pulses ending at the next >100 µs gap (the WS2812 reset). With a
     // controlled transmit the run starts at frame start, so one arm yields the whole frame. RIDING a
     // free-running pipeline, an arm lands mid-frame and captures only the tail (< kBits) before the reset —
     // so re-arm until a run of >= kBits arrives, i.e. an arm that happened to land at/before a frame start.
     // The ring transmits continuously (~100 fps), so a full frame is caught within a few arms; bounded so a
     // dead wire still times out instead of looping forever.
-    auto rxTask = [](void* arg) {
-        auto* c = static_cast<Cap*>(arg);
-        // The retry budget must fit INSIDE the outer wait ceiling below, or the function frees rxSymbols
-        // while this task is still capturing into it. Ride: 40 arms × 100 ms = 4 s worst (< the 6 s
-        // ceiling) — a live pipeline delivers a frame within a few ms, so 100 ms per arm is already
-        // generous slack, and a dead wire exhausts the budget in bounded time. Controlled transmit keeps
-        // the single 1000 ms arm (< its 2 s ceiling).
-        const int attempts = c->ride ? 40 : 1;
-        const uint32_t perArmTimeoutMs = c->ride ? 100 : 1000;
-        for (int a = 0; a < attempts; a++) {
-            const size_t g = rmtWs2812RxCapture(c->rxGpio, kCapResHz, c->buf, c->max, perArmTimeoutMs);
-            if (g > c->got) c->got = g;           // keep the fullest capture seen
-            if (g >= c->need) break;              // a complete frame — stop
-        }
-        c->done = true;
-        vTaskDelete(nullptr);
-    };
-    const bool taskStarted = xTaskCreate(rxTask, "lblb", 4096, cap, 5, nullptr) == pdPASS;
+    const bool taskStarted = startLoopbackCapture(*cap, "lblb");
     if (taskStarted) {
         vTaskDelay(pdMS_TO_TICKS(50));
         // First transmit timed — the wall time of a known byte count confirms the
@@ -367,19 +515,22 @@ void captureAndVerifyFrame(uint16_t rxGpio, size_t frameBytes, size_t dataBytes,
                      (unsigned)r.txExpectUs, (unsigned)pclkHz);
         }
         // Back-to-back frames, exactly the render loop's transmit/wait cadence.
-        for (int i = 0; i < 100 && !cap->done; i++) transmitOnce();
+        for (int i = 0; i < 100 && !cap->done.load(std::memory_order_acquire); i++) transmitOnce();
         // Wait for the capture task. Ride mode re-arms internally (each arm returns in ~1 frame when the
         // pipeline is live), so give it a longer ceiling than the controlled-transmit path — a live frame is
         // caught in well under this, and a dead wire still ends when the task exhausts its bounded retries.
         const int waitTicks = rideMode ? 600 : 200;   // ×10 ms = 6 s (ride) / 2 s (controlled)
-        for (int i = 0; i < waitTicks && !cap->done; i++) vTaskDelay(pdMS_TO_TICKS(10));
+        for (int i = 0; i < waitTicks && !cap->done.load(std::memory_order_acquire); i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
     }
-    r.capturedSymbols = static_cast<uint32_t>(cap->got);
+    const bool captureDone = cap->done.load(std::memory_order_acquire);
+    const size_t captured = cap->got.load(std::memory_order_relaxed);
+    r.capturedSymbols = static_cast<uint32_t>(captured);
     r.rxIdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(rxGpio)));
     ESP_LOGI(tag, "loopback: rx captured %u symbols (need %u), idle rx level=%d",
-             (unsigned)cap->got, (unsigned)kBits, (int)r.rxIdleLevel);
+             (unsigned)captured, (unsigned)kBits, (int)r.rxIdleLevel);
 
-    if (cap->done && cap->got >= kBits) {
+    if (captureDone && captured >= kBits) {
         // Verify EVERY bit of the frame against the per-row pattern (r.sent[],
         // zero-padded for RGBW rows), not just the first light.
         size_t mismatch = SIZE_MAX;
@@ -398,7 +549,7 @@ void captureAndVerifyFrame(uint16_t rxGpio, size_t frameBytes, size_t dataBytes,
         // r.got[] reports the row holding the first mismatch (row 0 when clean).
         const size_t rowStart = (mismatch == SIZE_MAX)
                                     ? 0 : mismatch - (mismatch % rowBits);
-        for (size_t b = rowStart; b < rowStart + 24 && b < cap->got; b++) {
+        for (size_t b = rowStart; b < rowStart + 24 && b < captured; b++) {
             const uint8_t bit = ((rxSymbols[b] & 0x7FFF) >= threshTicks) ? 1 : 0;
             r.got[(b - rowStart) / 8] =
                 static_cast<uint8_t>((r.got[(b - rowStart) / 8] << 1) | bit);
@@ -427,17 +578,9 @@ void captureAndVerifyFrame(uint16_t rxGpio, size_t frameBytes, size_t dataBytes,
                      r.got[0], r.got[1], r.got[2], r.sent[0], r.sent[1], r.sent[2]);
         }
     }
-    // NEVER free what the rx task may still touch — the capture buffer it writes AND the Cap context it
-    // reads. The retry budget is sized under the wait ceiling above, so cap->done is normally long set by
-    // here; this drains the residue if the scheduler starved the task. If it STILL hasn't finished (an
-    // RMT-driver wedge), leaking both is the correct failure — a use-after-free under a running task is not.
-    for (int i = 0; taskStarted && !cap->done && i < 500; i++) vTaskDelay(pdMS_TO_TICKS(10));
-    if (taskStarted && !cap->done) {
-        ESP_LOGE(tag, "loopback: rx task never finished — leaking the capture buffer instead of freeing under it");
-        return;   // rxSymbols and cap both stay allocated, deliberately
-    }
-    heap_caps_free(rxSymbols);
-    delete cap;
+    if (taskStarted && !captureDone)
+        ESP_LOGE(tag, "loopback: RX task exceeded the diagnostic wait; task ownership retains its capture");
+    cap->release();
 }
 
 } // namespace detail
@@ -481,43 +624,52 @@ RmtLoopbackResult rmtWs2812Loopback(uint8_t txGpio, uint8_t rxGpio) {
     const uint32_t sym1 = static_cast<uint32_t>(kT1H) | (1u << 15)
                         | (static_cast<uint32_t>(kPeriod - kT1H) << 16);
     constexpr size_t kBits = 24;
-    uint32_t txSymbols[kBits];
+    auto* txSymbols = static_cast<uint32_t*>(heap_caps_malloc(
+        kBits * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    if (!txSymbols) return r;
     size_t s = 0;
     for (int b = 0; b < 3; b++)
         for (int bit = 7; bit >= 0; bit--)
             txSymbols[s++] = (r.sent[b] & (1u << bit)) ? sym1 : sym0;
 
     RmtWs2812Handle tx;
-    if (!rmtWs2812Init(tx, txGpio, kLoopbackResHz, /*invert=*/false)) return r;
+    if (!rmtWs2812Init(tx, txGpio, kLoopbackResHz, /*invert=*/false)) {
+        heap_caps_free(txSymbols);
+        return r;
+    }
 
-    // RX must be listening while we transmit; run the (blocking) capture in a task
-    // and resend the short frame until the receiver latches one or we give up.
+    // RX must be listening while we transmit; run the blocking capture in a task and resend the
+    // short frame until the receiver latches one or we give up. The task owns a reference to its
+    // context, so a late RX timeout cannot outlive caller stack or DMA-buffer storage.
     constexpr size_t kCapMax = kBits + 8;
-    static uint32_t rxSymbols[kCapMax];
-    // Pass rxGpio through the arg struct (the task fn is a plain C pointer — no captures).
-    struct Cap { uint8_t rxGpio; volatile size_t got = 0; volatile bool done = false; } cap{rxGpio};
-    auto rxTask = [](void* arg) {
-        auto* c = static_cast<Cap*>(arg);
-        c->got = rmtWs2812RxCapture(c->rxGpio, kLoopbackResHz, rxSymbols, kCapMax, 1000);
-        c->done = true;
-        vTaskDelete(nullptr);
-    };
-    if (xTaskCreate(rxTask, "rmtlb", 4096, &cap, 5, nullptr) == pdPASS) {
+    auto* cap = detail::makeLoopbackCapture(rxGpio, kLoopbackResHz, kCapMax, kBits,
+                                            /*ride=*/false);
+    if (!cap) {
+        releaseLoopbackTransfer(tx, txSymbols);
+        return r;
+    }
+    const bool taskStarted = detail::startLoopbackCapture(*cap, "rmtlb");
+    if (taskStarted) {
         vTaskDelay(pdMS_TO_TICKS(50));
-        for (int i = 0; i < 50 && !cap.done; i++) {
-            rmtWs2812Transmit(tx, txSymbols, kBits);
-            rmtWs2812Wait(tx, 1000);
+        for (int i = 0; i < 50 && !cap->done.load(std::memory_order_acquire); i++) {
+            if (rmtWs2812Transmit(tx, txSymbols, kBits)
+                && !rmtWs2812Wait(tx, 1000)) break;
             ets_delay_us(300);   // inter-frame latch
             vTaskDelay(pdMS_TO_TICKS(10));
         }
-        for (int i = 0; i < 200 && !cap.done; i++) vTaskDelay(pdMS_TO_TICKS(10));
+        for (int i = 0; i < 200 && !cap->done.load(std::memory_order_acquire); i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
     }
-    rmtWs2812Deinit(tx);
+    releaseLoopbackTransfer(tx, txSymbols);
 
-    if (cap.done && cap.got >= kBits) {
+    const bool captureDone = cap->done.load(std::memory_order_acquire);
+    const size_t captured = cap->got.load(std::memory_order_relaxed);
+    r.capturedSymbols = static_cast<uint32_t>(captured);
+    r.rxIdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(rxGpio)));
+    if (captureDone && captured >= kBits) {
         // Decode the first 24 captured symbols → bytes (HIGH closer to T1H = 1).
         for (size_t b = 0; b < kBits; b++) {
-            uint16_t high = static_cast<uint16_t>(rxSymbols[b] & 0x7FFF);
+            uint16_t high = static_cast<uint16_t>(cap->symbols[b] & 0x7FFF);
             uint8_t bit = (high >= ((kT0H + kT1H) / 2)) ? 1 : 0;
             r.got[b / 8] = static_cast<uint8_t>((r.got[b / 8] << 1) | bit);
         }
@@ -525,6 +677,9 @@ RmtLoopbackResult rmtWs2812Loopback(uint8_t txGpio, uint8_t rxGpio) {
     }
     r.bitsChecked = static_cast<uint32_t>(kBits);
     r.firstBadBit = r.pass ? static_cast<uint32_t>(kBits) : 0;
+    if (taskStarted && !captureDone)
+        ESP_LOGE("rmt-loopback", "RX task exceeded the diagnostic wait; task ownership retains its capture");
+    cap->release();
     return r;
 }
 
@@ -566,11 +721,8 @@ RmtLoopbackResult rmtWs2812LoopbackFrame(uint8_t txGpio, uint8_t rxGpio,
     auto* txSymbols = static_cast<uint32_t*>(heap_caps_malloc(
         kBits * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     const size_t capMax = kBits + 16;
-    auto* rxSymbols = static_cast<uint32_t*>(heap_caps_aligned_alloc(
-        64, capMax * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
-    if (!txSymbols || !rxSymbols) {
+    if (!txSymbols) {
         heap_caps_free(txSymbols);
-        heap_caps_free(rxSymbols);
         return r;
     }
     size_t s = 0;
@@ -584,37 +736,38 @@ RmtLoopbackResult rmtWs2812LoopbackFrame(uint8_t txGpio, uint8_t rxGpio,
     RmtWs2812Handle tx;
     if (!rmtWs2812Init(tx, txGpio, kLoopbackResHz, /*invert=*/false)) {
         heap_caps_free(txSymbols);
-        heap_caps_free(rxSymbols);
         return r;
     }
 
-    struct Cap {
-        uint8_t rxGpio; uint32_t* buf; size_t max;
-        volatile size_t got = 0; volatile bool done = false;
-    } cap{rxGpio, rxSymbols, capMax};
-    auto rxTask = [](void* arg) {
-        auto* c = static_cast<Cap*>(arg);
-        c->got = rmtWs2812RxCapture(c->rxGpio, kLoopbackResHz, c->buf, c->max, 1000);
-        c->done = true;
-        vTaskDelete(nullptr);
-    };
-    if (xTaskCreate(rxTask, "rmtlbf", 4096, &cap, 5, nullptr) == pdPASS) {
+    auto* cap = detail::makeLoopbackCapture(rxGpio, kLoopbackResHz, capMax, kBits,
+                                            /*ride=*/false);
+    if (!cap) {
+        releaseLoopbackTransfer(tx, txSymbols);
+        return r;
+    }
+    const bool taskStarted = detail::startLoopbackCapture(*cap, "rmtlbf");
+    if (taskStarted) {
         vTaskDelay(pdMS_TO_TICKS(50));
         // Back-to-back frames, the render loop's cadence. The capture latches
         // one whole frame; we keep resending so it can't miss the window.
-        for (int i = 0; i < 100 && !cap.done; i++) {
-            rmtWs2812Transmit(tx, txSymbols, kBits);
-            rmtWs2812Wait(tx, 1000);
+        for (int i = 0; i < 100 && !cap->done.load(std::memory_order_acquire); i++) {
+            if (rmtWs2812Transmit(tx, txSymbols, kBits)
+                && !rmtWs2812Wait(tx, 1000)) break;
             ets_delay_us(300);   // inter-frame WS2812 latch
         }
-        for (int i = 0; i < 200 && !cap.done; i++) vTaskDelay(pdMS_TO_TICKS(10));
+        for (int i = 0; i < 200 && !cap->done.load(std::memory_order_acquire); i++)
+            vTaskDelay(pdMS_TO_TICKS(10));
     }
-    rmtWs2812Deinit(tx);
+    releaseLoopbackTransfer(tx, txSymbols);
 
-    if (cap.done && cap.got >= kBits) {
+    const bool captureDone = cap->done.load(std::memory_order_acquire);
+    const size_t captured = cap->got.load(std::memory_order_relaxed);
+    r.capturedSymbols = static_cast<uint32_t>(captured);
+    r.rxIdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(rxGpio)));
+    if (captureDone && captured >= kBits) {
         size_t mismatch = SIZE_MAX;
         for (size_t b = 0; b < kBits; b++) {
-            const uint16_t high = static_cast<uint16_t>(rxSymbols[b] & 0x7FFF);
+            const uint16_t high = static_cast<uint16_t>(cap->symbols[b] & 0x7FFF);
             const uint8_t bit = (high >= ((kT0H + kT1H) / 2)) ? 1 : 0;
             const uint8_t pos = static_cast<uint8_t>(b % bitsPerLight);
             const uint8_t expByte = (pos / 8u) < 3 ? r.sent[pos / 8u] : 0x00;
@@ -628,14 +781,15 @@ RmtLoopbackResult rmtWs2812LoopbackFrame(uint8_t txGpio, uint8_t rxGpio,
         // got[] = the light holding the first mismatch (light 0 when clean).
         const size_t badLight = (mismatch == SIZE_MAX) ? 0 : mismatch / bitsPerLight;
         const size_t lightStart = badLight * bitsPerLight;
-        for (size_t b = 0; b < 24 && lightStart + b < cap.got; b++) {
-            const uint8_t bit = ((rxSymbols[lightStart + b] & 0x7FFF)
+        for (size_t b = 0; b < 24 && lightStart + b < captured; b++) {
+            const uint8_t bit = ((cap->symbols[lightStart + b] & 0x7FFF)
                                  >= ((kT0H + kT1H) / 2)) ? 1 : 0;
             r.got[b / 8] = static_cast<uint8_t>((r.got[b / 8] << 1) | bit);
         }
     }
-    heap_caps_free(txSymbols);
-    heap_caps_free(rxSymbols);
+    if (taskStarted && !captureDone)
+        ESP_LOGE("rmt-loopback-frame", "RX task exceeded the diagnostic wait; task ownership retains its capture");
+    cap->release();
     return r;
 }
 

@@ -1001,7 +1001,7 @@ public:
                 // The source (snapshot or live) holds RAW srcCh bytes, so correction runs here per light —
                 // one pass, whether the frame was snapshotted (immutable copy) or read live.
                 correction_.apply(src + (winStart_ + laneStart_[lane] + row) * srcCh,
-                                   wire + lane * stride);
+                                   wire + lane * stride, srcCh);
             }
             const uint64_t mask = maskLo32 | (static_cast<uint64_t>(maskHi32) << 32);   // constant shift: cheap
             if (shift) {

@@ -69,6 +69,28 @@ TEST_CASE("StarSkyEffect white stars paint greyscale pixels") {
     CHECK(litPixels > 0);
 }
 
+TEST_CASE("StarSkyEffect supports dense sparkle fields on small installations") {
+    mm::Layouts layouts;
+    mm::GridLayout grid;
+    mm::Layer layer;
+    mm::StarSkyEffect star;
+    star.star_fill_ratio = 2500;
+    star.speed = 8;
+    wire(layouts, grid, layer, star, 10, 10, 1);
+
+    layer.loop();
+
+    auto* data = layer.buffer().data();
+    size_t litPixels = 0;
+    for (size_t p = 0; p < layer.buffer().count(); p++) {
+        const uint8_t r = data[p * 3];
+        const uint8_t g = data[p * 3 + 1];
+        const uint8_t b = data[p * 3 + 2];
+        if (r || g || b) litPixels++;
+    }
+    CHECK(litPixels >= 8);
+}
+
 // A zero fill ratio still seeds a pool (nb_stars = ratio*count/10000 + 1) so a lit pixel appears.
 TEST_CASE("StarSkyEffect always keeps at least one star") {
     mm::Layouts layouts;
