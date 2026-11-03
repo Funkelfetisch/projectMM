@@ -49,7 +49,7 @@ The earlier bonded images can refuse pairing at full bond capacity. FULL counter
 
 ## Framing and result snapshots
 
-Send one UTF-8 JSON object followed by LF, at most 512 bytes before LF. Write sequential fragments of at most negotiated ATT MTU minus3, waiting for every write response. No operation dispatches before LF. Empty/NUL/oversized input and multiple lines in one write fail. An invalid partial line drains to LF; after an ambiguous fragment write, reconnect before starting another request.
+Send one UTF-8 JSON object followed by LF, at most 512 bytes before LF. Write sequential fragments of at most negotiated ATT MTU minus3, waiting for every write response. The firmware offers an ATT MTU of 517, so a central that accepts it sends a request in one write and reads a reply in one read. No operation dispatches before LF. Empty/NUL/oversized input and multiple lines in one write fail. An invalid partial line drains to LF; after an ambiguous fragment write, reconnect before starting another request.
 
 An ATT acknowledgement is transport receipt, not execution. Read State/result for a correlated reply. Notifications carry little-endian uint32 publication revision followed by uint32 device uptime, eight bytes total; they are read hints. A missed notification is repaired by reading. At the first offset-zero read, the server captures a whole response and retains it through subsequent Read Blob offsets. A concurrent publication cannot mix response fragments within that long read.
 
