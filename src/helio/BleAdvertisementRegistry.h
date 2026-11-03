@@ -9,7 +9,7 @@ struct NamedCode { uint8_t code; const char* name; };
 inline uint8_t productCodeForModel(const char* model) {
     if (!model) return 0;
     if (std::strcmp(model, "NEBULITE Croptop S3") == 0 || std::strcmp(model, "NEBULITE Croptop ESP32") == 0) return 20;
-    if (std::strcmp(model, "NEBULITE Jacket S3") == 0) return 22;
+    if (std::strcmp(model, "NEBULITE Jacket S3") == 0 || std::strcmp(model, "NEBULITE Jacket ESP32") == 0) return 22;
     return 0;
 }
 
