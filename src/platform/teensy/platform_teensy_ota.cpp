@@ -25,6 +25,7 @@
 #include <Arduino.h>
 
 #include "core/util/TeensyImage.h"   // teensyHeaderProblem, teensyImageRefused: the checks before an image may overwrite the program
+#include "core/util/FirmwareSignature.h"   // verifyFirmwareSignatureP256, which this board answers itself
 
 #include <cstdio>
 #include <cstring>
@@ -209,3 +210,8 @@ bool otaMoonBaseSize(uint32_t*, uint32_t*) { return false; }
 void moonbaseClearStagedUrl() {}
 
 }  // namespace mm::platform
+
+// No crypto library on this board and no BLE update path to need one: every release signature is refused.
+namespace mm {
+bool verifyFirmwareSignatureP256(const uint8_t*, size_t, const uint8_t*, size_t, const uint8_t*, size_t) { return false; }
+}  // namespace mm

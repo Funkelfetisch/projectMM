@@ -3,6 +3,7 @@
 #include "core/module/MoonModule.h"
 #include "core/module/Scheduler.h"
 #include "core/module/StateDocument.h"
+#include "core/util/BleFirmwareUpdate.h"
 #include "core/util/BleMessage.h"
 #include "core/util/BleAdvertisement.h"
 #include "core/util/BleRpcSession.h"
@@ -10,13 +11,16 @@
 #include "core/util/BleSceneApi.h"
 #include "core/util/JsonSink.h"
 #include "core/util/JsonUtil.h"
+#include "core/util/fnv.h"
 #include "core/util/LightOutput.h"
 #include "core/util/ScratchBuffer.h"
 #include "core/services/Bh1750Service.h"
 #include "core/services/BatteryService.h"
+#include "core/system/FilesystemModule.h"
 #include "core/system/NetworkModule.h"
 #include "platform/platform.h"
 
+#include <array>
 #include <charconv>
 #include <cstdio>
 #include <cstring>
@@ -24,8 +28,8 @@
 
 namespace mm {
 
-/// Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state and named scheduled operations.
-/// @technical The framing, session and complete-scene contract lives in reference/product-ble.md.
+/// Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state, named scheduled operations and a signed firmware update.
+/// @technical The framing, session, complete-scene and firmware-update contract lives in reference/product-ble.md.
 class BleControlService : public MoonModule {
 public:
     ModuleRole role() const MM_NONBLOCKING override { return ModuleRole::Service; }
@@ -49,6 +53,10 @@ public:
     void setPreviewFrameReader(const char* (*reader)(JsonSink&, Scheduler&, uint16_t, const char*, uint32_t)) { previewFrameReader_ = reader; }
     /// Product-supplied setup profiles: the state document of a named profile that fits this firmware and chip (null otherwise), and the names that do.
     void setProductProfiles(const char* (*state)(const char*), void (*names)(JsonSink&)) { profileState_ = state; profileNames_ = names; }
+    /// The publisher's key and the lowest security version this firmware accepts turn on the signed update over BLE. The key outlives the service.
+    void setFirmwareRelease(const std::array<uint8_t, 65>& publisherKey, uint32_t securityVersion) {
+        releaseKey_ = &publisherKey; securityVersion_ = securityVersion;
+    }
     /// The product owner supplies installed profile metadata; an absent profile remains unknown.
     void setAdvertisingProduct(BleAdvertisementProduct product) { advertisingProduct_ = product; }
     void setAdvertisingProductResolver(uint8_t (*resolve)(const char*)) { advertisingProductResolver_ = resolve; }
@@ -70,12 +78,8 @@ public:
         if (!scheduler_) scheduler_ = Scheduler::instance();
         auto* battery = scheduler_ ? BatteryService::discover(*scheduler_) : nullptr;
         const auto batteries = battery ? battery->batteryConfig() : platform::BleBatteryConfig{};
-        char identity[256]; JsonSink sink(identity, sizeof(identity));
-        sink.append("{\"v\":1,\"rpc\":2,\"firmware\":"); sink.writeJsonString(firmware_);
-        sink.append(",\"build\":"); sink.writeJsonString(build_);
-        sink.append(",\"id\":"); sink.writeJsonString(platform::macString());
-        sink.append(",\"maxRequest\":512,\"wifiRequired\":false,\"wifiToggle\":true,\"bleOta\":false,\"groups\":\"scheduled-patch\",\"ota\":\"http-app\",\"batteryOp\":true,\"security\":\"open\"");
-        sink.appendf(",\"bas\":%u}", static_cast<unsigned>(batteries.count));
+        char identity[kIdentityCapacity]; JsonSink sink(identity, sizeof(identity));
+        writeIdentity(sink, batteries);
         if (sink.overflowed()) { setStatus("BLE identity too large", Severity::Error); return; }
         if (!platform::bleControlStart(transport_, "NEBULITE HELIO", identity, batteries)) {
             startedBatteries_ = {}; setStatus("BLE unavailable", Severity::Warning); return;
@@ -128,6 +132,17 @@ public:
         flushReply();
         MoonModule::tick();
     }
+    /// The identity characteristic a phone reads before any session exists.
+    void writeIdentity(JsonSink& sink, const platform::BleBatteryConfig& batteries) const {
+        sink.append("{\"v\":1,\"rpc\":2,\"firmware\":"); sink.writeJsonString(firmware_);
+        sink.append(",\"build\":"); sink.writeJsonString(build_);
+        sink.append(",\"id\":"); sink.writeJsonString(platform::macString());
+        sink.appendf(",\"maxRequest\":512,\"wifiRequired\":false,\"wifiToggle\":true,\"bleOta\":%s,\"groups\":\"scheduled-patch\",\"ota\":\"http-app\",\"batteryOp\":true,\"security\":\"open\"",
+                     otaAvailable() ? "true" : "false");
+        sink.appendf(",\"bas\":%u}", static_cast<unsigned>(batteries.count));
+    }
+    /// The most bytes the identity characteristic holds, its terminator included.
+    static constexpr size_t kIdentityCapacity = 256;
     /// Resolve the same explicitly configured product hint for scan and RPC.
     BleAdvertisementProduct productHint() {
         auto product = advertisingProduct_;
@@ -216,6 +231,11 @@ public:
     void setConcurrentGenerationForTest(uint64_t generation) { replyGeneration_ = generation; }
     void reconcileOwnersForTest(const uint64_t* owners, size_t count) { if (rpc_) rpc_[0].releaseInactive(owners, count); }
     uint64_t replyGenerationForTest() const { return replyGeneration_; }
+    /// The desktop has no application slot, so a test supplies one.
+    void setFirmwareSlotForTest(FirmwareSlot* slot) { firmwareSlot_ = slot; }
+    /// The restart a committed update schedules would end the test process.
+    void setRestartForTest(void (*restart)()) { restart_ = restart; }
+    bool restartScheduledForTest() const { return restartScheduled_; }
 #endif
     /// All reads and writes traverse the same correlation gate before domain dispatch.
     void handle(const char* request, uint32_t now, bool dueAlreadyProcessed = false) {
@@ -255,8 +275,9 @@ public:
         dispatch(doc, request, static_cast<uint16_t>(id), now);
         session->cacheReply(response_);
     }
-    /// Apply a due operation before dispatching a cancel at the same instant, and observe completed frame preparation.
+    /// Apply a due operation before dispatching a cancel at the same instant, observe completed frame preparation, and keep the firmware update's deadlines.
     void applyDue(uint32_t now) {
+        pollUpdate(now);
         if (job_.phase == Phase::Applying && scheduler_ && scheduler_->preparationRevision() != job_.preparedAt) {
             if (scheduler_->failedPreparationRevision() != job_.failedAt) finish("preparation-failed");
             else if (!scheduler_->preparationPending()) finish(nullptr);
@@ -318,6 +339,7 @@ private:
     }
     void clearRpc() {
         using Peers = BleRpcPeers<platform::kBleControlPeerCapacity>;
+        clearUpdate();
         if (rpc_) rpc_[0].~Peers();
         rpc_.resize(0);
     }
@@ -408,6 +430,7 @@ private:
             return;
         }
         if (std::strcmp(op, "wifi") == 0 || std::strcmp(op, "wifi-scan") == 0 || std::strcmp(op, "wifi-join") == 0) { wifi(doc, id, op); return; }
+        if (std::strncmp(op, "ota-", 4) == 0) { firmwareUpdate(doc, id, op, now); return; }
         const bool scene = std::strcmp(op, "scene") == 0, setup = std::strcmp(op, "setup") == 0;
         if (!scene && !setup && std::strcmp(op, "patch") != 0) { result(id, "operation"); return; }
         if (job_.phase != Phase::None) { result(id, "busy"); return; }
@@ -461,6 +484,8 @@ private:
             if (!std::strcmp(op, "scene-info") && !std::strcmp(key, "$scene")) continue;
             if (!std::strcmp(op, "wifi") && !std::strcmp(key, "$offset")) continue;
             if (!std::strcmp(op, "wifi-join") && (!std::strcmp(key, "$ssid") || !std::strcmp(key, "$password"))) continue;
+            if (!std::strcmp(op, "ota-begin") && (!std::strcmp(key, "$claims") || !std::strcmp(key, "$sig"))) continue;
+            if (!std::strcmp(op, "ota-write") && (!std::strcmp(key, "$offset") || !std::strcmp(key, "$data"))) continue;
             if (!std::strcmp(op, "hello") && (!std::strcmp(key, "$nonce") || !std::strcmp(key, "$resume"))) continue;
             return false;
         }
@@ -606,6 +631,94 @@ private:
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
         sink.append(",\"wifi\":"); network->writeWifi(sink, static_cast<uint8_t>(offset)); end(sink, id);
     }
+    /// Whether this build can take a signed update over BLE: a publisher key, and a slot to write it to.
+    /// An update can arrive over BLE only with a publisher key and an inactive slot to write; a single-slot table has none.
+    bool otaAvailable() const { return releaseKey_ && (platform::hasOta || firmwareSlot_) && slotCapacity() > 0; }
+    size_t slotCapacity() const { return firmwareSlot_ ? firmwareSlot_->capacity() : platform::otaNextAppCapacity(); }
+    /// The release target is the variant name's FNV-1a, so one rule covers every variant without a table.
+    uint32_t otaTarget() const { return fnv1a(firmware_, std::strlen(firmware_)); }
+    BleFirmwareUpdate* updater() { return update_ ? &update_[0].transfer : nullptr; }
+    void clearUpdate() {
+        if (update_) update_[0].~UpdateState();
+        update_.resize(0);
+    }
+    /// Abandon a transfer whose connection is gone or which has stopped writing, and restart once a committed update has had time to reach the phone.
+    void pollUpdate(uint32_t now) {
+        if (restartScheduled_ && static_cast<int32_t>(now - restartAt_) >= 0) {
+            // The image is committed: settings still waiting for their debounce are written before the reset, as the HTTP update does.
+            FilesystemModule::flushPending();
+            restartScheduled_ = false;
+            restart_();
+        }
+        auto* transfer = updater();
+        if (!transfer || !transfer->active()) return;
+        if (!rpc_ || !rpc_[0].find(transfer->owner())) transfer->abort(transfer->owner());
+        else transfer->expireIdle(now);
+    }
+    /// The five update operations. Every refusal is the name BleFirmwareUpdate gives it; flash is written here, on the render loop, as the HTTP update writes it.
+    void firmwareUpdate(const json::JsonDoc& doc, uint16_t id, const char* op, uint32_t now) {
+        if (!otaAvailable()) { result(id, "operation"); return; }
+        if (!std::strcmp(op, "ota-begin")) { beginUpdate(doc, id, now); return; }
+        if (!std::strcmp(op, "ota-write")) { writeUpdate(doc, id, now); return; }
+        if (!std::strcmp(op, "ota-end")) { finishUpdate(id, true, now); return; }
+        if (!std::strcmp(op, "ota-abort")) { finishUpdate(id, false, now); return; }
+        if (!std::strcmp(op, "ota-status")) { updateStatus(id); return; }
+        result(id, "operation");
+    }
+    void refuseUpdate(uint16_t id, BleFirmwareUpdate::Error error) { result(id, BleFirmwareUpdate::errorName(error)); }
+    void beginUpdate(const json::JsonDoc& doc, uint16_t id, uint32_t now) {
+        using Update = BleFirmwareUpdate;
+        const char* claims = text(doc, "$claims"); const char* signature = text(doc, "$sig");
+        if (!claims || !signature) { refuseUpdate(id, Update::Error::Unauthorized); return; }
+        if (!update_ && !startUpdate()) { refuseUpdate(id, Update::Error::Io); return; }
+        uint32_t total = 0;
+        const auto error = updater()->begin(activeOwner_, claims, signature, now, total);
+        if (error != Update::Error::None) { refuseUpdate(id, error); return; }
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.appendf(",\"total\":%u,\"chunk\":%u", static_cast<unsigned>(total), static_cast<unsigned>(Update::kChunkBytes)); end(sink, id);
+    }
+    void writeUpdate(const json::JsonDoc& doc, uint16_t id, uint32_t now) {
+        using Update = BleFirmwareUpdate;
+        auto* transfer = updater();
+        // Nothing was ever begun, so this connection holds no transfer.
+        if (!transfer) { refuseUpdate(id, Update::Error::Owner); return; }
+        uint32_t offset = 0, received = 0;
+        const char* data = text(doc, "$data");
+        if (!number(doc, "$offset", offset) || !data) { refuseUpdate(id, Update::Error::Invalid); return; }
+        const auto error = transfer->write(activeOwner_, offset, data, now, received);
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, Update::errorName(error));
+        // A refused offset still says where the transfer stands, so the phone resynchronizes.
+        if (error == Update::Error::None || error == Update::Error::Offset) sink.appendf(",\"received\":%u", static_cast<unsigned>(received));
+        end(sink, id);
+    }
+    /// Commit the image when `commit`, otherwise abandon it; a commit schedules the restart.
+    void finishUpdate(uint16_t id, bool commit, uint32_t now) {
+        using Update = BleFirmwareUpdate;
+        auto* transfer = updater();
+        if (!transfer) { refuseUpdate(id, Update::Error::Owner); return; }
+        const auto error = commit ? transfer->end(activeOwner_) : transfer->abort(activeOwner_);
+        if (error != Update::Error::None) { refuseUpdate(id, error); return; }
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        if (commit) {
+            // The reply is out before the reset: the phone hears `rebooting`, then reconnects to the new build.
+            restartAt_ = now + kRestartDelayMs; restartScheduled_ = true;
+            sink.append(",\"rebooting\":true");
+        }
+        end(sink, id);
+    }
+    void updateStatus(uint16_t id) {
+        uint32_t received = 0, total = 0;
+        auto* transfer = updater();
+        const char* phase = transfer ? transfer->phase(activeOwner_, received, total) : "idle";
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.append(",\"phase\":"); sink.writeJsonString(phase);
+        sink.appendf(",\"received\":%u,\"total\":%u", static_cast<unsigned>(received), static_cast<unsigned>(total)); end(sink, id);
+    }
+    bool startUpdate() {
+        if (!update_.resize(1)) return false;
+        new (update_.data()) UpdateState(firmwareSlot_, {releaseKey_, otaTarget(), securityVersion_});
+        return true;
+    }
     /// Ask this connection's central to pair, so a secret can follow; polling reports how far it came.
     void secure(uint16_t id) {
         static constexpr const char* kLinks[] = {"open", "pairing", "encrypted", "failed"};
@@ -672,8 +785,11 @@ private:
             sink.writeJsonString(model);
             sink.append(",\"firmwareVersion\":"); sink.writeJsonString(version_);
             sink.append(",\"builtAt\":"); sink.writeJsonString(builtAt_);
-            if (const size_t capacity = platform::otaNextAppCapacity())
+            if (const size_t capacity = slotCapacity())
                 sink.appendf(",\"otaSlotBytes\":%u", static_cast<unsigned>(capacity));
+            if (otaAvailable())
+                sink.appendf(",\"otaTarget\":%u,\"securityVersion\":%u,\"otaChunk\":%u", static_cast<unsigned>(otaTarget()),
+                             static_cast<unsigned>(securityVersion_), static_cast<unsigned>(BleFirmwareUpdate::kChunkBytes));
             auto* battery = scheduler_ ? BatteryService::discover(*scheduler_) : nullptr;
             const auto current = battery ? battery->batteryConfig() : platform::BleBatteryConfig{};
             sink.appendf(",\"basChannels\":%u,\"basRestartRequired\":%s,\"profileOp\":true,\"pixelMapOp\":%s,\"wifiOp\":%s", static_cast<unsigned>(startedBatteries_.count),
@@ -747,6 +863,23 @@ private:
     const char* version_ = "";
     const char* builtAt_ = "";
     platform::BleControlHandle transport_;
+    /// Taken by the first `ota-begin` and freed with the module, so an idle service holds no update buffers.
+    struct UpdateState {
+        UpdateState(FirmwareSlot* injected, const BleFirmwareUpdate::Release& release)
+            : transfer(injected ? *injected : static_cast<FirmwareSlot&>(platformSlot), release) {}
+        /// The platform's slot, used when no other is supplied.
+        PlatformFirmwareSlot platformSlot;
+        /// The transfer over whichever slot was chosen.
+        BleFirmwareUpdate transfer;
+    };
+    static constexpr uint32_t kRestartDelayMs = 1500;
+    const std::array<uint8_t, 65>* releaseKey_ = nullptr;
+    uint32_t securityVersion_ = 0;
+    FirmwareSlot* firmwareSlot_ = nullptr;
+    void (*restart_)() = &platform::reboot;
+    uint32_t restartAt_ = 0;
+    bool restartScheduled_ = false;
+    ScratchBuffer<UpdateState> update_{*this};
     ScratchBuffer<BleRpcPeers<platform::kBleControlPeerCapacity>> rpc_{*this};
     ScratchBuffer<char> pendingText_{*this};
     Job job_{}, terminal_{};

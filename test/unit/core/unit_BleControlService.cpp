@@ -9,9 +9,14 @@
 #include "core/system/ControlModule.h"
 #include "core/util/ModuleFactory.h"
 #include "core/util/BlePeerTable.h"
+#include "core/system/Base64.h"
+#include "core/util/fnv.h"
+#include "core/util/sha256.h"
 #include "platform/platform.h"
 #include "core/util/build_info.h"
 #include "module_types.h"
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +24,7 @@
 #include <initializer_list>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 constexpr const char* kBleTestEpoch = "00000000000000000000000000000001";
@@ -1489,4 +1495,667 @@ TEST_CASE("BLE WiFi setup is offered only where a network module runs") {
     tree.send(R"({"$v":1,"$id":2,"$op":"info"})", 1000);
     CHECK(tree.reply().find("\"wifiOp\":true") != std::string::npos);
     CHECK(tree.reply().size() <= 512);
+}
+
+// ---- Firmware update over BLE: a signed release, an ordered upload, and the connection that owns it.
+
+namespace {
+constexpr uint32_t kOtaSecurityVersion = 3;
+constexpr uint32_t kOtaEsp32Target = 0x2aa0a5f1u;   // FNV-1a of "nebulite-esp32", the value firmware_signing.py computes for the same name
+
+// A disposable public key: the host links no crypto library, so these tests pin what the service hands the primitive, and check_firmware_signature.py pins the P-256 arithmetic.
+const std::array<uint8_t, 65> kOtaKey = [] {
+    std::array<uint8_t, 65> key{};
+    key[0] = 0x04;
+    for (size_t i = 1; i < key.size(); ++i) key[i] = static_cast<uint8_t>(i * 7 + 1);
+    return key;
+}();
+
+// The substitute primitive accepts exactly the signature a disposable scheme derives from the key and the signed digest.
+std::array<uint8_t, 64> otaSignatureOf(const uint8_t* signedDigest) {
+    std::array<uint8_t, 64> signature{};
+    mm::Sha256 first, second;
+    first.update(kOtaKey.data(), kOtaKey.size()); first.update(signedDigest, 32); first.digest(signature.data());
+    second.update(signedDigest, 32); second.update(kOtaKey.data(), kOtaKey.size()); second.digest(signature.data() + 32);
+    return signature;
+}
+bool otaSignatureCheck(const uint8_t* publicKey, size_t publicKeySize, const uint8_t* digest, size_t digestSize,
+                       const uint8_t* signature, size_t signatureSize) {
+    if (publicKeySize != kOtaKey.size() || std::memcmp(publicKey, kOtaKey.data(), kOtaKey.size()) != 0 ||
+        digestSize != 32 || signatureSize != 64) return false;
+    const auto expected = otaSignatureOf(digest);
+    return std::memcmp(expected.data(), signature, 64) == 0;
+}
+
+std::string hexOf(const uint8_t* bytes, size_t count) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string text;
+    for (size_t i = 0; i < count; ++i) { text.push_back(digits[bytes[i] >> 4]); text.push_back(digits[bytes[i] & 15]); }
+    return text;
+}
+std::vector<uint8_t> otaImage(size_t size, uint8_t seed = 1) {
+    std::vector<uint8_t> image(size);
+    for (size_t i = 0; i < size; ++i) image[i] = static_cast<uint8_t>(i * 31 + seed);
+    return image;
+}
+
+// What the publisher hands the phone: the 60 signed claims and the signature over their SHA-256, both as hex.
+struct OtaRelease {
+    std::vector<uint8_t> image;
+    std::string claims, signature;
+};
+OtaRelease otaRelease(std::vector<uint8_t> image, uint32_t target = kOtaEsp32Target, uint32_t version = kOtaSecurityVersion) {
+    std::array<uint8_t, 60> claims{};
+    std::memcpy(claims.data(), "HELIO-FW-AUTH-V1", 16);
+    const auto put = [&](size_t at, uint32_t value) { for (int i = 0; i < 4; ++i) claims[at + i] = static_cast<uint8_t>(value >> (24 - 8 * i)); };
+    put(16, target); put(20, static_cast<uint32_t>(image.size())); put(24, version);
+    mm::Sha256 imageHash; imageHash.update(image.data(), image.size()); imageHash.digest(claims.data() + 28);
+    uint8_t signedDigest[32];
+    mm::Sha256 claimsHash; claimsHash.update(claims.data(), claims.size()); claimsHash.digest(signedDigest);
+    const auto signature = otaSignatureOf(signedDigest);
+    return {std::move(image), hexOf(claims.data(), claims.size()), hexOf(signature.data(), signature.size())};
+}
+
+// The application slot the platform lacks on a desktop. It holds the update gate while open, as the platform's writer does.
+struct FakeSlot : mm::FirmwareSlot {
+    size_t room = 4096;
+    bool gateHeld = false, failBegin = false, failWrite = false, failEnd = false;
+    int failedAborts = 0;   // how many aborts report that cleanup is unconfirmed
+    int begins = 0, commits = 0, aborts = 0;
+    bool open = false;
+    std::vector<uint8_t> image;
+    size_t capacity() const override { return room; }
+    bool busy() const override { return gateHeld || open; }
+    bool begin(size_t) override {
+        ++begins;
+        if (failBegin || busy()) return false;
+        open = true; image.clear();
+        return true;
+    }
+    bool write(const uint8_t* data, size_t length) override {
+        if (!open) return false;
+        // A refused write frees the writer, as the platform does.
+        if (failWrite) { open = false; return false; }
+        image.insert(image.end(), data, data + length);
+        return true;
+    }
+    bool end(bool commit) override {
+        if (!open) return false;
+        open = false;
+        if (commit) ++commits;
+        return !commit || !failEnd;
+    }
+    bool abort() override {
+        ++aborts; open = false;
+        return failedAborts > 0 ? (--failedAborts, false) : true;
+    }
+};
+
+int otaRestarts = 0;
+void countOtaRestart() { ++otaRestarts; }
+
+std::string base64Of(const uint8_t* bytes, size_t count) {
+    std::vector<char> text((count + 2) / 3 * 4 + 1);
+    mm::base64Encode({bytes, count}, text);
+    return text.data();
+}
+
+// Two phones: [0] the default connection and [1] a second central, each with its own session and request ids.
+struct OtaTree {
+    FakeSlot slot;   // declared first so it outlives the service that aborts into it
+    BleTree tree;
+    struct Peer { uint64_t generation; uint32_t session; uint16_t id; };
+    std::array<Peer, 2> peers{};
+    size_t current = 0;
+    uint32_t clock = 1000;   // a request without a time of its own happens at the last one's, since the idle clock must not run backwards
+    uint32_t at(uint32_t now) { if (now) clock = now; return clock; }
+    explicit OtaTree(bool available = true) {
+        otaRestarts = 0;
+        mm::platform::setTestFirmwareSignatureCheck(&otaSignatureCheck);
+        tree.service.setIdentity("nebulite-esp32", "f5a244a9+", "7.0.0", "Nov  3 2026 10:00:00");
+        if (available) { tree.service.setFirmwareRelease(kOtaKey, kOtaSecurityVersion); tree.service.setFirmwareSlotForTest(&slot); }
+        tree.service.setRestartForTest(&countOtaRestart);
+        peers[0] = {0, tree.session, 1};
+        tree.service.setConcurrentGenerationForTest(20);
+        tree.hello("00000000000000000000000000000022");
+        peers[1] = {20, tree.session, 1};
+        select(0);
+    }
+    ~OtaTree() { mm::platform::setTestFirmwareSignatureCheck(nullptr); }
+    void select(size_t peer) {
+        current = peer;
+        tree.service.setConcurrentGenerationForTest(peers[peer].generation);
+        tree.session = peers[peer].session;
+    }
+    std::string call(const char* op, const std::string& fields = "", uint32_t now = 0) {
+        const std::string request = "{\"$v\":1,\"$id\":" + std::to_string(++peers[current].id) + ",\"$op\":\"" + op + "\"" + fields + "}";
+        tree.send(request.c_str(), at(now));
+        return tree.reply();
+    }
+    std::string begin(const OtaRelease& release, uint32_t now = 0) {
+        return call("ota-begin", ",\"$claims\":\"" + release.claims + "\",\"$sig\":\"" + release.signature + "\"", now);
+    }
+    std::string write(const OtaRelease& release, size_t offset, size_t count, uint32_t now = 0) {
+        return write(offset, release.image.data() + offset, count, now);
+    }
+    std::string write(size_t offset, const uint8_t* bytes, size_t count, uint32_t now = 0) {
+        return call("ota-write", ",\"$offset\":" + std::to_string(offset) + ",\"$data\":\"" + base64Of(bytes, count) + "\"", now);
+    }
+    // Every chunk of the image in order; the reply of the last write.
+    std::string writeAll(const OtaRelease& release, uint32_t now = 0) {
+        std::string last;
+        for (size_t offset = 0; offset < release.image.size(); offset += 288)
+            last = write(release, offset, std::min<size_t>(288, release.image.size() - offset), now);
+        return last;
+    }
+    static bool ok(const std::string& reply) { return reply.find("\"ok\":true") != std::string::npos; }
+    static std::string error(const std::string& reply) { return ok(reply) ? "" : replyString(reply, "error"); }
+    std::string phase() { return replyString(call("ota-status"), "phase"); }
+};
+}  // namespace
+
+TEST_CASE("BLE firmware update: the target is the variant name's FNV-1a, as the signer computes it") {
+    CHECK(mm::fnv1a("nebulite-esp32", 14) == kOtaEsp32Target);
+    CHECK(mm::fnv1a("nebulite-s3", 11) == 0x291b7dd2u);
+    CHECK(mm::fnv1a("helio1", 6) == 0x1ab87b7du);
+}
+
+TEST_CASE("BLE firmware update is advertised only where this build can take one") {
+    char text[mm::BleControlService::kIdentityCapacity];
+    const mm::platform::BleBatteryConfig batteries{};
+    {
+        // No publisher key: the identity and info say nothing of updates and the operations do not exist.
+        OtaTree off(false);
+        mm::JsonSink identity(text, sizeof(text));
+        off.tree.service.writeIdentity(identity, batteries);
+        CHECK(std::string(text).find("\"bleOta\":false") != std::string::npos);
+        const auto info = off.call("info");
+        CHECK(info.find("otaTarget") == std::string::npos);
+        CHECK(info.find("otaChunk") == std::string::npos);
+        CHECK(OtaTree::error(off.call("ota-status")) == "operation");
+    }
+    {
+        // A key alone is not an update path: the desktop has no application slot, so it stays false.
+        BleTree desktop;
+        desktop.service.setFirmwareRelease(kOtaKey, kOtaSecurityVersion);
+        mm::JsonSink identity(text, sizeof(text));
+        desktop.service.writeIdentity(identity, batteries);
+        CHECK(std::string(text).find("\"bleOta\":false") != std::string::npos);
+        desktop.send(R"({"$v":1,"$id":2,"$op":"ota-begin","$claims":"00","$sig":"00"})", 1000);
+        CHECK(replyString(desktop.reply(), "error") == "operation");
+    }
+    {
+        // A single-slot table (the classic USB layout beside MoonBase) has no inactive slot to write, so it offers no update.
+        OtaTree single;
+        single.slot.room = 0;
+        mm::JsonSink identity(text, sizeof(text));
+        single.tree.service.writeIdentity(identity, batteries);
+        CHECK(std::string(text).find("\"bleOta\":false") != std::string::npos);
+        CHECK(single.call("info").find("\"otaTarget\"") == std::string::npos);
+    }
+    OtaTree on;
+    mm::JsonSink identity(text, sizeof(text));
+    on.tree.service.writeIdentity(identity, batteries);
+    CHECK_FALSE(identity.overflowed());
+    CHECK(std::string(text).find("\"bleOta\":true") != std::string::npos);
+    CHECK(std::strlen(text) < sizeof(text));
+    const auto info = on.call("info");
+    CHECK(replyNumber(info, "otaTarget") == kOtaEsp32Target);
+    CHECK(replyNumber(info, "securityVersion") == kOtaSecurityVersion);
+    CHECK(replyNumber(info, "otaChunk") == 288);
+    CHECK(replyNumber(info, "otaSlotBytes") == 4096);
+}
+
+namespace {
+const char* fakePageReader(mm::JsonSink& sink, mm::Scheduler&, uint16_t, const char*) { sink.append("\"p\":0"); return nullptr; }
+const char* fakeFrameReader(mm::JsonSink& sink, mm::Scheduler&, uint16_t, const char*, uint32_t) { sink.append("\"p\":0"); return nullptr; }
+}  // namespace
+
+TEST_CASE("BLE info with every capability and the update fields still fits the 512-byte reply") {
+    struct Clock { ~Clock() { mm::platform::setTestNowMs(0); } } clock;
+    struct Model : mm::MoonModule {
+        char name[32] = "1234567890123456789012345678901";   // the longest model System accepts
+        void defineControls() override { controls_.addText("deviceModel", name, sizeof(name)); }
+    };
+    OtaTree on;
+    auto* model = new Model();
+    model->setName("System"); model->defineControls(); on.tree.scheduler.addModule(model);
+    on.tree.service.setIdentity("nebulite-esp32", "f5a244a9+", "7.0.0-rc.12+abcdef0", "Nov  3 2026 10:00:00");
+    on.tree.service.setPixelMapReader(&fakePageReader);
+    on.tree.service.setOutputReader(&fakePageReader);
+    on.tree.service.setPreviewFrameReader(&fakeFrameReader);
+    on.tree.service.setProductProfiles(&fakeProfileState, &fakeProfileNames);
+    mm::platform::setTestNowMs(4294967295u);
+    on.peers[0].id = 65534;
+    const auto reply = on.call("info");
+    CHECK(OtaTree::ok(reply));
+    CHECK(reply.find("\"setupOp\":true") != std::string::npos);
+    CHECK(reply.find("\"otaChunk\":288") != std::string::npos);
+    CHECK(reply.size() <= 512);
+}
+
+TEST_CASE("BLE firmware update: a request carrying a full 288-byte chunk fits the 512-byte request limit with the widest envelope") {
+    const auto image = otaImage(288);
+    const std::string request = "{\"$v\":1,\"$id\":65535,\"$op\":\"ota-write\",\"$e\":\"" + std::string(kBleTestEpoch) +
+                                "\",\"$s\":4294967295,\"$offset\":4294967295,\"$data\":\"" + base64Of(image.data(), image.size()) + "\"}";
+    CHECK(request.size() <= mm::BleMessage::kCapacity);
+    CHECK(mm::BleFirmwareUpdate::kChunkBytes == 288);
+}
+
+TEST_CASE("BLE firmware update: a signed release opens the slot and a transfer of ordered chunks commits it and schedules the restart") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(700));
+    CHECK(t.phase() == "idle");
+
+    const auto begun = t.begin(release, 1000);
+    REQUIRE(OtaTree::ok(begun));
+    CHECK(replyNumber(begun, "total") == 700);
+    CHECK(replyNumber(begun, "chunk") == 288);
+    CHECK(t.slot.begins == 1);
+    CHECK(t.phase() == "uploading");
+
+    CHECK(replyNumber(t.write(release, 0, 288, 1100), "received") == 288);
+    CHECK(replyNumber(t.write(release, 288, 288, 1200), "received") == 576);
+    const auto status = t.call("ota-status", "", 1250);
+    CHECK(replyString(status, "phase") == "uploading");
+    CHECK(replyNumber(status, "received") == 576);
+    CHECK(replyNumber(status, "total") == 700);
+    CHECK(replyNumber(t.write(release, 576, 124, 1300), "received") == 700);
+    CHECK(t.slot.commits == 0);
+
+    const auto ended = t.call("ota-end", "", 3000);
+    REQUIRE(OtaTree::ok(ended));
+    CHECK(ended.find("\"rebooting\":true") != std::string::npos);
+    CHECK(t.slot.commits == 1);
+    CHECK(t.slot.image == release.image);
+    CHECK(t.phase() == "committed");
+
+    // The restart waits 1.5 s after the reply and never delays the tick: it is scheduled, then fires when due.
+    CHECK(t.tree.service.restartScheduledForTest());
+    t.tree.service.applyDue(4499);
+    CHECK(otaRestarts == 0);
+    t.tree.service.applyDue(4500);
+    CHECK(otaRestarts == 1);
+    t.tree.service.applyDue(9000);
+    CHECK(otaRestarts == 1);
+}
+
+TEST_CASE("BLE firmware update: a release that fails authorization never opens the slot") {
+    OtaTree t;
+    const auto image = otaImage(300);
+    const auto good = otaRelease(image);
+
+    const auto flipped = [](std::string text, size_t at) { text[at] = text[at] == 'a' ? 'b' : 'a'; return text; };
+    auto tampered = good;
+    tampered.signature = flipped(good.signature, 10);
+    CHECK(OtaTree::error(t.begin(tampered)) == "ota-unauthorized");
+
+    // A claim altered after signing: the image size (a nibble of its low byte, so it still fits the slot) and the image digest.
+    auto alteredSize = good;
+    alteredSize.claims = flipped(good.claims, 47);
+    CHECK(OtaTree::error(t.begin(alteredSize)) == "ota-unauthorized");
+    auto alteredDigest = good;
+    alteredDigest.claims = flipped(good.claims, 60);
+    CHECK(OtaTree::error(t.begin(alteredDigest)) == "ota-unauthorized");
+
+    CHECK(OtaTree::error(t.begin(otaRelease(image, kOtaEsp32Target + 1))) == "ota-unauthorized");              // another variant's target
+    CHECK(OtaTree::error(t.begin(otaRelease(image, kOtaEsp32Target, kOtaSecurityVersion - 1))) == "ota-unauthorized");   // older than the running release
+
+    auto wrongKeySignature = good;
+    wrongKeySignature.signature = std::string(128, 'a');
+    CHECK(OtaTree::error(t.begin(wrongKeySignature)) == "ota-unauthorized");
+
+    CHECK(t.slot.begins == 0);
+    CHECK(t.phase() == "idle");
+    // The same release, untouched, is accepted after all those refusals.
+    CHECK(OtaTree::ok(t.begin(good)));
+    CHECK(t.slot.begins == 1);
+}
+
+TEST_CASE("BLE firmware update: a release at the running security version or newer is accepted") {
+    OtaTree t;
+    CHECK(OtaTree::ok(t.begin(otaRelease(otaImage(64), kOtaEsp32Target, kOtaSecurityVersion))));
+    CHECK(OtaTree::ok(t.call("ota-abort")));
+    CHECK(OtaTree::ok(t.begin(otaRelease(otaImage(64), kOtaEsp32Target, kOtaSecurityVersion + 5))));
+}
+
+TEST_CASE("BLE firmware update: malformed claims and signatures are refused as unauthorized") {
+    OtaTree t;
+    const auto good = otaRelease(otaImage(64));
+    const auto refused = [&](const std::string& fields) { return OtaTree::error(t.call("ota-begin", fields)) == "ota-unauthorized"; };
+    CHECK(refused(""));
+    CHECK(refused(",\"$claims\":\"" + good.claims + "\""));
+    CHECK(refused(",\"$sig\":\"" + good.signature + "\""));
+    CHECK(refused(",\"$claims\":\"" + good.claims.substr(2) + "\",\"$sig\":\"" + good.signature + "\""));
+    CHECK(refused(",\"$claims\":\"" + good.claims + "00\",\"$sig\":\"" + good.signature + "\""));
+    CHECK(refused(",\"$claims\":\"" + good.claims + "\",\"$sig\":\"" + good.signature.substr(2) + "\""));
+    CHECK(refused(",\"$claims\":\"" + std::string(120, 'z') + "\",\"$sig\":\"" + good.signature + "\""));
+    CHECK(refused(",\"$claims\":\"" + good.claims + "\",\"$sig\":\"" + std::string(128, 'g') + "\""));
+    CHECK(refused(",\"$claims\":7,\"$sig\":\"" + good.signature + "\""));
+    // The signed domain tag is part of the claims: "HELIO-FW-AUTH-V2" is not a release.
+    auto otherDomain = good;
+    otherDomain.claims[31] = '2';
+    CHECK(refused(",\"$claims\":\"" + otherDomain.claims + "\",\"$sig\":\"" + good.signature + "\""));
+    // A correctly signed release of zero bytes is no image.
+    CHECK(OtaTree::error(t.begin(otaRelease({}))) == "ota-unauthorized");
+    CHECK(t.slot.begins == 0);
+}
+
+TEST_CASE("BLE firmware update: an image the slot cannot hold is refused as a slot error, before anything opens") {
+    OtaTree t;
+    t.slot.room = 699;
+    CHECK(OtaTree::error(t.begin(otaRelease(otaImage(700)))) == "ota-slot");
+    t.slot.room = 0;   // no inactive slot at all: no update path, so the operation itself is unavailable
+    CHECK(OtaTree::error(t.begin(otaRelease(otaImage(10)))) == "operation");
+    CHECK(t.slot.begins == 0);
+    t.slot.room = 700;
+    CHECK(OtaTree::ok(t.begin(otaRelease(otaImage(700)))));
+}
+
+TEST_CASE("BLE firmware update: another update holding the gate keeps this one out, and a failed open is an I/O error") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(300));
+    t.slot.gateHeld = true;   // an HTTP, URL or MQTT update is under way
+    CHECK(OtaTree::error(t.begin(release)) == "ota-busy");
+    CHECK(t.slot.begins == 0);
+    t.slot.gateHeld = false;
+    t.slot.failBegin = true;
+    CHECK(OtaTree::error(t.begin(release)) == "ota-io");
+    t.slot.failBegin = false;
+    CHECK(OtaTree::ok(t.begin(release)));
+    // The gate this transfer holds is the one that keeps the others out.
+    CHECK(t.slot.busy());
+}
+
+TEST_CASE("BLE firmware update: writes must be contiguous, and a refused offset says where the transfer stands") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(700));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+
+    auto skipped = t.write(release, 288, 288);   // chunk 2 before chunk 1
+    CHECK(OtaTree::error(skipped) == "ota-offset");
+    CHECK(replyNumber(skipped, "received") == 0);
+    CHECK(OtaTree::ok(t.write(release, 0, 288)));
+    auto repeated = t.write(release, 0, 288);   // chunk 1 again, as after a lost reply
+    CHECK(OtaTree::error(repeated) == "ota-offset");
+    CHECK(replyNumber(repeated, "received") == 288);
+    auto ahead = t.write(release, 576, 124);
+    CHECK(OtaTree::error(ahead) == "ota-offset");
+    CHECK(replyNumber(ahead, "received") == 288);
+    CHECK(replyNumber(t.write(release, 288, 288), "received") == 576);
+    CHECK(replyNumber(t.write(release, 576, 124), "received") == 700);
+    CHECK(OtaTree::ok(t.call("ota-end")));
+    CHECK(t.slot.image == release.image);
+}
+
+TEST_CASE("BLE firmware update: a retried request replays its reply instead of writing the chunk twice") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    const std::string request = "{\"$v\":1,\"$id\":" + std::to_string(++t.peers[0].id) + ",\"$op\":\"ota-write\",\"$offset\":0,\"$data\":\"" +
+                                base64Of(release.image.data(), 288) + "\"}";
+    t.tree.send(request.c_str(), 1000);
+    const auto first = t.tree.reply();
+    REQUIRE(OtaTree::ok(first));
+    t.tree.send(request.c_str(), 1001);
+    CHECK(t.tree.reply() == first);
+    CHECK(t.slot.image.size() == 288);
+}
+
+TEST_CASE("BLE firmware update: chunk data must be one to 288 bytes of canonical base64") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(700));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    const auto bytes = otaImage(400);
+    CHECK(OtaTree::error(t.write(0, bytes.data(), 289)) == "ota-invalid");   // one over the declared chunk
+    CHECK(OtaTree::error(t.write(0, bytes.data(), 291)) == "ota-invalid");   // the most a 512-byte request can still frame
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"\"")) == "ota-invalid");
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"AAA\"")) == "ota-invalid");        // padding required
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"AA-_\"")) == "ota-invalid");       // not the standard alphabet
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":12")) == "ota-invalid");
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$data\":\"AAAA\"")) == "ota-invalid");                      // no offset
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":-1,\"$data\":\"AAAA\"")) == "ota-invalid");
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0.5,\"$data\":\"AAAA\"")) == "ota-invalid");
+    CHECK(t.slot.image.empty());
+    CHECK(OtaTree::ok(t.write(release, 0, 288)));   // the largest declared chunk
+    CHECK(OtaTree::ok(t.write(release, 288, 1)));   // and the smallest
+}
+
+TEST_CASE("BLE firmware update: the connection that began a transfer owns it, and no other connection can touch it") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+
+    t.select(1);   // a second phone
+    CHECK(OtaTree::error(t.write(release, 288, 288)) == "ota-owner");
+    CHECK(OtaTree::error(t.write(release, 0, 288)) == "ota-owner");
+    CHECK(OtaTree::error(t.call("ota-end")) == "ota-owner");
+    CHECK(OtaTree::error(t.call("ota-abort")) == "ota-owner");
+    CHECK(OtaTree::error(t.begin(release)) == "ota-busy");
+    const auto status = t.call("ota-status");
+    CHECK(replyString(status, "phase") == "idle");
+    CHECK(replyNumber(status, "received") == 0);
+    CHECK(replyNumber(status, "total") == 0);
+
+    t.select(0);   // the owner's transfer is untouched
+    CHECK(t.phase() == "uploading");
+    CHECK(t.slot.image.size() == 288);
+    CHECK(t.slot.aborts == 0);
+    CHECK(replyNumber(t.write(release, 288, 288), "received") == 576);
+}
+
+TEST_CASE("BLE firmware update: a connection that never began one holds none") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(10));
+    CHECK(OtaTree::error(t.write(release, 0, 10)) == "ota-owner");
+    CHECK(OtaTree::error(t.call("ota-end")) == "ota-owner");
+    CHECK(OtaTree::error(t.call("ota-abort")) == "ota-owner");
+    CHECK(t.phase() == "idle");
+}
+
+TEST_CASE("BLE firmware update: the owner aborts its transfer and the slot is free for the next") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    CHECK(OtaTree::ok(t.call("ota-abort")));
+    CHECK(t.slot.aborts == 1);
+    CHECK(t.slot.commits == 0);
+    CHECK_FALSE(t.slot.open);
+    const auto status = t.call("ota-status");
+    CHECK(replyString(status, "phase") == "aborted");
+    CHECK(replyNumber(status, "received") == 288);
+    CHECK(OtaTree::error(t.write(release, 288, 288)) == "ota-owner");
+    CHECK(OtaTree::error(t.call("ota-end")) == "ota-owner");
+    // Another phone may now begin, and so may this one again.
+    t.select(1);
+    CHECK(OtaTree::ok(t.begin(release)));
+    CHECK(t.slot.begins == 2);
+}
+
+TEST_CASE("BLE firmware update: a second begin by the owner is busy, not a restart") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    CHECK(OtaTree::error(t.begin(release)) == "ota-busy");
+    CHECK(t.slot.begins == 1);
+    CHECK(replyNumber(t.write(release, 288, 288), "received") == 576);
+}
+
+TEST_CASE("BLE firmware update: disconnecting aborts the transfer, and no connection resumes it") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(t.slot.open);
+
+    // Only the second phone is still connected; the next due-poll finds the owner gone.
+    const uint64_t connected[] = {20};
+    t.tree.service.reconcileOwnersForTest(connected, 1);
+    t.tree.service.applyDue(1500);
+    CHECK(t.slot.aborts == 1);
+    CHECK_FALSE(t.slot.open);
+    CHECK(t.slot.commits == 0);
+
+    t.select(0);   // the dropped connection has no session left to ask with
+    CHECK(OtaTree::error(t.call("ota-status", "", 1600)) == "session-required");
+    t.select(1);
+    CHECK(t.phase() == "idle");
+    CHECK(OtaTree::ok(t.begin(release)));   // the slot is free again
+}
+
+TEST_CASE("BLE firmware update: a connection that is still carried keeps its transfer through the poll") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    const uint64_t connected[] = {UINT64_MAX, 20};
+    t.tree.service.reconcileOwnersForTest(connected, 2);
+    t.tree.service.applyDue(1500);
+    CHECK(t.slot.aborts == 0);
+    CHECK(t.phase() == "uploading");
+}
+
+TEST_CASE("BLE firmware update: thirty seconds without a write abandon the transfer") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release, 1000)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288, 5000)));
+
+    t.tree.service.applyDue(5000 + 29999);
+    CHECK(t.slot.aborts == 0);
+    // A status poll is not progress, so it cannot keep the slot busy.
+    t.select(0);
+    CHECK(t.phase() == "uploading");
+    t.tree.service.applyDue(5000 + 30000);
+    CHECK(t.slot.aborts == 1);
+    CHECK_FALSE(t.slot.open);
+    CHECK(OtaTree::error(t.write(release, 288, 288, 36000)) == "ota-owner");
+    CHECK(t.phase() == "aborted");
+}
+
+TEST_CASE("BLE firmware update: each accepted write restarts the idle clock") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(864));
+    REQUIRE(OtaTree::ok(t.begin(release, 1000)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288, 21000)));
+    REQUIRE(OtaTree::ok(t.write(release, 288, 288, 41000)));
+    t.tree.service.applyDue(70999);
+    CHECK(t.slot.aborts == 0);
+    CHECK(OtaTree::ok(t.write(release, 576, 288, 70999)));
+}
+
+TEST_CASE("BLE firmware update: a transfer whose bytes differ from the signed digest never commits") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    const auto other = otaImage(600, 2);   // the same size, but not the image that was signed
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    for (size_t offset = 0; offset < other.size(); offset += 288)
+        REQUIRE(OtaTree::ok(t.write(offset, other.data() + offset, std::min<size_t>(288, other.size() - offset))));
+    CHECK(OtaTree::error(t.call("ota-end")) == "ota-integrity");
+    CHECK(t.slot.commits == 0);
+    CHECK(t.slot.aborts == 1);
+    CHECK_FALSE(t.tree.service.restartScheduledForTest());
+    CHECK(t.phase() == "failed");
+    CHECK(OtaTree::ok(t.begin(release)));   // and the genuine image can still be sent
+}
+
+TEST_CASE("BLE firmware update: ending before every byte arrived leaves the transfer open to finish") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    CHECK(OtaTree::error(t.call("ota-end")) == "ota-incomplete");
+    CHECK(t.slot.commits == 0);
+    CHECK(t.phase() == "uploading");
+    CHECK_FALSE(t.tree.service.restartScheduledForTest());
+    REQUIRE(OtaTree::ok(t.write(release, 288, 288)));
+    REQUIRE(OtaTree::ok(t.write(release, 576, 24)));
+    CHECK(OtaTree::ok(t.call("ota-end")));
+}
+
+TEST_CASE("BLE firmware update: bytes beyond the signed size are refused") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(300));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    const auto more = otaImage(24);
+    CHECK(OtaTree::error(t.write(288, more.data(), 24)) == "ota-invalid");
+    CHECK(OtaTree::ok(t.write(release, 288, 12)));
+    CHECK(OtaTree::error(t.write(300, more.data(), 1)) == "ota-invalid");
+}
+
+TEST_CASE("BLE firmware update: a flash failure ends the transfer, and the next begin is not wedged by it") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(600));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    t.slot.failWrite = true;
+    t.slot.failedAborts = 2;   // the platform had already released the writer, so its own abort reports nothing left
+    CHECK(OtaTree::error(t.write(release, 0, 288)) == "ota-io");
+    CHECK(t.phase() == "failed");
+    t.slot.failWrite = false;
+    // Cleanup is retried before the next begin and only unblocks it once the writer is confirmed released.
+    CHECK(OtaTree::error(t.begin(release)) == "ota-io");
+    CHECK(OtaTree::ok(t.begin(release)));
+    CHECK(t.slot.begins == 2);
+    CHECK(OtaTree::ok(t.writeAll(release)));
+    CHECK(OtaTree::ok(t.call("ota-end")));
+    CHECK(t.slot.image == release.image);
+}
+
+TEST_CASE("BLE firmware update: a commit the platform refuses is an I/O error, and nothing restarts") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(300));
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    REQUIRE(OtaTree::ok(t.writeAll(release)));
+    t.slot.failEnd = true;
+    CHECK(OtaTree::error(t.call("ota-end")) == "ota-io");
+    CHECK_FALSE(t.tree.service.restartScheduledForTest());
+    CHECK(t.phase() == "failed");
+}
+
+TEST_CASE("BLE firmware update: the operations take exactly their own fields") {
+    OtaTree t;
+    const auto release = otaRelease(otaImage(300));
+    CHECK(OtaTree::error(t.call("ota-begin", ",\"$claims\":\"" + release.claims + "\",\"$sig\":\"" + release.signature + "\",\"$offset\":0")) == "fields");
+    CHECK(OtaTree::error(t.call("ota-begin", ",\"$data\":\"AAAA\"")) == "fields");
+    CHECK(t.slot.begins == 0);
+    REQUIRE(OtaTree::ok(t.begin(release)));
+    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"AAAA\",\"$claims\":\"x\"")) == "fields");
+    CHECK(OtaTree::error(t.call("ota-end", ",\"$offset\":0")) == "fields");
+    CHECK(OtaTree::error(t.call("ota-abort", ",\"$sig\":\"x\"")) == "fields");
+    CHECK(OtaTree::error(t.call("ota-status", ",\"$target\":{\"s\":1,\"id\":1}")) == "fields");
+    CHECK(OtaTree::error(t.call("ota-erase")) == "operation");
+    CHECK(t.phase() == "uploading");
+}
+
+TEST_CASE("BLE firmware update: the platform slot reports the shared gate, and a writer it never held counts as aborted") {
+    struct Gate { ~Gate() { mm::platform::setTestOtaBusy(false); } } gate;
+    mm::PlatformFirmwareSlot slot;
+    CHECK_FALSE(slot.busy());
+    CHECK(slot.abort());   // nothing open and the gate free: nothing is held
+    mm::platform::setTestOtaBusy(true);
+    CHECK(slot.busy());
+    CHECK_FALSE(slot.abort());   // the gate says something else still holds a writer
+    CHECK_FALSE(slot.begin(100));   // the desktop has no slot to open
+    CHECK_FALSE(slot.write(nullptr, 0));
+    CHECK_FALSE(slot.end(true));
+}
+
+TEST_CASE("BLE firmware update: releasing the service while a transfer is open aborts it") {
+    FakeSlot slot;
+    mm::platform::setTestFirmwareSignatureCheck(&otaSignatureCheck);
+    {
+        BleTree tree;
+        tree.service.setIdentity("nebulite-esp32", "f5a244a9+");
+        tree.service.setFirmwareRelease(kOtaKey, kOtaSecurityVersion);
+        tree.service.setFirmwareSlotForTest(&slot);
+        const auto release = otaRelease(otaImage(300));
+        tree.send(("{\"$v\":1,\"$id\":2,\"$op\":\"ota-begin\",\"$claims\":\"" + release.claims + "\",\"$sig\":\"" + release.signature + "\"}").c_str(), 1000);
+        REQUIRE(slot.open);
+    }
+    mm::platform::setTestFirmwareSignatureCheck(nullptr);
+    CHECK_FALSE(slot.open);
+    CHECK(slot.aborts == 1);
 }

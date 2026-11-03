@@ -4916,7 +4916,7 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#bleremoteservice"
   },
   "BleControlService": {
-   "line": "Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state and named scheduled operations.\n@technical The framing, session and complete-scene contract lives in reference/product-ble.md.",
+   "line": "Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state, named scheduled operations and a signed firmware update.\n@technical The framing, session, complete-scene and firmware-update contract lives in reference/product-ble.md.",
    "controls": {
     "group": {
      "line": "Persisted group membership; empty leaves the group."

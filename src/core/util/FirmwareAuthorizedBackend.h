@@ -17,6 +17,8 @@ public:
     FirmwareAuthorizedBackend(const FirmwareAuthorizedBackend&) = delete;
     FirmwareAuthorizedBackend& operator=(const FirmwareAuthorizedBackend&) = delete;
     size_t capacity() const { return backend_.capacity(); }
+    /// Whether this adapter still holds the underlying writer, which a failed finalization or cleanup leaves true.
+    bool active() const { return active_; }
     bool authorize(size_t size, const std::array<uint8_t, 32>& digest) {
         approved_ = false;
         if (active_ || !policy_.verify(size, digest)) return false;

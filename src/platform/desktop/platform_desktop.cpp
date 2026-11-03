@@ -127,6 +127,7 @@
 #include "platform/platform.h"
 #include "platform/usbvideo_frames.h"   // areaMean: the shrink the device backend also uses
 #include "core/util/FirmwareImage.h"  // identify/moonBaseRejection: shared image vetting
+#include "core/util/FirmwareSignature.h"  // verifyFirmwareSignatureP256, which the desktop answers itself
 #include "core/util/H264Bitstream.h"  // where the encoder's frames begin and end
 
 #include <algorithm>
@@ -2060,6 +2061,8 @@ bool otaBegin(OtaWrite&, OtaTarget, size_t, char* statusBuf, size_t statusBufLen
 bool otaWrite(OtaWrite&, const uint8_t*, size_t) { return false; }
 bool otaEnd(OtaWrite&, bool) { return false; }
 bool otaAbortApp(OtaWrite& w) { otaEnd(w, false); return false; }
+static FirmwareSignatureCheck testFirmwareSignatureCheck_ = nullptr;
+void setTestFirmwareSignatureCheck(FirmwareSignatureCheck check) { testFirmwareSignatureCheck_ = check; }
 
 // No partitions on desktop: there is no recovery image and nothing to boot into, unless a host test gives it one to read.
 static const char* testMoonBaseVersion_ = nullptr;
@@ -3896,5 +3899,14 @@ const char* rawInterfaceName(size_t i) {
 }
 
 } // namespace mm::platform
+
+// The host links no crypto library and has no update path, so a release signature verifies only through a test's substitute.
+namespace mm {
+bool verifyFirmwareSignatureP256(const uint8_t* publicKey, size_t publicKeySize, const uint8_t* digest, size_t digestSize,
+                                 const uint8_t* signature, size_t signatureSize) {
+    return platform::testFirmwareSignatureCheck_ &&
+           platform::testFirmwareSignatureCheck_(publicKey, publicKeySize, digest, digestSize, signature, signatureSize);
+}
+} // namespace mm
 
 #include "platform/ble_control_stub.inc"

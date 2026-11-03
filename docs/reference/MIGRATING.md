@@ -32,6 +32,12 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ## v7.0.0
 
+### NEBULITE and HELIO firmware report `bleOta:true` and take a signed update over BLE
+
+**Action: *nothing* on the device. The NEBULITE app must be a build that accepts both values of `bleOta`.**
+
+`helio1`, `nebulite-s3` and `nebulite-esp32` report `bleOta:true` in their BLE identity and answer `ota-begin`, `ota-write`, `ota-end`, `ota-abort` and `ota-status`, which install a release the publisher signed for that variant. An app that insists on `bleOta:false` stops recognizing these controllers for lighting control. Firmware already in the field keeps reporting `false` and updates over USB, HTTP or a URL as before. [Firmware update over BLE](product-ble.md#firmware-update-over-ble) has the operations.
+
 ### The Adafruit MatrixPortal S3 has its own firmware, `esp32s3-n8r2`
 
 **Action: *nothing*; to use the board's whole 8 MB, *install over USB* once with *Erase chip first* ticked.**

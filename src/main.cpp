@@ -159,6 +159,7 @@
 #include "helio/BlePixelMapPage.h"
 #include "helio/BleOutputPage.h"
 #include "helio/BlePreviewFramePage.h"
+#include "helio/FirmwarePublisherKey.h"
 #include "helio/ProductPresets.h"
 #include "helio/HelioRemoteService.h"
 #include "core/util/PresetTemplates.h"
@@ -301,6 +302,8 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         else if (productFirmware) ble->setAdvertisingProductResolver(&mm::ble_advertisement::productCodeForModel);
         // A garment on BLE alone is set up from the phone with the same catalogue the dashboard offers.
         if (nebuliteProduct) ble->setProductProfiles(&mm::ble_product_profiles::state, &mm::ble_product_profiles::names);
+        // The phone installs only a release the publisher signed for this variant, never below the running security version.
+        ble->setFirmwareRelease(mm::kFirmwarePublisherKey, mm::kFirmwareSecurityVersion);
         ble->markWiredByCode();
         servicesModule->addChild(ble);
 

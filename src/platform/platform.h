@@ -841,6 +841,11 @@ size_t otaNextAppCapacity();
 #ifndef ESP_PLATFORM
 /// Override the desktop's unknown target capacity for RPC tests; zero resets it.
 void setTestOtaNextAppCapacity(size_t capacity);
+/// The check a release signature goes through where the build links no crypto library: the desktop and Teensy refuse every signature, and a host test substitutes this one. Null restores the refusal.
+using FirmwareSignatureCheck = bool (*)(const uint8_t* publicKey, size_t publicKeySize, const uint8_t* digest, size_t digestSize,
+                                        const uint8_t* signature, size_t signatureSize);
+/// Install the substitute signature check for a host test.
+void setTestFirmwareSignatureCheck(FirmwareSignatureCheck check);
 #endif
 /// Start an image of `contentLen` bytes (0 when unknown) for `target`, its progress in `statusBuf` and `bytesOut`; false with the reason there.
 bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut);
