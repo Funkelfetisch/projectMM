@@ -58,6 +58,26 @@ MoonLight's preset system (part of `ModuleLightsControl`): **64 named slots**, e
 
 **Partly shipped since this was written.** `ControlModule` owns the preset system: a pad grid of slots, save and apply, and `capture` controls that choose which subtrees a save includes. So the home question is settled (the surface, not a hub), and what remains from the description above is **preset looping** on a timer, rotating between a first and last slot, plus Home Assistant registration for external recall. Persistence already round-trips control values, so the mechanism is there; the loop timer is the missing piece. Complements the [presets UI note](backlog-core.md) (control-value bundles).
 
+### A scene keeps its changed controls on the device (2026-11-03, from the app 0.1.150 bench test)
+
+Changing a scene's options and starting another scene loses the changes: the next start of the first scene comes back with its defaults.
+The product owner wants the changed values kept on the device and restored whenever that scene starts again, from any phone.
+The textbook shape is per-scene persistence of the scene controls next to the scene selection, applied when the scene's node is created; the presets above capture whole trees on demand, this is the implicit per-scene memory.
+The app then reads the values with the scene (it already does) and keeps nothing of its own.
+
+### A product name the customer types, kept on the device (2026-11-03, from the app 0.1.150 bench test)
+
+The app keeps a product's custom name ("Super Old v2 Jacket") on the phone only, so another phone shows the default.
+`deviceName` cannot hold it: it is the network identity and is coerced to a valid hostname every tick.
+Wanted: a free-text, length-bounded product name of its own, persisted, readable over RPC2 with the identity, and written by the app on rename; whether the BLE advertisement carries it is a separate size decision.
+
+### Sound to light for every controller in range (2026-11-03, idea for a later version)
+
+Zengge and SP648E controllers have a music mode fed by their vendor apps from the phone's microphone.
+An ESP32 running MoonLight already analyses audio well, so it could feed those controllers instead: as a BLE central connected to the ones in range, sending each family the frames its vendor app sends in phone-microphone mode.
+Neither controller family takes music data from advertisements, so this is connections, not broadcast; the fallback is the ESP32 sending its audio features to the phone, which relays them to the group.
+Needs: a capture of each vendor app's phone-microphone frames, the NimBLE central role with several simultaneous connections next to the existing peripheral role, and a latency budget per frame.
+
 ### MultiplyModifier mapping-LUT memory at large grids (investigation, re-verify on classic)
 
 `scenario_perf_full` on the S3 (2026-06-17) measured the MultiplyModifier's cost across grid sizes. The finding, stated correctly: the modifier **reduces compute** (with the default 2×2 kaleidoscope the effect renders only the ¼-size logical quadrant: Noise+Multiply at 16K is 29,647µs vs 50,555µs for Noise alone), and its real cost is **memory**: the mapping LUT's destinations array. Measured modifier heap cost on the S3: 16²→1.7KB, 32²→10.8KB, 64²→23.5KB, **128²(16K)→93KB** (`nrOfLightsType` is `uint32_t` on a PSRAM board). On the S3's 8MB PSRAM this is trivial. Under the physical→logical fold build each physical light contributes ≤1 destination, so the destinations array is bounded by the real light count regardless of chain depth, so there is no build-time fan-out.
