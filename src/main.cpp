@@ -155,6 +155,7 @@
 #include "helio/HelioAudioMigration.h"
 #include "core/services/BleControlService.h"
 #include "helio/BleSceneCatalog.h"
+#include "helio/BleProductProfiles.h"
 #include "helio/BlePixelMapPage.h"
 #include "helio/BleOutputPage.h"
 #include "helio/BlePreviewFramePage.h"
@@ -295,6 +296,8 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         // The firmware target identifies HELIO 1; physical size comes only from explicit saved metadata.
         if (helioProduct) ble->setAdvertisingProduct({1, 0});
         else if (productFirmware) ble->setAdvertisingProductResolver(&mm::ble_advertisement::productCodeForModel);
+        // A garment on BLE alone is set up from the phone with the same catalogue the dashboard offers.
+        if (nebuliteProduct) ble->setProductProfiles(&mm::ble_product_profiles::state, &mm::ble_product_profiles::names);
         ble->markWiredByCode();
         servicesModule->addChild(ble);
 

@@ -101,7 +101,7 @@ Every other request requires `$e`, nonzero uint32 `$s`, `$v:1`, `$id:1..65535` a
 
 `state` contains available actual master `on`, `brightness`, numeric `palette`, `wifiEnabled` and `ambientTarget`. Missing controls remain omitted; `ambientTarget` is null without an active valid sensor override. `ambient` names the enabled ambient-light service and its `automatic` switch, which a `patch` of `{"Services":{"<service>":{"automatic":false}}}` turns off; it is absent without such a service. `queued:true` means a job waits for its deadline. During preparation it becomes false while `pending.state` is `applying`; it does not prove completion.
 
-`info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired`, `profileOp` and `wifiOp` in its common envelope. The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
+`info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired`, `profileOp` and `wifiOp` in its common envelope, and `setupOp` on a firmware that offers [product setup](#product-setup). The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
 
 An `info` exchange from the source candidate, with illustrative session and time values:
 
@@ -187,6 +187,18 @@ Read `secure` about once a second until `link` leaves `pairing`, allowing the ti
 ```
 
 The product's Wi-Fi switch is the `Network.wifiEnabled` patch under [Live and saved changes](#live-and-saved-changes). A build without a network module reports `info.wifiOp:false` and fails these operations with `wifi-unavailable`. Malformed fields fail `ssid`, `password`, `offset` or `fields` before any join starts. `secure` arrived with `wifiOp`, so `info.wifiOp:true` also means `secure` is there.
+
+## Product setup
+
+A NEBULITE firmware boots with Wi-Fi off, so the phone sets a garment up over BLE with the same [device-model catalogue](../../mooninstaller/deviceModels.json) the dashboard offers. When `info.setupOp` is true, `profiles` lists the setup choices that name the running firmware and chip, and `setup` applies one by name:
+
+```json
+{"$v":1,"$id":40,"$op":"profiles","$e":"00112233445566778899aabbccddeeff","$s":1}
+{"v":1,"id":40,"ok":true,"now":1000,"e":"00112233445566778899aabbccddeeff","s":1,"r":9,"op":"profiles","models":["NEBULITE Croptop ESP32","NEBULITE Fanny pack ESP32","NEBULITE Backpack ESP32","NEBULITE Jacket ESP32"],"queued":false,"group":"","pending":null,"terminal":null}
+{"$v":1,"$id":41,"$op":"setup","$model":"NEBULITE Croptop ESP32","$live":false,"$e":"00112233445566778899aabbccddeeff","$s":1}
+```
+
+`setup` takes only `$model`, `$live`, `$at` and `$group`. It applies the profile's `System.deviceModel`, `Drivers` and `Layouts` document as a saved change, through the same pending, terminal and readback contract as `patch`. An unknown or unfitting name fails `model` before anything changes; any other field fails `fields`. `profile` and `info.model` then report the selected model. The compiled table is generated together with the dashboard's by `uv run moondeck/build/gen_product_profiles.py`.
 
 ## Complete scenes and their controls
 

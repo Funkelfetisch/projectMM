@@ -6,7 +6,9 @@ The shared codebase currently has separate HELIO and NEBULITE firmware targets. 
 
 Applying a choice sends one native state document containing only `System.deviceModel`, `Drivers` and `Layouts`. Output and layout children follow the selected profile and are explicitly enabled. The parent groups' enabled state is preserved. Radio, battery, audio, effects, groups and preset configuration are outside this operation. The dashboard confirms the actual model, enabled outputs, output settings and layout before reporting success; a model name alone is insufficient. An uncertain write response exposes a readback action rather than automatically replaying the write. The general state API has no atomic configuration precondition for concurrent setup clients.
 
-The generated browser table is checked against the catalogue when bundling. Regenerate it with `uv run moondeck/build/gen_product_profiles.py` after changing these product entries.
+The phone applies the same choices over BLE with the `setup` operation ([product BLE](product-ble.md#product-setup)), since a NEBULITE firmware boots with Wi-Fi off. The generated browser table and its firmware twin `src/helio/ProductProfiles.h` are checked against the catalogue when bundling. Regenerate both with `uv run moondeck/build/gen_product_profiles.py` after changing these product entries.
+
+The four 2021 ESP32 products follow the NEBULITE Smart ESP32 v0.5.0 source (`Funkelfetisch/NEBULITE-Smart` 9fbc10e1, `src/neopixel.cpp`): Croptop 8 and Fanny pack 4 RGB pixels on GPIO26, Backpack 6 on GPIO26 mirrored on GPIO17 and laid out as two columns down and back up, Jacket 50 split 19, 19 and 12 over GPIO26, GPIO17 and GPIO18. Each awaits physical qualification on its controller.
 
 ## Source profiles and manual white
 

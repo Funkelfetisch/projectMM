@@ -47,6 +47,8 @@ public:
     void setOutputReader(const char* (*reader)(JsonSink&, Scheduler&, uint16_t, const char*)) { outputReader_ = reader; }
     /// Product-supplied, bounded snapshot of rendered output colors.
     void setPreviewFrameReader(const char* (*reader)(JsonSink&, Scheduler&, uint16_t, const char*, uint32_t)) { previewFrameReader_ = reader; }
+    /// Product-supplied setup profiles: the state document of a named profile that fits this firmware and chip (null otherwise), and the names that do.
+    void setProductProfiles(const char* (*state)(const char*), void (*names)(JsonSink&)) { profileState_ = state; profileNames_ = names; }
     /// The product owner supplies installed profile metadata; an absent profile remains unknown.
     void setAdvertisingProduct(BleAdvertisementProduct product) { advertisingProduct_ = product; }
     void setAdvertisingProductResolver(uint8_t (*resolve)(const char*)) { advertisingProductResolver_ = resolve; }
@@ -400,9 +402,14 @@ private:
             std::snprintf(group, sizeof(group), "%s", requested); markDirty(); if (scheduler_) scheduler_->noteDirty(); get(id); return;
         }
         if (std::strcmp(op, "secure") == 0) { secure(id); return; }
+        if (std::strcmp(op, "profiles") == 0) {
+            if (!profileNames_) { result(id, "profiles-unavailable"); return; }
+            JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr); sink.append(",\"models\":"); profileNames_(sink); end(sink, id);
+            return;
+        }
         if (std::strcmp(op, "wifi") == 0 || std::strcmp(op, "wifi-scan") == 0 || std::strcmp(op, "wifi-join") == 0) { wifi(doc, id, op); return; }
-        const bool scene = std::strcmp(op, "scene") == 0;
-        if (!scene && std::strcmp(op, "patch") != 0) { result(id, "operation"); return; }
+        const bool scene = std::strcmp(op, "scene") == 0, setup = std::strcmp(op, "setup") == 0;
+        if (!scene && !setup && std::strcmp(op, "patch") != 0) { result(id, "operation"); return; }
         if (job_.phase != Phase::None) { result(id, "busy"); return; }
         const auto* live = json::member(doc, doc.rootNode(), "$live");
         if (!live || live->type != json::JsonType::Bool) { result(id, "live-required"); return; }
@@ -413,6 +420,9 @@ private:
             char controls[513]; if (!sceneControls(doc, controls)) { result(id, "controls"); return; }
             const auto checked = scenes_->validate(*scheduler_, text(doc, "$scene"), text(doc, "$catalog"), controls);
             if (!checked.ok) { result(id, checked.error); return; }
+        } else if (setup) {
+            const char* model = text(doc, "$model");
+            if (!profileState_ || !model || !profileState_(model)) { result(id, "model"); return; }
         } else if (!scope(doc)) { result(id, "scope"); return; }
         uint32_t due = now;
         if (json::member(doc, doc.rootNode(), "$at") && !number(doc, "$at", due)) { result(id, "time"); return; }
@@ -439,8 +449,9 @@ private:
             if (!key) return false;
             if (!std::strcmp(key, "$v") || !std::strcmp(key, "$e") || !std::strcmp(key, "$s") ||
                 !std::strcmp(key, "$id") || !std::strcmp(key, "$op")) continue;
-            const bool patch = !std::strcmp(op, "patch"), scene = !std::strcmp(op, "scene");
-            if ((patch || scene) && (!std::strcmp(key, "$live") || !std::strcmp(key, "$at") || !std::strcmp(key, "$group"))) continue;
+            const bool patch = !std::strcmp(op, "patch"), scene = !std::strcmp(op, "scene"), setup = !std::strcmp(op, "setup");
+            if ((patch || scene || setup) && (!std::strcmp(key, "$live") || !std::strcmp(key, "$at") || !std::strcmp(key, "$group"))) continue;
+            if (setup && !std::strcmp(key, "$model")) continue;
             if (scene && (!std::strcmp(key, "$scene") || !std::strcmp(key, "$catalog") || !std::strcmp(key, "controls"))) continue;
             if (patch && key[0] != '$') continue;
             if (!std::strcmp(op, "group") && !std::strcmp(key, "$group")) continue;
@@ -480,6 +491,12 @@ private:
             json::JsonDoc doc; char controls[513];
             if (!json::parse(document, doc) || !sceneControls(doc, controls)) { finish("controls"); return; }
             applied = scenes_->apply(*scheduler_, text(doc, "$scene"), text(doc, "$catalog"), controls, job_.live);
+        } else if (std::strcmp(job_.operation, "setup") == 0) {
+            // A product profile is wiring, never a live preview: it is saved like the dashboard's setup.
+            json::JsonDoc doc;
+            const char* state = json::parse(document, doc) && profileState_ ? profileState_(text(doc, "$model")) : nullptr;
+            if (!state) { finish("model"); return; }
+            applied = applyStateDocument(*scheduler_, state, StateSource::Request);
         } else applied = applyStateDocument(*scheduler_, document, job_.live ? StateSource::Live : StateSource::Request);
         if (!applied.ok) { finish(applied.error); return; }
         if (scheduler_->preparationPending()) { job_.phase = Phase::Applying; job_.preparedAt = before; get(job_.id); }
@@ -663,6 +680,7 @@ private:
                          current == startedBatteries_ ? "false" : "true", pixelMapReader_ ? "true" : "false", platform::hasWiFi && networkModule() ? "true" : "false");
             if (outputReader_) sink.append(",\"outputsOp\":true");
             if (previewFrameReader_) sink.append(",\"previewFrameOp\":true");
+            if (profileState_ && profileNames_) sink.append(",\"setupOp\":true");
         }
         end(sink, id);
     }
@@ -720,6 +738,8 @@ private:
     uint8_t (*advertisingProductResolver_)(const char*) = nullptr;
     void (*advertisingScene_)(BleAdvertisementSnapshot&, Scheduler&) = nullptr;
     const char* (*previewFrameReader_)(JsonSink&, Scheduler&, uint16_t, const char*, uint32_t) = nullptr;
+    const char* (*profileState_)(const char*) = nullptr;
+    void (*profileNames_)(JsonSink&) = nullptr;
     const char* (*outputReader_)(JsonSink&, Scheduler&, uint16_t, const char*) = nullptr;
     const char* (*pixelMapReader_)(JsonSink&, Scheduler&, uint16_t, const char*) = nullptr;
     const char* firmware_ = "MoonLight";

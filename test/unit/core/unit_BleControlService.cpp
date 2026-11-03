@@ -1,4 +1,5 @@
 /// @module BleControlService
+#include "helio/BleProductProfiles.h"
 #include "doctest.h"
 #include "core/services/BleControlService.h"
 #include "helio/BleAdvertisementRegistry.h"
@@ -501,6 +502,51 @@ TEST_CASE("BLE get names the ambient-light service and its automatic switch, so 
     ambient->setEnabled(false);
     tree.send(R"({"$v":1,"$id":24,"$op":"get"})", 100);
     CHECK(tree.reply().find("\"ambient\":") == std::string::npos);
+}
+
+namespace {
+const char* fakeProfileState(const char* model) {
+    return model && std::strcmp(model, "Test Garment") == 0 ? R"({"Drivers":{"brightness":77}})" : nullptr;
+}
+void fakeProfileNames(mm::JsonSink& sink) { sink.append(R"(["Test Garment"])"); }
+}  // namespace
+
+TEST_CASE("BLE setup applies a named product profile, so a garment with Wi-Fi off is set up from the phone") {
+    BleTree tree;
+    tree.send(R"({"$v":1,"$id":30,"$op":"profiles"})", 100);
+    CHECK(tree.reply().find("profiles-unavailable") != std::string::npos);
+
+    tree.service.setProductProfiles(&fakeProfileState, &fakeProfileNames);
+    tree.send(R"({"$v":1,"$id":31,"$op":"info"})", 100);
+    CHECK(tree.reply().find(R"("setupOp":true)") != std::string::npos);
+    tree.send(R"({"$v":1,"$id":32,"$op":"profiles"})", 100);
+    CHECK(tree.reply().find(R"("models":["Test Garment"])") != std::string::npos);
+
+    tree.send(R"({"$v":1,"$id":33,"$op":"setup","$model":"Other","$live":false})", 100);
+    CHECK(replyString(tree.reply(), "error") == "model");
+    tree.send(R"({"$v":1,"$id":34,"$op":"setup","$model":"Test Garment","$live":false,"Drivers":{"brightness":5}})", 100);
+    CHECK(replyString(tree.reply(), "error") == "fields");
+    CHECK(tree.drivers->brightness == 255);
+
+    tree.send(R"({"$v":1,"$id":35,"$op":"setup","$model":"Test Garment","$live":false})", 100);
+    tree.finishPrepare(100);
+    CHECK(tree.drivers->brightness == 77);
+}
+
+TEST_CASE("BLE setup offers only the catalogue products that name this firmware and chip") {
+    namespace profiles = mm::ble_product_profiles;
+    CHECK(profiles::lists("nebulite-s3,nebulite-esp32", "nebulite-esp32"));
+    CHECK_FALSE(profiles::lists("nebulite-s3", "nebulite"));
+    CHECK(profiles::stateFor("NEBULITE Croptop ESP32", "nebulite-esp32", "ESP32") != nullptr);
+    CHECK(profiles::stateFor("NEBULITE Croptop ESP32", "nebulite-s3", "ESP32-S3") == nullptr);
+    CHECK(profiles::stateFor("NEBULITE Croptop ESP32", "nebulite-esp32", "ESP32-S3") == nullptr);
+    char buffer[512];
+    mm::JsonSink sink(buffer, sizeof(buffer));
+    profiles::writeNames(sink, "nebulite-esp32", "ESP32");
+    const std::string names(buffer, sink.size());
+    for (const char* product : {"NEBULITE Croptop ESP32", "NEBULITE Fanny pack ESP32", "NEBULITE Backpack ESP32", "NEBULITE Jacket ESP32"})
+        CHECK(names.find(product) != std::string::npos);
+    CHECK(names.find("S3") == std::string::npos);
 }
 
 TEST_CASE("BLE RPC2 new central sessions distinguish same-ID reads from a retained old-central result") {

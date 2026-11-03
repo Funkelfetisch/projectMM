@@ -2054,6 +2054,157 @@
     }
   },
   {
+    "name": "NEBULITE Fanny pack ESP32",
+    "chip": "ESP32",
+    "firmwares": [
+      "nebulite-esp32"
+    ],
+    "description": "Source: NEBULITE Smart ESP32 v0.5.0 (Funkelfetisch/NEBULITE-Smart 9fbc10e1, src/neopixel.cpp): four RGB pixels on GPIO26. Verify LED wiring, power and recovery on the actual controller before use; battery and charging are not configured.",
+    "supported": [
+      "LEDs"
+    ],
+    "planned": [
+      "Battery",
+      "Charging"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "NEBULITE Fanny pack ESP32"
+      },
+      "Drivers": {
+        "$patch": "replace",
+        "RGB1": {
+          "type": "RmtLedDriver",
+          "pins": "26",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "4"
+        }
+      },
+      "Layouts": {
+        "$patch": "replace",
+        "ProductStrip": {
+          "type": "GridLayout",
+          "width": 4,
+          "height": 1,
+          "depth": 1
+        }
+      }
+    }
+  },
+  {
+    "name": "NEBULITE Backpack ESP32",
+    "chip": "ESP32",
+    "firmwares": [
+      "nebulite-esp32"
+    ],
+    "description": "Source: NEBULITE Smart ESP32 v0.5.0 (Funkelfetisch/NEBULITE-Smart 9fbc10e1, src/neopixel.cpp): six RGB pixels on GPIO26, mirrored on GPIO17, down one side and back up the other. Verify LED wiring, power and recovery on the actual controller before use; battery and charging are not configured.",
+    "supported": [
+      "LEDs"
+    ],
+    "planned": [
+      "Battery",
+      "Charging"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "NEBULITE Backpack ESP32"
+      },
+      "Drivers": {
+        "$patch": "replace",
+        "RGB1": {
+          "type": "RmtLedDriver",
+          "pins": "26",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "6"
+        },
+        "RGB2": {
+          "type": "RmtLedDriver",
+          "pins": "17",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "6"
+        }
+      },
+      "Layouts": {
+        "$patch": "replace",
+        "ProductStrip": {
+          "type": "GridLayout",
+          "width": 3,
+          "height": 2,
+          "depth": 1,
+          "serpentine": true
+        }
+      }
+    }
+  },
+  {
+    "name": "NEBULITE Jacket ESP32",
+    "chip": "ESP32",
+    "firmwares": [
+      "nebulite-esp32"
+    ],
+    "description": "Source: NEBULITE Smart ESP32 v0.5.0 (Funkelfetisch/NEBULITE-Smart 9fbc10e1, src/neopixel.cpp): fifty RGB pixels, 19 on GPIO26, 19 on GPIO17 and 12 on GPIO18. Verify LED wiring, power and recovery on the actual controller before use; battery and charging are not configured.",
+    "supported": [
+      "LEDs"
+    ],
+    "planned": [
+      "Battery",
+      "Charging"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "NEBULITE Jacket ESP32"
+      },
+      "Drivers": {
+        "$patch": "replace",
+        "RGB1": {
+          "type": "RmtLedDriver",
+          "pins": "26",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "19"
+        },
+        "RGB2": {
+          "type": "RmtLedDriver",
+          "pins": "17",
+          "fixture": "RGB",
+          "start": 19,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "19"
+        },
+        "RGB3": {
+          "type": "RmtLedDriver",
+          "pins": "18",
+          "fixture": "RGB",
+          "start": 38,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "12"
+        }
+      },
+      "Layouts": {
+        "$patch": "replace",
+        "ProductStrip": {
+          "type": "GridLayout",
+          "width": 50,
+          "height": 1,
+          "depth": 1
+        }
+      }
+    }
+  },
+  {
     "name": "NEBULITE Croptop S3",
     "chip": "ESP32-S3",
     "firmwares": [
