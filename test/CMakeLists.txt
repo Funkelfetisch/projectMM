@@ -7,8 +7,8 @@ add_executable(mm_tests
     # core/
     unit/core/unit_PartitionTables.cpp
     unit/core/unit_SpscRing.cpp
+    unit/core/unit_BleUpdateStream.cpp
     unit/core/unit_BleControlService.cpp
-    unit/core/unit_Base64.cpp
     unit/core/unit_BleRemoteService.cpp
     unit/light/unit_HelioRemoteService.cpp
     unit/light/unit_MiniLedPowerSequence.cpp

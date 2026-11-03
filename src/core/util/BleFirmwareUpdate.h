@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-#include "core/system/Base64.h"
 #include "core/util/FirmwareAuthorizedBackend.h"
 #include "core/util/FirmwareReleasePolicy.h"
 #include "core/util/FirmwareSlot.h"
@@ -17,9 +16,7 @@ namespace mm {
 /// One firmware transfer over BLE: a release the publisher signed, the inactive slot, and an ordered upload bound to the connection that began it; every refusal is the `ota-*` name the reply carries.
 class BleFirmwareUpdate {
 public:
-    /// The largest image chunk a write carries; its base64 text fills the 512-byte request with the envelope.
-    static constexpr size_t kChunkBytes = 288;
-    /// A transfer with no write for this long is abandoned.
+    /// A transfer that stores nothing for this long is abandoned.
     static constexpr uint32_t kIdleTimeoutMs = 30000;
 
     /// Why an operation refused, each the wire's `ota-*` name.
@@ -66,14 +63,11 @@ public:
         return Error::None;
     }
 
-    /// Append one chunk, `data` being its base64 text; `received` is the byte count held after an accepted write or an offset mismatch.
-    Error write(uint64_t owner, uint32_t offset, std::string_view data, uint32_t now, uint32_t& received) {
-        uint8_t chunk[kChunkBytes];
-        size_t length = 0;
-        if (!base64Decode(data, chunk, length) || !length) return Error::Invalid;
-        const Result result = session_.append(owner, offset, chunk, length);
+    /// Store `length` streamed image bytes at `offset` for `owner`; `received` is the byte count held afterwards, whatever the result.
+    Error append(uint64_t owner, uint32_t offset, const uint8_t* bytes, size_t length, uint32_t now, uint32_t& received) {
+        const Result result = session_.append(owner, offset, bytes, length);
         if (result == Result::Ok) session_.noteProgress(owner, now);
-        if (result == Result::Ok || result == Result::Offset) received = static_cast<uint32_t>(session_.received());
+        received = static_cast<uint32_t>(session_.received());
         return map(result);
     }
 
@@ -86,6 +80,8 @@ public:
 
     /// Whether a transfer is open.
     bool active() const { return session_.active(); }
+    /// The image bytes the open transfer holds.
+    uint32_t received() const { return static_cast<uint32_t>(session_.received()); }
     /// The connection that began the running transfer; meaningful while `active()`.
     uint64_t owner() const { return owner_; }
 

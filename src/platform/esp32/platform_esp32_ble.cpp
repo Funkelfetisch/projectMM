@@ -3,6 +3,7 @@
 #include "core/util/BleMessage.h"
 #include "core/util/SpscRing.h"
 #include "core/util/BlePeerTable.h"
+#include "core/util/BleUpdateStream.h"
 #include "platform/esp32/BleAdvertisementRefresh.h"
 #include "platform/esp32/BleConnectionPolicy.h"
 #include "platform/esp32/BlePeerDisconnect.h"
@@ -43,6 +44,7 @@ const ble_uuid128_t serviceUuid = BLE_UUID128_INIT(0x19,0x18,0x8c,0x2c,0x19,0x13
 const ble_uuid128_t stateUuid = BLE_UUID128_INIT(0x19,0x18,0x8c,0x2c,0x19,0x13,0x9b,0x88,0x7a,0x4f,0xeb,0xa2,0x01,0x07,0xe3,0xbe);
 const ble_uuid128_t commandUuid = BLE_UUID128_INIT(0x19,0x18,0x8c,0x2c,0x19,0x13,0x9b,0x88,0x7a,0x4f,0xeb,0xa2,0x02,0x07,0xe3,0xbe);
 const ble_uuid128_t identityUuid = BLE_UUID128_INIT(0x19,0x18,0x8c,0x2c,0x19,0x13,0x9b,0x88,0x7a,0x4f,0xeb,0xa2,0x03,0x07,0xe3,0xbe);
+const ble_uuid128_t dataUuid = BLE_UUID128_INIT(0x19,0x18,0x8c,0x2c,0x19,0x13,0x9b,0x88,0x7a,0x4f,0xeb,0xa2,0x04,0x07,0xe3,0xbe);
 const ble_uuid16_t batteryServiceUuid = BLE_UUID16_INIT(0x180F);
 const ble_uuid16_t batteryLevelUuid = BLE_UUID16_INIT(0x2A19);
 const ble_uuid16_t batteryFormatUuid = BLE_UUID16_INIT(0x2904);
@@ -82,7 +84,7 @@ struct Peripheral {
     std::atomic<int32_t> lastDisconnectReason{-1}, lastUpdateStatus{-1};
     std::atomic<uint32_t> missingPeerReads{0}, unsupportedAccess{0};
     bool abandoned = false; // scheduler task only: service destroyed after a failed stop
-    ble_gatt_chr_def characteristics[4] = {};
+    ble_gatt_chr_def characteristics[5] = {};
     BleRepeatPairing repeatPairing;
     std::atomic<uint32_t> repeatRequests{0}, repeatDeleted{0}, repeatRejected{0};
     std::atomic<uint32_t> fullAllowed{0}, fullRejected{0}, overflows{0}, fullUnknown{0};
@@ -96,6 +98,11 @@ struct Peripheral {
     uint32_t advertisementAt = 0;
     bool advertisementSet = false;
     BatteryGatt* batteries = nullptr;
+    std::atomic<BleUpdateStream*> updateStream{nullptr};  ///< fed by the data characteristic while an update runs
+    uint16_t dataHandle = 0;
+    /// The latest acknowledgement for the update's central, sent from the host task.
+    struct { uint16_t connection = BLE_HS_CONN_HANDLE_NONE; std::array<uint8_t, 9> bytes{}; } updateAck;
+    ble_npl_event updateAcked;
     ~Peripheral() { delete batteries; }
 };
 Peripheral* active = nullptr;  // one radio, claimed during prepare and released after the host stops
@@ -350,6 +357,19 @@ int accessValue(uint16_t connection, uint16_t, ble_gatt_access_ctxt* context, vo
     return os_mbuf_append(context->om, bytes, static_cast<uint16_t>(std::strlen(bytes))) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+// Each write without response to the data characteristic is one packet for the stream an update handed over; a packet from any other central, or with none handed over, is dropped.
+int accessData(uint16_t connection, uint16_t, ble_gatt_access_ctxt* context, void* arg) {
+    auto* peripheral = static_cast<Peripheral*>(arg);
+    if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    uint8_t bytes[BLE_ATT_ATTR_MAX_LEN];
+    uint16_t count = 0;
+    if (ble_hs_mbuf_to_flat(context->om, bytes, sizeof(bytes), &count) != 0) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    std::lock_guard<std::mutex> lock(peripheral->mutex);
+    const uint64_t generation = peripheral->peers.generation(connection);
+    if (auto* stream = peripheral->updateStream.load(std::memory_order_acquire); stream && generation) stream->accept(generation, bytes, count);
+    return 0;
+}
+
 int accessBattery(uint16_t, uint16_t, ble_gatt_access_ctxt* context, void* arg) {
     auto* slot = static_cast<BatterySlot*>(arg);
     if (context->op == BLE_GATT_ACCESS_OP_READ_DSC)
@@ -430,6 +450,18 @@ void notifyChanged(ble_npl_event* event) {
     for (size_t n = 0; n < count; ++n)
         if (os_mbuf* buffer = ble_hs_mbuf_from_flat(bytes, sizeof(bytes)))
             ble_gatts_notify_custom(targets[n], peripheral->valueHandle, buffer);
+}
+
+void notifyUpdateAck(ble_npl_event* event) {
+    auto* peripheral = static_cast<Peripheral*>(ble_npl_event_get_arg(event));
+    uint16_t connection = BLE_HS_CONN_HANDLE_NONE;
+    std::array<uint8_t, 9> bytes{};
+    { std::lock_guard<std::mutex> lock(peripheral->mutex);
+      connection = peripheral->updateAck.connection; bytes = peripheral->updateAck.bytes;
+      peripheral->updateAck.connection = BLE_HS_CONN_HANDLE_NONE; }
+    if (connection == BLE_HS_CONN_HANDLE_NONE) return;
+    if (os_mbuf* buffer = ble_hs_mbuf_from_flat(bytes.data(), bytes.size()))
+        ble_gatts_notify_custom(connection, peripheral->dataHandle, buffer);
 }
 
 // The peripheral asks; the central runs the pairing, and its verdict arrives as BLE_GAP_EVENT_ENC_CHANGE.
@@ -540,6 +572,10 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     auto& info = peripheral->characteristics[2];
     info.uuid = &identityUuid.u; info.access_cb = accessValue; info.arg = peripheral;
     info.flags = BLE_GATT_CHR_F_READ;
+    auto& data = peripheral->characteristics[3];
+    data.uuid = &dataUuid.u; data.access_cb = accessData; data.arg = peripheral;
+    data.flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY;
+    data.val_handle = &peripheral->dataHandle;
     peripheral->services[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
     peripheral->services[0].uuid = &serviceUuid.u;
     peripheral->services[0].characteristics = peripheral->characteristics;
@@ -557,6 +593,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_npl_event_init(&peripheral->changed, notifyChanged, peripheral);
     ble_npl_event_init(&peripheral->advertisementChanged, advertisementChanged, peripheral);
     ble_npl_event_init(&peripheral->secure, requestSecurity, peripheral);
+    ble_npl_event_init(&peripheral->updateAcked, notifyUpdateAck, peripheral);
     handle.impl = peripheral;
     nimble_port_freertos_init(hostTask);
     return true;
@@ -671,6 +708,38 @@ bool bleControlAllowRepair(BleControlHandle& handle) MM_NONBLOCKING {
     std::unique_lock<std::mutex> lock(peripheral->mutex, std::try_to_lock);
     if (!lock.owns_lock() || !BleRepeatPairing::mayArm(observed, peripheral->connection.load(), peripheral->connectionCount.load())) return false;
     peripheral->repeatPairing.arm(pairingTimeMs());
+    return true;
+}
+
+bool bleControlUpdateStream(BleControlHandle& handle, BleUpdateStream* stream) MM_NONBLOCKING {
+    auto* peripheral = static_cast<Peripheral*>(handle.impl);
+    if (!peripheral) return false;
+    peripheral->updateStream.store(stream, std::memory_order_release);
+    return true;
+}
+
+void bleControlUpdateRelease(BleControlHandle& handle) {
+    auto* peripheral = static_cast<Peripheral*>(handle.impl);
+    if (!peripheral) return;
+    // The host task feeds the stream under this lock, so once it is taken no packet is still in flight.
+    std::lock_guard<std::mutex> lock(peripheral->mutex);
+    peripheral->updateStream.store(nullptr, std::memory_order_release);
+}
+
+bool bleControlUpdateAck(BleControlHandle& handle, uint64_t generation, uint32_t stored, uint32_t asked, bool failed) MM_NONBLOCKING {
+    auto* peripheral = static_cast<Peripheral*>(handle.impl);
+    if (!peripheral) return false;
+    std::unique_lock<std::mutex> lock(peripheral->mutex, std::try_to_lock);
+    uint16_t connection = BLE_HS_CONN_HANDLE_NONE;
+    if (!lock.owns_lock() || !peripheral->peers.security(generation, connection)) return false;
+    auto& ack = peripheral->updateAck;
+    ack.connection = connection;
+    for (uint8_t i = 0; i < 4; ++i) {
+        ack.bytes[i] = static_cast<uint8_t>(stored >> (i * 8));
+        ack.bytes[4 + i] = static_cast<uint8_t>(asked >> (i * 8));
+    }
+    ack.bytes[8] = failed ? 1 : 0;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->updateAcked);
     return true;
 }
 

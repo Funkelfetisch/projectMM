@@ -2,6 +2,7 @@
 #include "helio/BleProductProfiles.h"
 #include "doctest.h"
 #include "core/services/BleControlService.h"
+#include "core/util/BleUpdateStream.h"
 #include "helio/BleAdvertisementRegistry.h"
 #include "helio/BlePixelMapPage.h"
 #include "light/layouts/Layouts.h"
@@ -9,7 +10,6 @@
 #include "core/system/ControlModule.h"
 #include "core/util/ModuleFactory.h"
 #include "core/util/BlePeerTable.h"
-#include "core/system/Base64.h"
 #include "core/util/fnv.h"
 #include "core/util/sha256.h"
 #include "platform/platform.h"
@@ -1591,12 +1591,6 @@ struct FakeSlot : mm::FirmwareSlot {
 int otaRestarts = 0;
 void countOtaRestart() { ++otaRestarts; }
 
-std::string base64Of(const uint8_t* bytes, size_t count) {
-    std::vector<char> text((count + 2) / 3 * 4 + 1);
-    mm::base64Encode({bytes, count}, text);
-    return text.data();
-}
-
 // Two phones: [0] the default connection and [1] a second central, each with its own session and request ids.
 struct OtaTree {
     FakeSlot slot;   // declared first so it outlives the service that aborts into it
@@ -1608,6 +1602,7 @@ struct OtaTree {
     uint32_t at(uint32_t now) { if (now) clock = now; return clock; }
     explicit OtaTree(bool available = true) {
         otaRestarts = 0;
+        mm::platform::takeTestBleUpdateAcks();
         mm::platform::setTestFirmwareSignatureCheck(&otaSignatureCheck);
         tree.service.setIdentity("nebulite-esp32", "f5a244a9+", "7.0.0", "Nov  3 2026 10:00:00");
         if (available) { tree.service.setFirmwareRelease(kOtaKey, kOtaSecurityVersion); tree.service.setFirmwareSlotForTest(&slot); }
@@ -1632,17 +1627,34 @@ struct OtaTree {
     std::string begin(const OtaRelease& release, uint32_t now = 0) {
         return call("ota-begin", ",\"$claims\":\"" + release.claims + "\",\"$sig\":\"" + release.signature + "\"", now);
     }
-    std::string write(const OtaRelease& release, size_t offset, size_t count, uint32_t now = 0) {
-        return write(offset, release.image.data() + offset, count, now);
+    // One packet on the update data characteristic as the current phone writes it: the offset, bit 31 asking for an acknowledgement, then the bytes.
+    bool packet(size_t offset, const uint8_t* bytes, size_t count, bool ask = false) {
+        std::vector<uint8_t> frame(4 + count);
+        const uint32_t word = static_cast<uint32_t>(offset) | (ask ? mm::BleUpdateStream::kAckRequest : 0u);
+        for (size_t i = 0; i < 4; ++i) frame[i] = static_cast<uint8_t>(word >> (8 * i));
+        std::copy(bytes, bytes + count, frame.begin() + 4);
+        return tree.service.streamForTest(peers[current].generation, frame.data(), frame.size());
     }
-    std::string write(size_t offset, const uint8_t* bytes, size_t count, uint32_t now = 0) {
-        return call("ota-write", ",\"$offset\":" + std::to_string(offset) + ",\"$data\":\"" + base64Of(bytes, count) + "\"", now);
+    // One tick: the service stores what was streamed; the acknowledgements it sent.
+    std::vector<mm::platform::BleUpdateAck> drain(uint32_t now = 0) { tree.service.applyDue(at(now)); return mm::platform::takeTestBleUpdateAcks(); }
+    // A window as the phone streams it, in packets of up to 508 bytes whose last asks, then one tick; the acknowledgements.
+    std::vector<mm::platform::BleUpdateAck> stream(size_t offset, const uint8_t* bytes, size_t count, uint32_t now = 0) {
+        for (size_t done = 0; done < count; done += 508) {
+            const size_t n = std::min<size_t>(508, count - done);
+            packet(offset + done, bytes + done, n, done + n == count);
+        }
+        return drain(now);
     }
-    // Every chunk of the image in order; the reply of the last write.
-    std::string writeAll(const OtaRelease& release, uint32_t now = 0) {
-        std::string last;
-        for (size_t offset = 0; offset < release.image.size(); offset += 288)
-            last = write(release, offset, std::min<size_t>(288, release.image.size() - offset), now);
+    std::vector<mm::platform::BleUpdateAck> stream(const OtaRelease& release, size_t offset, size_t count, uint32_t now = 0) {
+        return stream(offset, release.image.data() + offset, count, now);
+    }
+    // What the one acknowledgement in `acks` says is stored; -1 when there is not exactly one, or it reports a failure.
+    static long stored(const std::vector<mm::platform::BleUpdateAck>& acks) { return acks.size() == 1 && !acks[0].failed ? acks[0].stored : -1; }
+    // Every window of the image in order; what the last acknowledgement says is stored.
+    long streamAll(const OtaRelease& release, uint32_t now = 0) {
+        long last = -1;
+        for (size_t offset = 0; offset < release.image.size(); offset += 4096)
+            last = stored(stream(release, offset, std::min<size_t>(4096, release.image.size() - offset), now));
         return last;
     }
     static bool ok(const std::string& reply) { return reply.find("\"ok\":true") != std::string::npos; }
@@ -1668,7 +1680,7 @@ TEST_CASE("BLE firmware update is advertised only where this build can take one"
         CHECK(std::string(text).find("\"bleOta\":false") != std::string::npos);
         const auto info = off.call("info");
         CHECK(info.find("otaTarget") == std::string::npos);
-        CHECK(info.find("otaChunk") == std::string::npos);
+        CHECK(info.find("otaWindow") == std::string::npos);
         CHECK(OtaTree::error(off.call("ota-status")) == "operation");
     }
     {
@@ -1699,7 +1711,7 @@ TEST_CASE("BLE firmware update is advertised only where this build can take one"
     const auto info = on.call("info");
     CHECK(replyNumber(info, "otaTarget") == kOtaEsp32Target);
     CHECK(replyNumber(info, "securityVersion") == kOtaSecurityVersion);
-    CHECK(replyNumber(info, "otaChunk") == 288);
+    CHECK(replyNumber(info, "otaWindow") == 4096);
     CHECK(replyNumber(info, "otaSlotBytes") == 4096);
 }
 
@@ -1727,37 +1739,31 @@ TEST_CASE("BLE info with every capability and the update fields still fits the 5
     const auto reply = on.call("info");
     CHECK(OtaTree::ok(reply));
     CHECK(reply.find("\"setupOp\":true") != std::string::npos);
-    CHECK(reply.find("\"otaChunk\":288") != std::string::npos);
+    CHECK(reply.find("\"otaWindow\":4096") != std::string::npos);
     CHECK(reply.size() <= 512);
 }
 
-TEST_CASE("BLE firmware update: a request carrying a full 288-byte chunk fits the 512-byte request limit with the widest envelope") {
-    const auto image = otaImage(288);
-    const std::string request = "{\"$v\":1,\"$id\":65535,\"$op\":\"ota-write\",\"$e\":\"" + std::string(kBleTestEpoch) +
-                                "\",\"$s\":4294967295,\"$offset\":4294967295,\"$data\":\"" + base64Of(image.data(), image.size()) + "\"}";
-    CHECK(request.size() <= mm::BleMessage::kCapacity);
-    CHECK(mm::BleFirmwareUpdate::kChunkBytes == 288);
-}
-
-TEST_CASE("BLE firmware update: a signed release opens the slot and a transfer of ordered chunks commits it and schedules the restart") {
+TEST_CASE("BLE firmware update: a signed release opens the slot, the streamed image commits it, and the restart is scheduled") {
     OtaTree t;
-    const auto release = otaRelease(otaImage(700));
+    t.slot.room = 12288;
+    const auto release = otaRelease(otaImage(9000));
     CHECK(t.phase() == "idle");
 
     const auto begun = t.begin(release, 1000);
     REQUIRE(OtaTree::ok(begun));
-    CHECK(replyNumber(begun, "total") == 700);
-    CHECK(replyNumber(begun, "chunk") == 288);
+    CHECK(replyNumber(begun, "total") == 9000);
+    CHECK(replyNumber(begun, "window") == 4096);
     CHECK(t.slot.begins == 1);
     CHECK(t.phase() == "uploading");
 
-    CHECK(replyNumber(t.write(release, 0, 288, 1100), "received") == 288);
-    CHECK(replyNumber(t.write(release, 288, 288, 1200), "received") == 576);
+    // Each window is answered once everything up to its last packet is stored.
+    CHECK(OtaTree::stored(t.stream(release, 0, 4096, 1100)) == 4096);
+    CHECK(OtaTree::stored(t.stream(release, 4096, 4096, 1200)) == 8192);
     const auto status = t.call("ota-status", "", 1250);
     CHECK(replyString(status, "phase") == "uploading");
-    CHECK(replyNumber(status, "received") == 576);
-    CHECK(replyNumber(status, "total") == 700);
-    CHECK(replyNumber(t.write(release, 576, 124, 1300), "received") == 700);
+    CHECK(replyNumber(status, "received") == 8192);
+    CHECK(replyNumber(status, "total") == 9000);
+    CHECK(OtaTree::stored(t.stream(release, 8192, 808, 1300)) == 9000);
     CHECK(t.slot.commits == 0);
 
     const auto ended = t.call("ota-end", "", 3000);
@@ -1864,69 +1870,56 @@ TEST_CASE("BLE firmware update: another update holding the gate keeps this one o
     CHECK(t.slot.busy());
 }
 
-TEST_CASE("BLE firmware update: writes must be contiguous, and a refused offset says where the transfer stands") {
+TEST_CASE("BLE firmware update: a packet past what is held is dropped, and the answer says where to resume") {
     OtaTree t;
-    const auto release = otaRelease(otaImage(700));
+    const auto release = otaRelease(otaImage(3000));
     REQUIRE(OtaTree::ok(t.begin(release)));
-
-    auto skipped = t.write(release, 288, 288);   // chunk 2 before chunk 1
-    CHECK(OtaTree::error(skipped) == "ota-offset");
-    CHECK(replyNumber(skipped, "received") == 0);
-    CHECK(OtaTree::ok(t.write(release, 0, 288)));
-    auto repeated = t.write(release, 0, 288);   // chunk 1 again, as after a lost reply
-    CHECK(OtaTree::error(repeated) == "ota-offset");
-    CHECK(replyNumber(repeated, "received") == 288);
-    auto ahead = t.write(release, 576, 124);
-    CHECK(OtaTree::error(ahead) == "ota-offset");
-    CHECK(replyNumber(ahead, "received") == 288);
-    CHECK(replyNumber(t.write(release, 288, 288), "received") == 576);
-    CHECK(replyNumber(t.write(release, 576, 124), "received") == 700);
+    // The window's first packet is lost: the rest leave a gap, so the answer names what is stored.
+    t.packet(508, release.image.data() + 508, 508);
+    t.packet(1016, release.image.data() + 1016, 508, true);
+    CHECK(OtaTree::stored(t.drain()) == 0);
+    CHECK(t.slot.image.empty());
+    // The phone resends from there, and the transfer completes.
+    CHECK(OtaTree::stored(t.stream(release, 0, 1524)) == 1524);
+    CHECK(OtaTree::stored(t.stream(release, 1524, 1476)) == 3000);
     CHECK(OtaTree::ok(t.call("ota-end")));
     CHECK(t.slot.image == release.image);
 }
 
-TEST_CASE("BLE firmware update: a retried request replays its reply instead of writing the chunk twice") {
+TEST_CASE("BLE firmware update: a resent packet overlapping what is held stores nothing twice") {
     OtaTree t;
-    const auto release = otaRelease(otaImage(600));
+    const auto release = otaRelease(otaImage(1200));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    const std::string request = "{\"$v\":1,\"$id\":" + std::to_string(++t.peers[0].id) + ",\"$op\":\"ota-write\",\"$offset\":0,\"$data\":\"" +
-                                base64Of(release.image.data(), 288) + "\"}";
-    t.tree.send(request.c_str(), 1000);
-    const auto first = t.tree.reply();
-    REQUIRE(OtaTree::ok(first));
-    t.tree.send(request.c_str(), 1001);
-    CHECK(t.tree.reply() == first);
-    CHECK(t.slot.image.size() == 288);
+    CHECK(OtaTree::stored(t.stream(release, 0, 1000)) == 1000);
+    // The answer was lost, so the phone resends the window's last packet and is answered again.
+    CHECK(OtaTree::stored(t.stream(release, 492, 508)) == 1000);
+    // The next window overlaps what arrived; only the new bytes are stored.
+    CHECK(OtaTree::stored(t.stream(release, 800, 400)) == 1200);
+    CHECK(t.slot.image == release.image);
 }
 
-TEST_CASE("BLE firmware update: chunk data must be one to 288 bytes of canonical base64") {
+TEST_CASE("BLE firmware update: a packet too short to carry an offset and a byte is ignored") {
     OtaTree t;
     const auto release = otaRelease(otaImage(700));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    const auto bytes = otaImage(400);
-    CHECK(OtaTree::error(t.write(0, bytes.data(), 289)) == "ota-invalid");   // one over the declared chunk
-    CHECK(OtaTree::error(t.write(0, bytes.data(), 291)) == "ota-invalid");   // the most a 512-byte request can still frame
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"\"")) == "ota-invalid");
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"AAA\"")) == "ota-invalid");        // padding required
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"AA-_\"")) == "ota-invalid");       // not the standard alphabet
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":12")) == "ota-invalid");
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$data\":\"AAAA\"")) == "ota-invalid");                      // no offset
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":-1,\"$data\":\"AAAA\"")) == "ota-invalid");
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0.5,\"$data\":\"AAAA\"")) == "ota-invalid");
+    const uint8_t header[4] = {0, 0, 0, 0x80};
+    CHECK_FALSE(t.tree.service.streamForTest(0, header, sizeof(header)));
+    CHECK_FALSE(t.tree.service.streamForTest(0, nullptr, 0));
+    CHECK(t.drain().empty());
     CHECK(t.slot.image.empty());
-    CHECK(OtaTree::ok(t.write(release, 0, 288)));   // the largest declared chunk
-    CHECK(OtaTree::ok(t.write(release, 288, 1)));   // and the smallest
+    CHECK(OtaTree::stored(t.stream(release, 0, 1)) == 1);       // the smallest packet
+    CHECK(OtaTree::stored(t.stream(release, 1, 508)) == 509);   // and the largest one attribute holds
 }
 
 TEST_CASE("BLE firmware update: the connection that began a transfer owns it, and no other connection can touch it") {
     OtaTree t;
     const auto release = otaRelease(otaImage(600));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288)) == 288);
 
-    t.select(1);   // a second phone
-    CHECK(OtaTree::error(t.write(release, 288, 288)) == "ota-owner");
-    CHECK(OtaTree::error(t.write(release, 0, 288)) == "ota-owner");
+    t.select(1);   // a second phone: its packets are dropped and earn no answer
+    CHECK(t.stream(release, 288, 288).empty());
+    CHECK(t.stream(release, 0, 288).empty());
     CHECK(OtaTree::error(t.call("ota-end")) == "ota-owner");
     CHECK(OtaTree::error(t.call("ota-abort")) == "ota-owner");
     CHECK(OtaTree::error(t.begin(release)) == "ota-busy");
@@ -1939,13 +1932,13 @@ TEST_CASE("BLE firmware update: the connection that began a transfer owns it, an
     CHECK(t.phase() == "uploading");
     CHECK(t.slot.image.size() == 288);
     CHECK(t.slot.aborts == 0);
-    CHECK(replyNumber(t.write(release, 288, 288), "received") == 576);
+    CHECK(OtaTree::stored(t.stream(release, 288, 288)) == 576);
 }
 
 TEST_CASE("BLE firmware update: a connection that never began one holds none") {
     OtaTree t;
     const auto release = otaRelease(otaImage(10));
-    CHECK(OtaTree::error(t.write(release, 0, 10)) == "ota-owner");
+    CHECK(t.stream(release, 0, 10).empty());
     CHECK(OtaTree::error(t.call("ota-end")) == "ota-owner");
     CHECK(OtaTree::error(t.call("ota-abort")) == "ota-owner");
     CHECK(t.phase() == "idle");
@@ -1955,7 +1948,7 @@ TEST_CASE("BLE firmware update: the owner aborts its transfer and the slot is fr
     OtaTree t;
     const auto release = otaRelease(otaImage(600));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288)) == 288);
     CHECK(OtaTree::ok(t.call("ota-abort")));
     CHECK(t.slot.aborts == 1);
     CHECK(t.slot.commits == 0);
@@ -1963,7 +1956,8 @@ TEST_CASE("BLE firmware update: the owner aborts its transfer and the slot is fr
     const auto status = t.call("ota-status");
     CHECK(replyString(status, "phase") == "aborted");
     CHECK(replyNumber(status, "received") == 288);
-    CHECK(OtaTree::error(t.write(release, 288, 288)) == "ota-owner");
+    CHECK(t.stream(release, 288, 288).empty());
+    CHECK(t.slot.image.size() == 288);
     CHECK(OtaTree::error(t.call("ota-end")) == "ota-owner");
     // Another phone may now begin, and so may this one again.
     t.select(1);
@@ -1975,17 +1969,17 @@ TEST_CASE("BLE firmware update: a second begin by the owner is busy, not a resta
     OtaTree t;
     const auto release = otaRelease(otaImage(600));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288)) == 288);
     CHECK(OtaTree::error(t.begin(release)) == "ota-busy");
     CHECK(t.slot.begins == 1);
-    CHECK(replyNumber(t.write(release, 288, 288), "received") == 576);
+    CHECK(OtaTree::stored(t.stream(release, 288, 288)) == 576);
 }
 
 TEST_CASE("BLE firmware update: disconnecting aborts the transfer, and no connection resumes it") {
     OtaTree t;
     const auto release = otaRelease(otaImage(600));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288)) == 288);
     REQUIRE(t.slot.open);
 
     // Only the second phone is still connected; the next due-poll finds the owner gone.
@@ -2014,11 +2008,11 @@ TEST_CASE("BLE firmware update: a connection that is still carried keeps its tra
     CHECK(t.phase() == "uploading");
 }
 
-TEST_CASE("BLE firmware update: thirty seconds without a write abandon the transfer") {
+TEST_CASE("BLE firmware update: thirty seconds without stored data abandon the transfer") {
     OtaTree t;
     const auto release = otaRelease(otaImage(600));
     REQUIRE(OtaTree::ok(t.begin(release, 1000)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288, 5000)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288, 5000)) == 288);
 
     t.tree.service.applyDue(5000 + 29999);
     CHECK(t.slot.aborts == 0);
@@ -2028,19 +2022,19 @@ TEST_CASE("BLE firmware update: thirty seconds without a write abandon the trans
     t.tree.service.applyDue(5000 + 30000);
     CHECK(t.slot.aborts == 1);
     CHECK_FALSE(t.slot.open);
-    CHECK(OtaTree::error(t.write(release, 288, 288, 36000)) == "ota-owner");
+    CHECK(t.stream(release, 288, 288, 36000).empty());
     CHECK(t.phase() == "aborted");
 }
 
-TEST_CASE("BLE firmware update: each accepted write restarts the idle clock") {
+TEST_CASE("BLE firmware update: each stored window restarts the idle clock") {
     OtaTree t;
     const auto release = otaRelease(otaImage(864));
     REQUIRE(OtaTree::ok(t.begin(release, 1000)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288, 21000)));
-    REQUIRE(OtaTree::ok(t.write(release, 288, 288, 41000)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288, 21000)) == 288);
+    REQUIRE(OtaTree::stored(t.stream(release, 288, 288, 41000)) == 576);
     t.tree.service.applyDue(70999);
     CHECK(t.slot.aborts == 0);
-    CHECK(OtaTree::ok(t.write(release, 576, 288, 70999)));
+    CHECK(OtaTree::stored(t.stream(release, 576, 288, 70999)) == 864);
 }
 
 TEST_CASE("BLE firmware update: a transfer whose bytes differ from the signed digest never commits") {
@@ -2048,8 +2042,7 @@ TEST_CASE("BLE firmware update: a transfer whose bytes differ from the signed di
     const auto release = otaRelease(otaImage(600));
     const auto other = otaImage(600, 2);   // the same size, but not the image that was signed
     REQUIRE(OtaTree::ok(t.begin(release)));
-    for (size_t offset = 0; offset < other.size(); offset += 288)
-        REQUIRE(OtaTree::ok(t.write(offset, other.data() + offset, std::min<size_t>(288, other.size() - offset))));
+    REQUIRE(OtaTree::stored(t.stream(0, other.data(), other.size())) == 600);
     CHECK(OtaTree::error(t.call("ota-end")) == "ota-integrity");
     CHECK(t.slot.commits == 0);
     CHECK(t.slot.aborts == 1);
@@ -2062,25 +2055,27 @@ TEST_CASE("BLE firmware update: ending before every byte arrived leaves the tran
     OtaTree t;
     const auto release = otaRelease(otaImage(600));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288)) == 288);
     CHECK(OtaTree::error(t.call("ota-end")) == "ota-incomplete");
     CHECK(t.slot.commits == 0);
     CHECK(t.phase() == "uploading");
     CHECK_FALSE(t.tree.service.restartScheduledForTest());
-    REQUIRE(OtaTree::ok(t.write(release, 288, 288)));
-    REQUIRE(OtaTree::ok(t.write(release, 576, 24)));
+    REQUIRE(OtaTree::stored(t.stream(release, 288, 312)) == 600);
     CHECK(OtaTree::ok(t.call("ota-end")));
 }
 
-TEST_CASE("BLE firmware update: bytes beyond the signed size are refused") {
+TEST_CASE("BLE firmware update: bytes beyond the signed size end the stream, and the answer says it failed") {
     OtaTree t;
     const auto release = otaRelease(otaImage(300));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.write(release, 0, 288)));
+    REQUIRE(OtaTree::stored(t.stream(release, 0, 288)) == 288);
     const auto more = otaImage(24);
-    CHECK(OtaTree::error(t.write(288, more.data(), 24)) == "ota-invalid");
-    CHECK(OtaTree::ok(t.write(release, 288, 12)));
-    CHECK(OtaTree::error(t.write(300, more.data(), 1)) == "ota-invalid");
+    const auto acks = t.stream(288, more.data(), 24);
+    REQUIRE(acks.size() == 1);
+    CHECK(acks[0].failed);
+    CHECK(acks[0].stored == 288);
+    CHECK(t.stream(release, 288, 12).empty());   // the stream is closed
+    CHECK(OtaTree::ok(t.call("ota-abort")));
 }
 
 TEST_CASE("BLE firmware update: a flash failure ends the transfer, and the next begin is not wedged by it") {
@@ -2089,14 +2084,16 @@ TEST_CASE("BLE firmware update: a flash failure ends the transfer, and the next 
     REQUIRE(OtaTree::ok(t.begin(release)));
     t.slot.failWrite = true;
     t.slot.failedAborts = 2;   // the platform had already released the writer, so its own abort reports nothing left
-    CHECK(OtaTree::error(t.write(release, 0, 288)) == "ota-io");
+    const auto acks = t.stream(release, 0, 288);
+    REQUIRE(acks.size() == 1);
+    CHECK(acks[0].failed);
     CHECK(t.phase() == "failed");
     t.slot.failWrite = false;
     // Cleanup is retried before the next begin and only unblocks it once the writer is confirmed released.
     CHECK(OtaTree::error(t.begin(release)) == "ota-io");
     CHECK(OtaTree::ok(t.begin(release)));
     CHECK(t.slot.begins == 2);
-    CHECK(OtaTree::ok(t.writeAll(release)));
+    CHECK(t.streamAll(release) == 600);
     CHECK(OtaTree::ok(t.call("ota-end")));
     CHECK(t.slot.image == release.image);
 }
@@ -2105,7 +2102,7 @@ TEST_CASE("BLE firmware update: a commit the platform refuses is an I/O error, a
     OtaTree t;
     const auto release = otaRelease(otaImage(300));
     REQUIRE(OtaTree::ok(t.begin(release)));
-    REQUIRE(OtaTree::ok(t.writeAll(release)));
+    REQUIRE(t.streamAll(release) == 300);
     t.slot.failEnd = true;
     CHECK(OtaTree::error(t.call("ota-end")) == "ota-io");
     CHECK_FALSE(t.tree.service.restartScheduledForTest());
@@ -2119,7 +2116,6 @@ TEST_CASE("BLE firmware update: the operations take exactly their own fields") {
     CHECK(OtaTree::error(t.call("ota-begin", ",\"$data\":\"AAAA\"")) == "fields");
     CHECK(t.slot.begins == 0);
     REQUIRE(OtaTree::ok(t.begin(release)));
-    CHECK(OtaTree::error(t.call("ota-write", ",\"$offset\":0,\"$data\":\"AAAA\",\"$claims\":\"x\"")) == "fields");
     CHECK(OtaTree::error(t.call("ota-end", ",\"$offset\":0")) == "fields");
     CHECK(OtaTree::error(t.call("ota-abort", ",\"$sig\":\"x\"")) == "fields");
     CHECK(OtaTree::error(t.call("ota-status", ",\"$target\":{\"s\":1,\"id\":1}")) == "fields");

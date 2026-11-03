@@ -69,6 +69,11 @@ public:
             entry->security = encrypted ? platform::BleLinkSecurity::Encrypted : platform::BleLinkSecurity::Failed;
         return true;
     }
+    /// The generation of the connection behind `handle`; 0 when none is held.
+    uint64_t generation(uint16_t handle) const {
+        for (const auto& entry : entries_) if (entry.token && entry.token.handle == handle) return entry.token.generation;
+        return 0;
+    }
     /// The link security behind `generation`, and the connection a pairing request goes to; null once it is gone.
     platform::BleLinkSecurity* security(uint64_t generation, uint16_t& handle) {
         for (auto& entry : entries_) if (entry.token && entry.token.generation == generation) {

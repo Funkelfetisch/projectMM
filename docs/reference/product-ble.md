@@ -101,7 +101,7 @@ Every other request requires `$e`, nonzero uint32 `$s`, `$v:1`, `$id:1..65535` a
 
 `state` contains available actual master `on`, `brightness`, numeric `palette`, `wifiEnabled` and `ambientTarget`. Missing controls remain omitted; `ambientTarget` is null without an active valid sensor override. `ambient` names the enabled ambient-light service and its `automatic` switch, which a `patch` of `{"Services":{"<service>":{"automatic":false}}}` turns off; it is absent without such a service. `queued:true` means a job waits for its deadline. During preparation it becomes false while `pending.state` is `applying`; it does not prove completion.
 
-`info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired`, `profileOp` and `wifiOp` in its common envelope, and `setupOp` on a firmware that offers [product setup](#product-setup). The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. A build that takes a [signed update](#firmware-update-over-ble) adds `otaTarget`, `securityVersion` and `otaChunk` beside it. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
+`info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired`, `profileOp` and `wifiOp` in its common envelope, and `setupOp` on a firmware that offers [product setup](#product-setup). The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. A build that takes a [signed update](#firmware-update-over-ble) adds `otaTarget`, `securityVersion` and `otaWindow` beside it. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
 
 An `info` exchange from the source candidate, with illustrative session and time values:
 
@@ -292,29 +292,33 @@ Open lighting access never authorizes an update. Every transfer starts with the 
 
 ### Update operations
 
-Every parameter is a `$` field; hex is lowercase or uppercase, base64 is standard with padding.
+Every parameter is a `$` field; hex is lowercase or uppercase. The image itself streams on the data characteristic, as [Update stream](#update-stream) describes.
 
 | Operation | Parameters | Reply | Errors |
 |---|---|---|---|
-| `ota-begin` | `$claims`: 120 hex characters, the claims. `$sig`: 128 hex characters, the signature. | `total`, the image size, and `chunk`, 288 | `ota-busy` (this or another update holds the gate), `ota-unauthorized` (bad encoding, target, size, version or signature), `ota-slot` (no inactive slot, or too small), `ota-io` |
-| `ota-write` | `$offset`: the bytes received so far. `$data`: 1 to 288 bytes as base64. | `received` | `ota-owner` (this connection holds no transfer), `ota-offset` (the reply still carries `received`), `ota-invalid` (bad base64, empty or over 288 bytes, past the signed size), `ota-io` |
+| `ota-begin` | `$claims`: 120 hex characters, the claims. `$sig`: 128 hex characters, the signature. | `total`, the image size, and `window`, 4096 | `ota-busy` (this or another update holds the gate), `ota-unauthorized` (bad encoding, target, size, version or signature), `ota-slot` (no inactive slot, or too small), `ota-io` |
 | `ota-end` | none | `rebooting:true` | `ota-owner`, `ota-incomplete` (bytes are still missing, and the transfer stays open), `ota-integrity` (the digest differs, and the transfer is over), `ota-io` |
 | `ota-abort` | none | the common envelope | `ota-owner` |
 | `ota-status` | none | `phase` (`idle`, `uploading`, `committed`, `aborted` or `failed`), `received` and `total` | none |
 
-`ota-begin` refuses a release before it touches flash, so a tampered signature, a target of another variant and a lower security version never open the slot. The common errors `fields` and `operation` apply as for every operation, and a build without `bleOta` answers `operation` to all five.
+`ota-begin` refuses a release before it touches flash, so a tampered signature, a target of another variant and a lower security version never open the slot. The common errors `fields` and `operation` apply as for every operation, and a build without `bleOta` answers `operation` to all four.
 
 ### Update ownership
 
-A transfer belongs to the connection, and so the RPC session, that began it. Another connection gets `ota-owner` for its writes, `ota-end` and `ota-abort`, `ota-busy` for a begin, and `idle` from `ota-status`. Disconnecting aborts the transfer and nothing resumes it. So do 30 seconds without an accepted write; `ota-status` and rejected writes do not count as progress, and the owner can read `aborted` afterwards. One transfer runs at a time device-wide: the update gate the HTTP, URL and MQTT updates share is held from `ota-begin` until the device restarts or the transfer ends.
+A transfer belongs to the connection, and so the RPC session, that began it. Another connection's packets are dropped, and it gets `ota-owner` for `ota-end` and `ota-abort`, `ota-busy` for a begin, and `idle` from `ota-status`. Disconnecting aborts the transfer and nothing resumes it. So do 30 seconds without stored image bytes; `ota-status` and dropped packets do not count as progress, and the owner can read `aborted` afterwards. One transfer runs at a time device-wide: the update gate the HTTP, URL and MQTT updates share is held from `ota-begin` until the device restarts or the transfer ends.
 
-### Update chunks and restart
+### Update stream
 
-A write carries at most 288 bytes, whose 384 base64 characters fill the 512-byte request together with the widest envelope. The phone sends the next chunk after the reply. If a reply is lost, resending the same request replays the stored reply without writing again; an `ota-offset` reply names `received`, and the phone continues from there.
+The image streams on the data characteristic `bee30704-a2eb-4f7a-889b-13192c8c1819`, written without response and acknowledged per window, as Nordic DFU and Espressif's BLE OTA move theirs.
+
+- **A packet** is `[u32 LE offset][bytes]`, at most 512 bytes: the bytes fill the rest of one ATT write, up to 508. Bit 31 of the offset asks for an acknowledgement once everything up to the packet's end is stored.
+- **An acknowledgement** is a notification of `[u32 LE stored][u32 LE asked][u8 state]` on the same characteristic: the image bytes durably written, the end the answered request named, and `state` 0 while receiving or 1 once the transfer failed, when `ota-status` says how. An answer naming another end than the phone's window answers an earlier request and is ignored; a failure counts whatever it names.
+- **A window** is the 4096 bytes the phone sends past its last acknowledgement, the last packet asking. An acknowledgement short of the window's end makes the phone resend from `stored`; one that never comes makes it resend the last packet, which is answered again.
+- **The controller** keeps an 8 KB ring between the BLE host task and the render loop, allocated with the first `ota-begin`. A packet that continues what it holds is kept, the part it already holds trimmed; a packet that leaves a gap or finds the ring full is dropped, and the answer then names what is stored. Each request is answered once.
 
 After `ota-end` verifies the digest and commits the image, the reply says `rebooting:true`. The controller saves pending settings and restarts 1.5 seconds after publishing it, without waiting inside the tick. The phone reconnects and confirms the new `build` and `firmwareVersion` in identity and `info`.
 
-Flash is written on the render loop, as the HTTP route writes it: the buffered 4 KB flush can delay a frame, and the signature check at `ota-begin` takes the longest. Host tests cover every operation, owner, offset, timeout and refusal with a substitute signature primitive; the P-256 arithmetic is checked on its own by `moondeck/helio/check_firmware_signature.py`. A signed image installing from a phone on a bench board is hardware evidence that is still to be recorded.
+Flash is written on the render loop, as the HTTP route writes it: a tick stores up to a window, the buffered 4 KB flush can delay a frame, and the signature check at `ota-begin` takes the longest. Host tests cover every operation, owner, gap, overlap, full ring, timeout and refusal with a substitute signature primitive; the P-256 arithmetic is checked on its own by `moondeck/helio/check_firmware_signature.py`. A signed image installing from a phone on a bench board is hardware evidence that is still to be recorded.
 
 ## Profiles, updates and acceptance
 

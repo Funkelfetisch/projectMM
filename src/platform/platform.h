@@ -12,6 +12,9 @@
 #if defined(ESP_PLATFORM)
 #include "sdkconfig.h"
 #endif
+#ifndef ESP_PLATFORM
+#include <vector>   // the host-test seams' recorded acknowledgements
+#endif
 
 /// The one interface every module reaches hardware through, so the same source drives an ESP32, a Teensy, a Raspberry Pi and a desktop.
 ///
@@ -53,6 +56,8 @@
   #define MM_PRINTF_FORMAT(fmt_arg, va_arg)
 #endif
 
+
+namespace mm { class BleUpdateStream; }
 
 namespace mm::platform {
 
@@ -993,11 +998,21 @@ bool bleControlLinkState(const BleControlHandle& handle, BleLinkState& state) MM
 bool bleControlAllowRepair(BleControlHandle& handle) MM_NONBLOCKING;
 /// The link security of the connection behind `generation`; `request` asks that central to pair (SMP Security Request, no bond).
 BleLinkSecurity bleControlSecurity(BleControlHandle& handle, uint64_t generation, bool request) MM_NONBLOCKING;
+/// Feed packets written to the update data characteristic into `stream` from now on.
+bool bleControlUpdateStream(BleControlHandle& handle, BleUpdateStream* stream) MM_NONBLOCKING;
+/// Stop feeding the stream, waiting out a packet in flight, before the stream goes away; off the render path.
+void bleControlUpdateRelease(BleControlHandle& handle);
+/// Tell `generation`'s central how many image bytes are stored, which request that answers, and whether the transfer failed, as a data characteristic notification.
+bool bleControlUpdateAck(BleControlHandle& handle, uint64_t generation, uint32_t stored, uint32_t asked, bool failed) MM_NONBLOCKING;
 #ifndef ESP_PLATFORM   // host-test seams, which no ESP32 code calls
 /// Make every connection start from this link security, as the security manager leaves it.
 void setTestBleLinkSecurity(BleLinkSecurity link);
 /// The pairing requests sent since the last setTestBleLinkSecurity.
 uint32_t testBleSecurityRequests();
+/// One update acknowledgement the stub recorded instead of notifying.
+struct BleUpdateAck { uint64_t generation = 0; uint32_t stored = 0; uint32_t asked = 0; bool failed = false; };
+/// The acknowledgements sent since the last call, oldest first, which the call clears.
+std::vector<BleUpdateAck> takeTestBleUpdateAcks();
 #endif
 
 /// One UDP socket: the wire every light protocol sends and receives on.

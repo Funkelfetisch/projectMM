@@ -4,6 +4,7 @@
 #include "core/module/Scheduler.h"
 #include "core/module/StateDocument.h"
 #include "core/util/BleFirmwareUpdate.h"
+#include "core/util/BleUpdateStream.h"
 #include "core/util/BleMessage.h"
 #include "core/util/BleAdvertisement.h"
 #include "core/util/BleRpcSession.h"
@@ -245,6 +246,8 @@ public:
     uint64_t replyGenerationForTest() const { return replyGeneration_; }
     /// The desktop has no application slot, so a test supplies one.
     void setFirmwareSlotForTest(FirmwareSlot* slot) { firmwareSlot_ = slot; }
+    /// Write one packet to the update data characteristic as `generation`'s central, as the platform does.
+    bool streamForTest(uint64_t generation, const uint8_t* packet, size_t length) { return update_ && update_[0].stream.accept(ownerOf(generation), packet, length); }
     /// The restart a committed update schedules would end the test process.
     void setRestartForTest(void (*restart)()) { restart_ = restart; }
     bool restartScheduledForTest() const { return restartScheduled_; }
@@ -253,7 +256,7 @@ public:
         const uint64_t requestGeneration = replyGeneration_;
         if (!dueAlreadyProcessed) applyDue(now);
         replyGeneration_ = requestGeneration;
-        const uint64_t owner = requestGeneration ? requestGeneration : UINT64_MAX;
+        const uint64_t owner = ownerOf(requestGeneration);
         activeOwner_ = owner;
         replySession_ = 0; std::snprintf(replyOperation_, sizeof(replyOperation_), "%s", "error");
         json::JsonDoc doc;
@@ -498,7 +501,6 @@ private:
             if (!std::strcmp(op, "wifi") && !std::strcmp(key, "$offset")) continue;
             if (!std::strcmp(op, "wifi-join") && (!std::strcmp(key, "$ssid") || !std::strcmp(key, "$password"))) continue;
             if (!std::strcmp(op, "ota-begin") && (!std::strcmp(key, "$claims") || !std::strcmp(key, "$sig"))) continue;
-            if (!std::strcmp(op, "ota-write") && (!std::strcmp(key, "$offset") || !std::strcmp(key, "$data"))) continue;
             if (!std::strcmp(op, "hello") && (!std::strcmp(key, "$nonce") || !std::strcmp(key, "$resume"))) continue;
             return false;
         }
@@ -644,6 +646,8 @@ private:
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
         sink.append(",\"wifi\":"); network->writeWifi(sink, static_cast<uint8_t>(offset)); end(sink, id);
     }
+    /// The owner a request from `generation` acts as: the desktop's default connection has generation 0, which owns nothing, so it acts as the last owner value.
+    static uint64_t ownerOf(uint64_t generation) MM_NONBLOCKING { return generation ? generation : UINT64_MAX; }
     /// Whether this build can take a signed update over BLE: only with a publisher key and an inactive slot to write, which a single-slot table lacks.
     bool otaAvailable() const { return releaseKey_ && (platform::hasOta || firmwareSlot_) && slotCapacity() > 0; }
     size_t slotCapacity() const { return firmwareSlot_ ? firmwareSlot_->capacity() : platform::otaNextAppCapacity(); }
@@ -651,6 +655,7 @@ private:
     uint32_t otaTarget() const { return fnv1a(firmware_, std::strlen(firmware_)); }
     BleFirmwareUpdate* updater() { return update_ ? &update_[0].transfer : nullptr; }
     void clearUpdate() {
+        if (update_) platform::bleControlUpdateRelease(transport_);
         if (update_) update_[0].~UpdateState();
         update_.resize(0);
     }
@@ -663,15 +668,44 @@ private:
             restart_();
         }
         auto* transfer = updater();
-        if (!transfer || !transfer->active()) return;
-        if (!rpc_ || !rpc_[0].find(transfer->owner())) transfer->abort(transfer->owner());
-        else transfer->expireIdle(now);
+        if (!transfer) return;
+        auto& stream = update_[0].stream;
+        if (transfer->active()) {
+            if (!rpc_ || !rpc_[0].find(transfer->owner())) transfer->abort(transfer->owner());
+            else { drainUpdate(*transfer, stream, now); transfer->expireIdle(now); }
+        }
+        if (!transfer->active() && stream.isOpen()) stream.close();
+        sendUpdateAck();
+    }
+    /// Store what the phone streamed since the last tick and answer the acknowledgement it asked for; a refused store fails the transfer and says so.
+    void drainUpdate(BleFirmwareUpdate& transfer, BleUpdateStream& stream, uint32_t now) {
+        const uint64_t owner = transfer.owner();
+        uint32_t stored = transfer.received(), offset = 0;
+        uint8_t bytes[512];
+        for (size_t moved = 0; moved < kDrainBytes;) {
+            const size_t count = stream.take(bytes, sizeof(bytes), offset);
+            if (!count) break;
+            moved += count;
+            if (transfer.append(owner, offset, bytes, count, now, stored) != BleFirmwareUpdate::Error::None) {
+                // A failure ends the transfer, so the phone takes it whatever request it names.
+                stream.close();
+                ack_ = {owner, stored, 0, true, true};
+                return;
+            }
+        }
+        uint32_t asked = 0;
+        if (stream.acknowledge(stored, asked)) ack_ = {owner, stored, asked, false, true};
+    }
+    /// Notify the phone of the acknowledgement it waits for, until the platform takes it or its connection is gone.
+    void sendUpdateAck() {
+        if (!ack_.pending) return;
+        if (!rpc_ || !rpc_[0].find(ack_.owner)) { ack_.pending = false; return; }
+        if (platform::bleControlUpdateAck(transport_, ack_.owner, ack_.stored, ack_.asked, ack_.failed)) ack_.pending = false;
     }
     /// The five update operations. Every refusal is the name BleFirmwareUpdate gives it; flash is written here, on the render loop, as the HTTP update writes it.
     void firmwareUpdate(const json::JsonDoc& doc, uint16_t id, const char* op, uint32_t now) {
         if (!otaAvailable()) { result(id, "operation"); return; }
         if (!std::strcmp(op, "ota-begin")) { beginUpdate(doc, id, now); return; }
-        if (!std::strcmp(op, "ota-write")) { writeUpdate(doc, id, now); return; }
         if (!std::strcmp(op, "ota-end")) { finishUpdate(id, true, now); return; }
         if (!std::strcmp(op, "ota-abort")) { finishUpdate(id, false, now); return; }
         if (!std::strcmp(op, "ota-status")) { updateStatus(id); return; }
@@ -686,22 +720,11 @@ private:
         uint32_t total = 0;
         const auto error = updater()->begin(activeOwner_, claims, signature, now, total);
         if (error != Update::Error::None) { refuseUpdate(id, error); return; }
+        // The stream opens before the reply goes out, so the phone's first packet finds it.
+        update_[0].stream.open(activeOwner_, 0);
+        ack_ = {};
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
-        sink.appendf(",\"total\":%u,\"chunk\":%u", static_cast<unsigned>(total), static_cast<unsigned>(Update::kChunkBytes)); end(sink, id);
-    }
-    void writeUpdate(const json::JsonDoc& doc, uint16_t id, uint32_t now) {
-        using Update = BleFirmwareUpdate;
-        auto* transfer = updater();
-        // Nothing was ever begun, so this connection holds no transfer.
-        if (!transfer) { refuseUpdate(id, Update::Error::Owner); return; }
-        uint32_t offset = 0, received = 0;
-        const char* data = text(doc, "$data");
-        if (!number(doc, "$offset", offset) || !data) { refuseUpdate(id, Update::Error::Invalid); return; }
-        const auto error = transfer->write(activeOwner_, offset, data, now, received);
-        JsonSink sink(response_, sizeof(response_)); begin(sink, id, Update::errorName(error));
-        // A refused offset still says where the transfer stands, so the phone resynchronizes.
-        if (error == Update::Error::None || error == Update::Error::Offset) sink.appendf(",\"received\":%u", static_cast<unsigned>(received));
-        end(sink, id);
+        sink.appendf(",\"total\":%u,\"window\":%u", static_cast<unsigned>(total), static_cast<unsigned>(BleUpdateStream::kWindowBytes)); end(sink, id);
     }
     /// Commit the image when `commit`, otherwise abandon it; a commit schedules the restart.
     void finishUpdate(uint16_t id, bool commit, uint32_t now) {
@@ -729,6 +752,7 @@ private:
     bool startUpdate() {
         if (!update_.resize(1)) return false;
         new (update_.data()) UpdateState(firmwareSlot_, {releaseKey_, otaTarget(), securityVersion_});
+        platform::bleControlUpdateStream(transport_, &update_[0].stream);
         return true;
     }
     /// Ask this connection's central to pair, so a secret can follow; polling reports how far it came.
@@ -800,8 +824,8 @@ private:
             if (const size_t capacity = slotCapacity())
                 sink.appendf(",\"otaSlotBytes\":%u", static_cast<unsigned>(capacity));
             if (otaAvailable())
-                sink.appendf(",\"otaTarget\":%u,\"securityVersion\":%u,\"otaChunk\":%u", static_cast<unsigned>(otaTarget()),
-                             static_cast<unsigned>(securityVersion_), static_cast<unsigned>(BleFirmwareUpdate::kChunkBytes));
+                sink.appendf(",\"otaTarget\":%u,\"securityVersion\":%u,\"otaWindow\":%u", static_cast<unsigned>(otaTarget()),
+                             static_cast<unsigned>(securityVersion_), static_cast<unsigned>(BleUpdateStream::kWindowBytes));
             auto* battery = scheduler_ ? BatteryService::discover(*scheduler_) : nullptr;
             const auto current = battery ? battery->batteryConfig() : platform::BleBatteryConfig{};
             sink.appendf(",\"basChannels\":%u,\"basRestartRequired\":%s,\"profileOp\":true,\"pixelMapOp\":%s,\"wifiOp\":%s", static_cast<unsigned>(startedBatteries_.count),
@@ -883,7 +907,13 @@ private:
         PlatformFirmwareSlot platformSlot;
         /// The transfer over whichever slot was chosen.
         BleFirmwareUpdate transfer;
+        /// The image bytes the phone streams on the data characteristic.
+        BleUpdateStream stream;
     };
+    /// The acknowledgement still to reach the phone, retried while the BLE lock is busy.
+    struct UpdateAck { uint64_t owner = 0; uint32_t stored = 0; uint32_t asked = 0; bool failed = false; bool pending = false; };
+    /// The image bytes one tick moves from the stream to the slot: a window and its last packet.
+    static constexpr size_t kDrainBytes = 4608;
     static constexpr uint32_t kRestartDelayMs = 1500;
     const std::array<uint8_t, 65>* releaseKey_ = nullptr;
     uint32_t securityVersion_ = 0;
@@ -891,6 +921,7 @@ private:
     void (*restart_)() = &platform::reboot;
     uint32_t restartAt_ = 0;
     bool restartScheduled_ = false;
+    UpdateAck ack_{};
     ScratchBuffer<UpdateState> update_{*this};
     ScratchBuffer<BleRpcPeers<platform::kBleControlPeerCapacity>> rpc_{*this};
     ScratchBuffer<char> pendingText_{*this};

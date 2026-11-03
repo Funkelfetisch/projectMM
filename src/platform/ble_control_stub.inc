@@ -14,7 +14,15 @@ bool bleControlConnected(const BleControlHandle&) MM_NONBLOCKING { return false;
 bool bleControlPairingState(const BleControlHandle&, BlePairingState& state) MM_NONBLOCKING { state = {}; return false; }
 bool bleControlLinkState(const BleControlHandle&, BleLinkState& state) MM_NONBLOCKING { state = {}; return false; }
 bool bleControlAllowRepair(BleControlHandle&) MM_NONBLOCKING { return false; }
+bool bleControlUpdateStream(BleControlHandle&, BleUpdateStream*) MM_NONBLOCKING { return false; }
+void bleControlUpdateRelease(BleControlHandle&) {}
 #ifndef ESP_PLATFORM
+namespace { std::vector<BleUpdateAck> testUpdateAcks; }
+bool bleControlUpdateAck(BleControlHandle&, uint64_t generation, uint32_t stored, uint32_t asked, bool failed) MM_NONBLOCKING {
+    testUpdateAcks.push_back({generation, stored, asked, failed});
+    return true;
+}
+std::vector<BleUpdateAck> takeTestBleUpdateAcks() { std::vector<BleUpdateAck> acks; acks.swap(testUpdateAcks); return acks; }
 namespace { BleLinkSecurity testLink = BleLinkSecurity::Open; uint32_t testSecurityRequests = 0; }
 void setTestBleLinkSecurity(BleLinkSecurity link) { testLink = link; testSecurityRequests = 0; }
 uint32_t testBleSecurityRequests() { return testSecurityRequests; }
@@ -26,6 +34,7 @@ BleLinkSecurity bleControlSecurity(BleControlHandle&, uint64_t, bool request) MM
 }
 #else
 BleLinkSecurity bleControlSecurity(BleControlHandle&, uint64_t, bool) MM_NONBLOCKING { return BleLinkSecurity::Open; }
+bool bleControlUpdateAck(BleControlHandle&, uint64_t, uint32_t, uint32_t, bool) MM_NONBLOCKING { return false; }
 #endif
 }  // namespace mm::platform
 
