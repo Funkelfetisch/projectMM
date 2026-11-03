@@ -107,6 +107,8 @@ TEST_CASE("BLE advertising: only exact explicitly selected NEBULITE models ident
     CHECK(productCodeForModel("NEBULITE Croptop ESP32") == 20);
     CHECK(productCodeForModel("NEBULITE Jacket S3") == 22);
     CHECK(productCodeForModel("NEBULITE Jacket ESP32") == 22);
+    CHECK(productCodeForModel("NEBULITE Fanny pack ESP32") == 16);
+    CHECK(productCodeForModel("NEBULITE Backpack ESP32") == 18);
     CHECK(productCodeForModel("NEBULITE Vest S3") == 0);
     CHECK(productCodeForModel("NEBULITE Croptop") == 0);
     CHECK(productCodeForModel(nullptr) == 0);
