@@ -177,7 +177,7 @@ A password travels only on an encrypted link. On an open link, `wifi-join` with 
 |---|---|
 | `pairing` | The phone was asked and is pairing; it may show its own prompt first |
 | `encrypted` | The password may follow on this connection |
-| `failed` | The phone declined, or the pairing timed out; told once, and the next `secure` asks again |
+| `failed` | The phone declined, or the pairing timed out after 30 s; told once, and the next `secure` asks again. After a timeout the phone may refuse further pairing until it reconnects (Bluetooth Core, Vol 3 Part H, 3.4) |
 | `open` | The device could not read the link just now; the next `secure` asks |
 
 Read `secure` about once a second until `link` leaves `pairing`, allowing the time a person takes to accept the prompt. Just Works pairing protects the password from a listener, not from an attacker who relays the connection while it pairs. A join with the saved password sends no secret and needs no encryption.

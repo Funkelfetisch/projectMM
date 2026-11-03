@@ -5709,7 +5709,7 @@
      "line": "Persisted product choice; BLE stays independent of this IP-interface flag."
     },
     "wifiPowerSave": {
-     "line": "Let the radio sleep between beacons once the station is up, trading latency for current."
+     "line": "Let the radio sleep between beacons, trading latency for current."
     },
     "mDNS": {
      "line": "The `<name>.local` hostname, on IPv4 and IPv6.",

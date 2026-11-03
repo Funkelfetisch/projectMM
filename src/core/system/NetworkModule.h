@@ -244,7 +244,7 @@ private:
     /// Persisted product choice; BLE stays independent of this IP-interface flag.
     bool wifiEnabled_ = true;
     bool wifiAppliedEnabled_ = true;
-    /// Let the radio sleep between beacons once the station is up, trading latency for current.
+    /// Let the radio sleep between beacons, trading latency for current.
     bool wifiPowerSave_ = false;
     Scheduler* scheduler_ = nullptr;
     SystemModule* systemModule_ = nullptr;
