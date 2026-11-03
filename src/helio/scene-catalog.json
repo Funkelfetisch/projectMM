@@ -1684,12 +1684,12 @@
         "effect intensity": {"visible": true, "label": "Sensitivity", "description": "Changes how much sound opens the color pattern; the microphone must be configured."},
         "audio floor": {"visible": true, "label": "Minimum audio level", "description": "Adds a constant minimum input level; zero follows the audio source without a fallback."},
         "simulate if no source": {"visible": true, "label": "Simulate without audio", "description": "Uses the historical beat simulation when no audio service is active; a quiet active source stays quiet."},
-        "secondary red": {"visible": true, "label": "Background red"},
-        "secondary green": {"visible": true, "label": "Background green"},
-        "secondary blue": {"visible": true, "label": "Background blue"},
-        "secondary white": {"visible": true, "label": "Background white"},
+        "secondary red": {"visible": true, "label": "Background red", "description": "Red part of the background color behind the moving pattern."},
+        "secondary green": {"visible": true, "label": "Background green", "description": "Green part of the background color behind the moving pattern."},
+        "secondary blue": {"visible": true, "label": "Background blue", "description": "Blue part of the background color behind the moving pattern."},
+        "secondary white": {"visible": true, "label": "Background white", "description": "White part of the background color behind the moving pattern."},
         "frame ms": {"visible": true, "label": "Frame time", "description": "The original 42 FPS configuration used 23 ms."},
-        "segment start": {"visible": true, "label": "First LED"},
+        "segment start": {"visible": true, "label": "First LED", "description": "First LED in the active segment, counting from zero."},
         "segment stop": {"visible": true, "label": "End LED", "description": "Exclusive end; zero uses the end of the strip."}
       }
     },
@@ -1710,7 +1710,7 @@
         "audio floor": {"visible": true, "label": "Minimum audio level", "description": "Sets a minimum input level; zero follows the configured audio source."},
         "simulate if no source": {"visible": true, "label": "Simulate without audio", "description": "Uses the historical beat simulation when no audio service is active; a quiet active source stays quiet."},
         "frame ms": {"visible": true, "label": "Frame time", "description": "The original 42 FPS configuration used 23 ms."},
-        "segment start": {"visible": true, "label": "First LED"},
+        "segment start": {"visible": true, "label": "First LED", "description": "First LED in the active segment, counting from zero."},
         "segment stop": {"visible": true, "label": "End LED", "description": "Exclusive end; zero uses the end of the strip."}
       }
     }

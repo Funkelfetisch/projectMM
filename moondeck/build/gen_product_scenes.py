@@ -12,6 +12,28 @@ EFFECT_CONTROLS = ("speed", "effect intensity", "custom 1", "custom 2", "custom 
                    "option 1", "option 2", "option 3")
 
 
+def code(text: str) -> str:
+    """A C++ source without its comments: the catalog revision follows what the tables depend on, so editing prose leaves it unchanged."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        elif text[i] in "\"'":
+            j = i + 1
+            while j < n and text[j] != text[i]:
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def outputs():
     data = json.loads(SOURCE.read_text(encoding="utf-8"))
     schema_paths = {"src/core/module/Control.h", "src/core/module/Control.cpp", "src/light/drivers/Drivers.h",
@@ -22,7 +44,7 @@ def outputs():
     digest = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode())
     for relative in sorted(schema_paths):
         digest.update(relative.encode())
-        digest.update((ROOT / relative).read_bytes())
+        digest.update(code((ROOT / relative).read_text(encoding="utf-8")).encode())
     revision = digest.hexdigest()[:12]
     factory = data["factoryScenes"]
     scenes = data["extraScenes"] + factory

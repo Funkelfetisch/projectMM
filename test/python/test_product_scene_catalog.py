@@ -4,6 +4,17 @@ import json
 from pathlib import Path
 
 
+def test_the_catalog_revision_follows_the_code_of_its_schemas_not_their_comments():
+    root = Path(__file__).resolve().parents[2]
+    specification = importlib.util.spec_from_file_location("product_scenes", root / "moondeck/build/gen_product_scenes.py")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    source = 'int a = 1; // a note\n/// a doc line\nconst char* url = "http://x"; /* a block */ char c = \'/\';\n'
+    assert module.code(source) == 'int a = 1; \n\nconst char* url = "http://x";  char c = \'/\';\n'
+    assert module.code(source.replace("a note", "another note")) == module.code(source)
+    assert module.code(source.replace("a = 1", "a = 2")) != module.code(source)
+
+
 def test_generated_product_scene_tables_match_the_shared_source_and_control_schemas():
     root = Path(__file__).resolve().parents[2]
     specification = importlib.util.spec_from_file_location("product_scenes", root / "moondeck/build/gen_product_scenes.py")
