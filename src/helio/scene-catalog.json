@@ -1509,7 +1509,7 @@
     },
     {
       "id": "nebulite-rainbow",
-      "label": "NEBULITE Rainbow",
+      "label": "Rainbow",
       "type": "NebuliteRainbowEffect",
       "meta": "legacy wearable rainbow",
       "presetIndex": 23,
@@ -1526,7 +1526,7 @@
     },
     {
       "id": "nebulite-blink",
-      "label": "NEBULITE Blink",
+      "label": "Blink",
       "type": "NebuliteBlinkEffect",
       "meta": "legacy wearable blink, two-color palette",
       "presetIndex": 24,
@@ -1545,7 +1545,7 @@
     },
     {
       "id": "nebulite-solid",
-      "label": "NEBULITE Solid",
+      "label": "Solid",
       "type": "NebuliteSolidEffect",
       "meta": "segment-aware wearable color",
       "presetIndex": 25,
