@@ -485,6 +485,7 @@ private:
 
     /// One known network: the name a router broadcasts, its passphrase as WPA2 bounds them, and its own IP settings.
     struct Row {
+        /// Stable across reorders and never reissued, so a join and a list edit name the same network.
         uint32_t id = 0;
         char ssid[33] = {};
         char password[64] = {};
@@ -604,11 +605,17 @@ private:
 
     /// The scan's networks as a list: tapping one shows its password field and Connect.
     struct Available : ListSource {
+        /// The module whose scan results this list shows.
         WiFiModule& w;
+        /// Binds the list to its owner.
         explicit Available(WiFiModule& owner) : w(owner) {}
+        /// One row per network the scan found.
         uint8_t listRowCount() const override { return w.foundCount_; }
-        bool persistsList() const override { return false; }   // a scan is never saved
+        /// A scan is never saved.
+        bool persistsList() const override { return false; }
+        /// Editable, since a tapped row takes its password and Connect.
         bool isEditableList() const override { return true; }
+        /// The scan decides the rows, so none is added or removed.
         bool listRowsFixed() const override { return true; }
         /// Signal as bars and a lock on secured networks, as every WiFi picker shows them.
         void writeListRow(JsonSink& sink, uint8_t row) const override {
@@ -641,6 +648,7 @@ private:
                 sink.appendf(",{\"name\":\"afterJoining\",\"readonly\":true,\"value\":\"http://%s.local/\"}", w.deviceName_);
             sink.append("]}");
         }
+        /// Take the password typed for a scanned network, or Connect to it now.
         bool setListRowField(uint32_t id, const char* field, const char* valueJson) override {
             if (id == 0 || id > w.foundCount_) return false;
             const platform::WifiNetwork& n = w.found_[id - 1];

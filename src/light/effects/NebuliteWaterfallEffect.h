@@ -7,14 +7,17 @@
 #include "light/effects/WledWaterfallFrame.h"
 
 namespace mm {
-/// Experimental 1D WLED Waterfall, using the archived single-colour palette.
-/// Live onset and magnitude use MoonLight's differently scaled analysis;
-/// legacy gamma, physical audio and the random sequence are not calibrated.
+/// Experimental 1D WLED Waterfall, using the archived single-color palette.
+///
+/// Live onset and magnitude use MoonLight's differently scaled analysis; legacy gamma, physical audio and the random sequence are not calibrated.
 /// @attribution WLED and FastLED contributors
 class NebuliteWaterfallEffect : public EffectBase {
 public:
+    /// Spans the whole physical light list, so the effect is volumetric.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
+    /// One waterfall pixel per light as a single block, refused above 65535 lights.
     WorkingMemory workingMemory(Coord3D raster, uint8_t) const override {
         if (raster.x <= 0 || raster.y <= 0 || raster.z <= 0) return {};
         const uint64_t count = uint64_t(raster.x) * raster.y * raster.z;
@@ -22,10 +25,18 @@ public:
         const size_t bytes = size_t(count) * sizeof(Pixel);
         return {bytes, bytes};
     }
-    uint8_t speed = 128, intensity = 128, red = 61, green = 207, blue = 255;
+    uint8_t speed = 128,       ///< How fast the waterfall scrolls.
+            intensity = 128,   ///< Offsets the palette index; the single color ignores it.
+            red = 61,          ///< The red part of the waterfall color.
+            green = 207,       ///< The green part of the waterfall color.
+            blue = 255;        ///< The blue part of the waterfall color.
+    /// Simulates the audio peaks while no audio service runs.
     bool simulateIfNoSource = false;
-    uint16_t frameMs = 23, segmentStart = 0, segmentStop = 0;
+    uint16_t frameMs = 23,        ///< The shortest time between frame steps, in milliseconds.
+             segmentStart = 0,    ///< The first light of the segment the effect fills.
+             segmentStop = 0;     ///< One past the last light of the segment; zero runs to the end.
 
+    /// Publish the WLED speed, intensity, color, frame time and segment controls.
     void defineControls() override {
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("effect intensity", intensity, 0, 255);
@@ -37,6 +48,7 @@ public:
         controls_.addControl("segment start", segmentStart);
         controls_.addControl("segment stop", segmentStop);
     }
+    /// Size the pixel scratch to the lights and clear the state; a size it cannot hold raises a warning.
     void prepare() override {
         const size_t count = nrOfLights();
         const bool same = count && pixels_.count() == count;
@@ -47,11 +59,14 @@ public:
         if (!same) clearState();
         clearStatus();
     }
+    /// Forget the running state so the next enable restarts the waterfall.
     void release() override { started_ = false; MoonModule::release(); }
+    /// Render one frame from the latest audio frame.
     void tick() MM_NONBLOCKING override {
         const auto* audio = AudioService::latestFrame();
         renderAt(elapsed(), platform::micros(), *audio, audio != &AudioService::kSilence);
     }
+    /// Render the frame for the clock values `now` and `micros` and the given audio frame; public so a test can drive them.
     void renderAt(uint32_t now, uint32_t micros, const AudioFrame& audio, bool sourcePresent) {
         uint8_t* out = buffer(); const uint32_t count = nrOfLights(); const uint8_t channels = channelsPerLight();
         if (!out || channels < 3 || !count) return;

@@ -6,8 +6,7 @@ TEST_CASE("Legacy two-colour palette maps blue through black across a segment") 
     const mm::RGB blue{0, 0, 255}, black{0, 0, 0};
     auto sample = [&](unsigned pixel) { return mm::WledTwoColorPalette::sample(blue, black, pixel, 31, 0); };
     CHECK(sample(0).b == 255);
-    // WLED maps pixel 15 to index 119 after no-wrap scaling: blend the
-    // FastLED entries 7 and 8 at seven sixteenths.
+    // WLED maps pixel 15 to index 119 after no-wrap scaling: blend the FastLED entries 7 and 8 at seven sixteenths.
     CHECK(sample(15).b == 131);
     CHECK(sample(30).b == 0);
     CHECK(sample(15).r == 0);

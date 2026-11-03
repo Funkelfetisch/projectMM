@@ -6,6 +6,7 @@ namespace mm {
 /// Read a bounded snapshot in the same output order as the existing web preview.
 class BlePreviewFramePage {
 public:
+    /// Writes one page of the enabled PreviewDriver's frame from `offset`, null on success or an error name such as "frame-unavailable".
     static const char* writeCurrent(JsonSink& sink, Scheduler& scheduler, uint16_t offset, const char* revision, uint32_t now) {
         for (uint8_t i = 0; i < scheduler.moduleCount(); ++i) {
             auto* root = scheduler.module(i);

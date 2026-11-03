@@ -10,17 +10,16 @@
 #include <limits>
 
 namespace mm {
-/// Experimental internal signed claims; this is not an advertised wire format.
-/// The caller must obtain the immutable target, minimum version and publisher
-/// key from trusted device state, and must handle key rotation and rollback.
+/// Experimental internal signed claims; this is not an advertised wire format. The caller must obtain the immutable target, minimum version and publisher key from trusted device state, and must handle key rotation and rollback.
 struct FirmwareReleaseClaims {
-    uint32_t target = 0, imageSize = 0, securityVersion = 0;
+    uint32_t target = 0,           ///< The target the image is signed for.
+             imageSize = 0,        ///< The image size in bytes.
+             securityVersion = 0;  ///< The version a device compares against its minimum.
     std::array<uint8_t, 32> imageDigest{};
     std::array<uint8_t, 64> signature{};
 };
 
-/// Decode the experimental fixed-width signed payload and detached P-256
-/// signature. Decoding alone does not establish trust or authorize an upload.
+/// Decode the experimental fixed-width signed payload and detached P-256 signature; decoding alone does not establish trust or authorize an upload.
 inline bool decodeFirmwareReleaseClaims(const uint8_t* bytes, size_t size,
                                         const uint8_t* signature, size_t signatureSize,
                                         FirmwareReleaseClaims& out) {
@@ -43,18 +42,20 @@ inline bool decodeFirmwareReleaseClaims(const uint8_t* bytes, size_t size,
     return true;
 }
 
+/// Judges an image against signed claims, the device's own target and minimum version, and the publisher key.
 class FirmwareReleasePolicy {
 public:
+    /// Binds the claims to the trusted target, minimum security version and publisher key they are judged against.
     FirmwareReleasePolicy(const FirmwareReleaseClaims& claims, uint32_t expectedTarget,
                           uint32_t minimumVersion, const std::array<uint8_t, 65>& publisherKey)
         : claims_(claims), expectedTarget_(expectedTarget), minimumVersion_(minimumVersion), key_(publisherKey) {}
 
+    /// True when the image's size and digest match the claims, the target and version are acceptable, and the signature verifies under the publisher key.
     bool verify(size_t size, const std::array<uint8_t, 32>& digest) const {
         if (!expectedTarget_ || claims_.target != expectedTarget_ || !claims_.imageSize ||
             size > std::numeric_limits<uint32_t>::max() || size != claims_.imageSize ||
             claims_.securityVersion < minimumVersion_ || claims_.imageDigest != digest) return false;
-        // Domain separation, then three big-endian 32-bit fields, then SHA-256
-        // of the image. Fixed widths avoid ambiguous concatenation.
+        // Domain separation, then three big-endian 32-bit fields, then SHA-256 of the image; fixed widths avoid ambiguous concatenation.
         static constexpr uint8_t domain[] = "HELIO-FW-AUTH-V1";
         uint8_t fields[12];
         put32(fields, claims_.target);

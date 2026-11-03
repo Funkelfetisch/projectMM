@@ -1,5 +1,4 @@
-/// Product bench diagnostics surviving a panic reset. Only numeric exception
-/// metadata and code addresses are retained; no log text or stack contents.
+/// Product bench diagnostics surviving a panic reset: only numeric exception metadata and code addresses are retained, no log text or stack contents.
 #include "platform/platform.h"
 #include "sdkconfig.h"
 
@@ -54,8 +53,7 @@ extern "C" void IRAM_ATTR __wrap_esp_panic_handler(panic_info_t* info) {
         record.fault = frame->excvaddr;
         uint32_t sp = frame->a1;
         uint32_t next = frame->a0;
-        // Xtensa window ABI, as ESP-IDF's esp_backtrace_get_next_frame: the
-        // previous return PC/SP live 16/12 bytes below SP. Bound every access.
+        // Xtensa window ABI, as ESP-IDF's esp_backtrace_get_next_frame: the previous return PC/SP live 16/12 bytes below SP, so bound every access.
         while (record.count < 8 && next && !(sp & 15u) && sp >= 16 && inDram(sp - 16, 16)) {
             const uint32_t pc = (next & 0x3fffffffu) | 0x40000000u;
             if (pc >= 0x44000000u) break;

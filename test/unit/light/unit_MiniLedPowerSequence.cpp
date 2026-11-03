@@ -14,8 +14,7 @@
 namespace {
 using Sequence = mm::MiniLedPowerSequence;
 
-/// Real desktop RMT driver, with a simulated rail and GPIO handover. The
-/// fixture records commands; it cannot prove an electrical pin level.
+/// Real desktop RMT driver, with a simulated rail and GPIO handover. The fixture records commands; it cannot prove an electrical pin level.
 struct MiniPort : Sequence::Port {
     mm::RmtLedDriver driver;
     mm::Buffer source;
@@ -472,8 +471,7 @@ TEST_CASE("mini80 controller sends and latches black before visible output and b
     std::strcpy(driver.ledsPerPin, "52");
     driver.defineControls(); driver.setSourceBuffer(&source);
     driver.correctionForTest() = correction; driver.applyState();
-    // An accidental scheduler tick before the power sequence must not drive
-    // the unpowered strip, even though source data is already available.
+    // An accidental scheduler tick before the power sequence must not drive the unpowered strip, even though source data is already available.
     driver.tick();
     CHECK_FALSE(driver.lastFrameLatched());
     CHECK_FALSE(driver.frameInFlight());
@@ -490,8 +488,7 @@ TEST_CASE("mini80 controller sends and latches black before visible output and b
     controller.tick(true, 13);
     REQUIRE(controller.state() == Sequence::State::On);
     CHECK(driver.frameBuffer()[0] != 0);
-    // The rail owner still holds the driver after the black startup hold is
-    // released. Neither a live request nor a stored file may alter its pins.
+    // The rail owner still holds the driver after the black startup hold is released, so neither a live request nor a stored file may alter its pins.
     CHECK_FALSE(driver.userEditable()); CHECK(driver.blocksAncestorRemoval());
     driver.setName("RmtMini"); REQUIRE(tree.owner.addChild(&driver));
     CHECK(tree.scheduler.setControl("RmtMini", "pins", R"("48")") == mm::Scheduler::SetControlResult::ReadOnly);

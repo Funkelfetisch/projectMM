@@ -5,13 +5,13 @@
 #include "light/effects/WledSineMotion.h"
 
 namespace mm {
-/// One physical 1D frame of archived WLED-MM Plasmoid. The caller owns the
-/// initialized pixels, palette, audio input, clock and frame scheduling.
+/// One physical 1D frame of archived WLED-MM Plasmoid. The caller owns the initialized pixels, palette, audio input, clock and frame scheduling.
 /// @attribution WLED and FastLED contributors
 class WledPlasmoidFrame {
 public:
     struct Pixel { uint8_t r, g, b, w; };
 
+    /// Add two pixels channel by channel, scaling all four down together when the brightest passes 255.
     static Pixel add(Pixel a, Pixel b) {
         unsigned r = unsigned(a.r) + b.r, g = unsigned(a.g) + b.g;
         unsigned blue = unsigned(a.b) + b.b, w = unsigned(a.w) + b.w;

@@ -314,8 +314,7 @@ TEST_CASE("output memory: reduced resolution still reaches every physical LED") 
         effect.physical = physical;
         layer.addChild(&effect);
         LowHeap pressure;
-        // Enough for a reduced geometric table and buffer, with real cumulative
-        // debit; a fresh mapping cannot consume the shared reserve itself.
+        // Enough for a reduced geometric table and buffer, with real cumulative debit; a fresh mapping cannot consume the shared reserve itself.
         mm::platform::setTestHeapCapacity(mm::platform::allocatedBytes() + mm::platform::HEAP_RESERVE + 512);
         layer.applyState();
         REQUIRE(layer.buffer().data() != nullptr);

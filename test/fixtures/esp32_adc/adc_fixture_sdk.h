@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-// The SDK seam records calls made by the production ADC implementation.
+/// The SDK seam records calls made by the production ADC implementation.
 using esp_err_t = int;
 inline constexpr esp_err_t ESP_OK = 0;
 inline constexpr esp_err_t ESP_FAIL = -1;
@@ -24,36 +24,54 @@ enum adc_atten_t { ADC_ATTEN_DB_12 = 3 };
 enum adc_bitwidth_t { ADC_BITWIDTH_DEFAULT = 0 };
 
 struct adc_oneshot_unit_init_cfg_t {
+    /// The ADC unit to open.
     adc_unit_t unit_id;
+    /// The clock source, recorded and otherwise ignored.
     int clk_src;
+    /// The ULP mode, recorded and otherwise ignored.
     int ulp_mode;
 };
 struct adc_oneshot_chan_cfg_t {
+    /// The input attenuation the channel is configured with.
     adc_atten_t atten;
+    /// The conversion width the channel is configured with.
     adc_bitwidth_t bitwidth;
 };
 struct adc_cali_curve_fitting_config_t {
+    /// The ADC unit the scheme calibrates.
     adc_unit_t unit_id;
+    /// The channel the scheme calibrates.
     adc_channel_t chan;
+    /// The attenuation the scheme calibrates for.
     adc_atten_t atten;
+    /// The conversion width the scheme calibrates for.
     adc_bitwidth_t bitwidth;
 };
 struct adc_cali_line_fitting_config_t {
+    /// The ADC unit the scheme calibrates.
     adc_unit_t unit_id;
+    /// The attenuation the scheme calibrates for.
     adc_atten_t atten;
+    /// The conversion width the scheme calibrates for.
     adc_bitwidth_t bitwidth;
+    /// The reference voltage in millivolts, recorded and otherwise ignored.
     uint32_t default_vref;
 };
 
 namespace adc_fixture {
 struct UnitHandle { adc_unit_t unit; };
 struct CalibrationHandle {
+    /// The unit the calibration was created for.
     adc_unit_t unit = ADC_UNIT_1;
+    /// The channel the calibration was created for.
     adc_channel_t channel = ADC_CHANNEL_0;
 };
 struct ChannelCall {
+    /// The unit the channel belongs to.
     adc_unit_t unit;
+    /// The channel that was configured.
     adc_channel_t channel;
+    /// The configuration it was given.
     adc_oneshot_chan_cfg_t config;
 };
 struct ReadCall { adc_unit_t unit; adc_channel_t channel; };
@@ -62,19 +80,33 @@ struct ConversionCall { CalibrationHandle* handle; int raw; };
 struct State {
     std::array<UnitHandle, 2> units{{{ADC_UNIT_1}, {ADC_UNIT_2}}};
     std::array<std::array<CalibrationHandle, 10>, 2> calibrations{};
+    /// Each GPIO pin looked up for its unit and channel, in call order.
     std::vector<int> mappings;
+    /// Each unit configuration passed to open, in call order.
     std::vector<adc_oneshot_unit_init_cfg_t> opened;
+    /// Each channel configuration, in call order.
     std::vector<ChannelCall> configured;
+    /// Each raw read, in call order.
     std::vector<ReadCall> reads;
+    /// Each curve-fitting calibration requested, in call order.
     std::vector<adc_cali_curve_fitting_config_t> curves;
+    /// Each line-fitting calibration requested, in call order.
     std::vector<adc_cali_line_fitting_config_t> lines;
+    /// Each raw-to-millivolt conversion, in call order.
     std::vector<ConversionCall> conversions;
+    /// The status the next unit open returns.
     esp_err_t openResult = ESP_OK;
+    /// The status the next channel configuration returns.
     esp_err_t configureResult = ESP_OK;
+    /// The status the next raw read returns.
     esp_err_t readResult = ESP_OK;
+    /// The status the next curve-fitting calibration returns.
     esp_err_t curveResult = ESP_OK;
+    /// The status the next line-fitting calibration returns.
     esp_err_t lineResult = ESP_OK;
+    /// The status the next conversion returns.
     esp_err_t conversionResult = ESP_OK;
+    /// The raw value every read reports.
     int raw = 1234;
     std::array<int, 2> millivolts{{1100, 2200}};
     std::function<void()> duringRead;

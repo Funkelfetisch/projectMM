@@ -168,8 +168,7 @@ int updateAdvertisement(Peripheral& peripheral) {
 
 void advertisementChanged(ble_npl_event* event) {
     auto* peripheral = static_cast<Peripheral*>(ble_npl_event_get_arg(event));
-    // With another connection slot free, the device is still discoverable and
-    // its scan response must reflect changes made by the connected client.
+    // With another connection slot free, the device is still discoverable and its scan response must reflect changes made by the connected client.
     if (peripheral != active) return;
     std::array<uint8_t, 13> desired;
     { std::lock_guard<std::mutex> lock(peripheral->mutex); desired = peripheral->advertisement; }
@@ -222,8 +221,7 @@ void advertise() {
     else ESP_LOGI(kBleTag, "advertising, address type %u", static_cast<unsigned>(active->addressType));
 }
 
-/// Request a longer supervision timeout only when the central's current
-/// parameters are valid and short. Rejection leaves the link untouched.
+/// Request a longer supervision timeout only when the central's current parameters are valid and short; rejection leaves the link untouched.
 void requestConnectionHint(uint16_t handle) {
     ble_gap_conn_desc desc{};
     if (ble_gap_conn_find(handle, &desc) != 0) return;
@@ -511,8 +509,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
 bool bleControlStart(BleControlHandle& handle, const char* name, const char* identity, const BleBatteryConfig& batteries) {
     if (!batteries.valid()) return false;
     if (!bleControlStop(handle)) return false;
-    // An earlier service may have died after a failed stop. It handed this
-    // context to the platform; only a confirmed stop makes replacement safe.
+    // An earlier service may have died after a failed stop; it handed this context to the platform, and only a confirmed stop makes replacement safe.
     if (!reapAbandonedHost()) return false;
     if (active || !validIdentity(name, identity)) return false;
     auto* peripheral = new (std::nothrow) Peripheral();
@@ -526,8 +523,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_hs_cfg.reset_cb = [](int) { if (active) active->synchronized.store(false); };
     ble_npl_event_init(&peripheral->observerChanged, updateObserver, peripheral);
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
-    // The ordinary lighting service is open to nearby controllers. It does not
-    // request persistent keys, and pairs only when bleControlSecurity asks for a secret.
+    // The ordinary lighting service is open to nearby controllers: it does not request persistent keys, and pairs only when bleControlSecurity asks for a secret.
     ble_hs_cfg.sm_bonding = 0;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;

@@ -147,8 +147,7 @@ public:
     void setup() override { parseConfig(); }
     /// Release the RMT channels, free the frame buffer, and clear the shared error state.
     void release() override {
-        // A power owner must first latch black, hold DIN low and switch its
-        // rail off. A direct release must not bypass that checked handover.
+        // A power owner latches black, holds DIN low and switches its rail off first: a direct release must not bypass that checked handover.
         if (powerOwner_) {
             setStatus("RMT power owner still active", Severity::Error);
             return;
@@ -165,8 +164,7 @@ public:
 
     /// Re-parse, resize the frame buffer and re-init the channels, off the hot path.
     void prepare() override {
-        // Only the owning power sequence may reattach a powered output.
-        // A generic tree rebuild must not tear down an active rail's data pin.
+        // Only the owning power sequence reattaches a powered output: a generic tree rebuild must not tear down an active rail's data pin.
         if (powerOwner_ && !powerAttachInProgress_) return;
         if (powerDetached_) return;
         // Drain first: a prepare can land mid-frame while the peripheral still reads the buffer.
@@ -229,14 +227,12 @@ public:
             txInFlight_ = !waitForPins();     // still busy: leave frame_ alone for another tick
             if (txInFlight_) return;
         }
-        // Keep the output held after the one requested black frame, even if it failed.
-        // A power lifecycle must explicitly retry or release the gate.
+        // The output stays held after the one requested black frame, even if it failed, until a power lifecycle retries or releases the gate.
         if (blackFrameRequested_ && blackFrameAttempted_) return;
 
         const nrOfLightsType n = txLightCount_ < winLen_ ? txLightCount_ : winLen_;
         const uint8_t outCh = correction_.outChannels;
-        // Power sequencing may require a complete physical strip, not merely
-        // the prefix available in a shortened source window.
+        // Power sequencing needs a complete physical strip, not merely the prefix a shortened source window offers.
         if (blackFrameRequested_ && ((blackExpectedLights_ && n != blackExpectedLights_)
                                    || (blackExpectedChannels_ && outCh != blackExpectedChannels_))) {
             blackFrameAttempted_ = true;
@@ -289,8 +285,7 @@ public:
             else allDone = false;
         }
         if (allDone && frameAttempted_) {
-            // A timeout leaves the frame and latch pending. Only after the final
-            // started channel drains can the reset-low interval complete it.
+            // A timeout leaves the frame and latch pending: only after the final started channel drains can the reset-low interval complete it.
             if (cfg_.reset_us) platform::delayUs(cfg_.reset_us);
             lastFrameLatched_ = !frameStartFailed_;
             frameAttempted_ = false;
@@ -298,20 +293,20 @@ public:
         return allDone;
     }
 
-    /// Whether the most recently attempted frame started on every used pin,
-    /// completed, and observed the configured reset-low interval.
+    /// Whether the most recently attempted frame started on every used pin, completed, and observed the configured reset-low interval.
     bool lastFrameLatched() const { return lastFrameLatched_; }
     /// Whether an accepted transfer still owns the frame buffer.
     bool frameInFlight() const { return txInFlight_; }
 
-    /// Check the resolved output before a board power owner uses it. The owner
-    /// must still serialize configuration changes and tick for its lifetime.
+    /// Whether the one resolved output pin is `pin`; the owner serializes configuration changes and tick for its lifetime.
     bool hasPowerPin(uint16_t pin) const { return pinCount_ == 1 && pinList_[0] == pin; }
+    /// Whether the live wiring is that pin carrying exactly `lights` lights of `channels` channels from a valid source window.
     bool hasPowerWiring(uint16_t pin, nrOfLightsType lights, uint8_t channels) const {
         return !powerSourceInvalidated_ && !configErr_ && hasPowerPin(pin)
             && pinCounts_[0] == lights && txLightCount_ == lights && winLen_ >= lights
             && correction_.outChannels == channels && sourceBuffer_ && sourceBuffer_->data();
     }
+    /// Whether the configured pin list, counts and window re-parse to that same single output, so a pending edit shows.
     bool matchesPowerOutput(uint16_t pin, nrOfLightsType lights, uint8_t channels) const {
         if (!hasPowerWiring(pin, lights, channels)) return false;
         uint16_t parsedPins[kMaxPins] = {};
@@ -327,8 +322,7 @@ public:
             && start == winStart_ && length == winLen_;
     }
 
-    /// Stop this driver for a power handover. The caller must serialize this
-    /// operation with tick and request a black hold before calling it.
+    /// Stop this driver for a power handover. The caller serializes this operation with tick and requests a black hold before calling it.
     bool detachForPower() {
         if (!blackFrameRequested_) return false;
         powerDetached_ = true;
@@ -351,8 +345,7 @@ public:
         powerSourceData_ = nullptr; powerSourceCount_ = 0;
         return true;
     }
-    /// Attach after the rail is stable; the black hold remains until a new
-    /// black frame is sent and confirmed. No GPIO level is asserted here.
+    /// Attach after the rail is stable; the black hold remains until a new black frame is sent and confirmed, and no GPIO level is asserted here.
     bool attachForPower() {
         if (!powerDetached_ || powerDetachIncomplete_ || !blackFrameRequested_) return false;
         for (const auto& handle : rmt_) if (handle.impl) return false;
@@ -370,15 +363,14 @@ public:
         return true;
     }
 
-    /// A power controller reserves this driver before changing DIN or its rail.
-    /// The token is compared only; the owner must outlive the reservation.
+    /// A power controller reserves this driver before changing DIN or its rail; the token is compared only, so the owner outlives the reservation.
     bool claimPowerOwner(const void* owner) {
         if (!owner || (powerOwner_ && powerOwner_ != owner)) return false;
         powerOwner_ = owner; return true;
     }
+    /// Whether `owner` holds the reservation.
     bool powerOwnedBy(const void* owner) const { return owner && powerOwner_ == owner; }
-    /// Complete a checked handover after the owner has independently held DIN
-    /// low and switched the rail off. Does not itself verify GPIO or power.
+    /// Complete a checked handover after the owner has independently held DIN low and switched the rail off; it verifies neither GPIO nor power.
     bool finishPowerHandover(const void* owner) {
         if (!powerOwnedBy(owner) || !powerDetached_ || powerDetachIncomplete_ || txInFlight_) return false;
         for (const auto& handle : rmt_) if (handle.impl) return false;
@@ -392,12 +384,16 @@ public:
         if (!owner || powerOwner_ != owner) return false;
         powerOwner_ = nullptr; return true;
     }
+    /// Whether the user may edit this driver: not while a power owner, a handover or a black hold has it.
     bool userEditable() const override { return !powerOwner_ && !powerDetached_ && !blackFrameRequested_; }
+    /// Whether removing an ancestor waits: a power owner, a handover or a black hold is active.
     bool blocksAncestorRemoval() const override { return powerOwner_ || powerDetached_ || blackFrameRequested_; }
+    /// Whether a control write lands: refused while a power owner, a handover or a black hold has the driver.
     bool acceptsControlWrite(const char*) const override { return !powerOwner_ && !powerDetached_ && !blackFrameRequested_; }
 
-    /// Hold normal output and send one black frame on the next tick. Retry is explicit.
+    /// Where a requested black frame stands, as `blackFrameStatus` reports it.
     enum class BlackFrameStatus : uint8_t { Idle, Pending, Latched, Failed };
+    /// Hold normal output and send one black frame on the next tick. Retry is explicit.
     void requestBlackFrame(nrOfLightsType expectedLights = 0, uint8_t expectedChannels = 0) {
         invalidateFrameConfirmation();
         blackExpectedLights_ = expectedLights;
@@ -405,6 +401,7 @@ public:
         blackFrameRequested_ = true;
         blackFrameAttempted_ = false;
     }
+    /// Whether the requested black frame went out and latched.
     bool blackFrameLatched() const {
         return blackFrameRequested_ && blackFrameAttempted_ && lastFrameLatched_;
     }

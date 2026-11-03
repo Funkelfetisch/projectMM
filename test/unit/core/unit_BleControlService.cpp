@@ -247,8 +247,7 @@ TEST_CASE("BLE battery reads retain independent identities and fit the minimum-M
     const auto snapshot = battery.snapshot(2001);
     CHECK(snapshot.slots[0].presenceKnown); CHECK(snapshot.slots[0].present);
     CHECK_FALSE(snapshot.slots[0].levelValid);
-    // Only the second pack recovers: RPC2 and BAS must agree on its physical
-    // identity without making the first pack appear fresh or discharged.
+    // Only the second pack recovers: RPC2 and BAS must agree on its physical identity without making the first pack appear fresh or discharged.
     second.acceptAdc(1900, 2001);
     tree.send(R"({"$v":1,"$id":505,"$op":"battery"})", 2001);
     CHECK(tree.reply().find("\"id\":1,\"sample\":{\"presence\":\"present\",\"state\":\"stale\"") != std::string::npos);
@@ -1172,8 +1171,7 @@ TEST_CASE("BLE sphere diameter is explicit physical metadata, never derived from
     model->diameter = 8;
     tree.send(R"({"$v":1,"$id":2,"$op":"profile"})", 101);
     CHECK(tree.reply().find("\"diameterMm\":80") != std::string::npos);
-    // MINI80 is a distinct, still-unverified firmware target; an explicit
-    // diameter is metadata rather than proof of the physical board.
+    // MINI80 is a distinct, still-unverified firmware target; an explicit diameter is metadata rather than proof of the physical board.
     tree.service.setAdvertisingProduct({2, 0});
     model->diameter = 0;
     tree.send(R"({"$v":1,"$id":3,"$op":"profile"})", 102);
@@ -1236,8 +1234,7 @@ TEST_CASE("BLE pixel-map RPC reads bounded current coordinates and rejects stale
 }
 
 namespace {
-// A BLE product with Network, its station and its access point wired as main wires them, on the desktop's radio seams,
-// reached over a link the phone already encrypted.
+// A BLE product with Network, its station and its access point wired as main wires them, on the desktop's radio seams, reached over a link the phone already encrypted.
 struct BleWifiTree : BleTree {
     mm::NetworkModule* net = new mm::NetworkModule();
     mm::WiFiModule* wifi = new mm::WiFiModule();

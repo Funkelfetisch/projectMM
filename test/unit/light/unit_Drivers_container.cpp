@@ -123,8 +123,7 @@ struct DeletedLayer : mm::Layer {
     bool& deleted_;
 };
 
-// The drivers borrow a heap-owned Layer's Buffer in the single-core identity path.
-// StateDocument must sever those borrows before it destroys that Layer.
+// The drivers borrow a heap-owned Layer's Buffer in the single-core identity path, so StateDocument must sever those borrows before it destroys that Layer.
 struct DriverLifetimeRig {
     mm::FixtureProfilesModule profiles;
     mm::Layouts layouts;
@@ -203,8 +202,7 @@ TEST_CASE("Drivers detach real Network and RMT buffers before StateDocument dele
     CHECK(rig.network.layer() == nullptr);
     CHECK(rig.rmt.layer() == nullptr);
 
-    // Both real correction callbacks run in the delete/prepare gap. Network resizes
-    // unconditionally; RGB->RGBW forces RMT to re-parse the source geometry.
+    // Both real correction callbacks run in the delete/prepare gap: Network resizes unconditionally, and RGB->RGBW forces RMT to re-parse the source geometry.
     REQUIRE(rig.scheduler.setControl("Network", "fixture", R"({"value":"RGBW"})") == mm::Scheduler::SetControlResult::Ok);
     REQUIRE(rig.scheduler.setControl("RMT", "fixture", R"({"value":"RGBW"})") == mm::Scheduler::SetControlResult::Ok);
     rig.drivers.fixtureChannels();

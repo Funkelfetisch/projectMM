@@ -7,15 +7,23 @@
 
 namespace mm {
 /// Experimental transfer frame, independent of BLE framing and connection ownership.
+///
 /// All multibyte numbers are little-endian. The caller owns the source buffer.
 struct FirmwareUploadFrame {
     enum class Kind : uint8_t { Begin = 1, Chunk = 2, Finish = 3, Abort = 4, Status = 5, Resume = 6 };
+    /// The longest frame a parse accepts, in bytes.
     static constexpr size_t kMaxBytes = 512;
+    /// What the frame asks for.
     Kind kind{};
-    uint32_t value = 0; // Begin: total image length; Chunk: exact byte offset.
+    /// Begin: total image length; Chunk: exact byte offset.
+    uint32_t value = 0;
+    /// The image digest a Begin carries.
     std::array<uint8_t, 32> digest{};
+    /// The resume token a Begin, Resume or Status carries.
     std::array<uint8_t, 16> token{};
+    /// The chunk bytes, pointing into the caller's buffer.
     const uint8_t* data = nullptr;
+    /// How many bytes `data` holds.
     size_t length = 0;
 
     /// On failure the output is cleared; no bytes outside the input are read.

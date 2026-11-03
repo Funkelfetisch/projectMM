@@ -308,8 +308,7 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::RingsEffect>("RingsEffect", "light/effects.md#rings");
     if (mm::isProductFirmware(mm::kFirmwareName)) {
         constexpr const char* doc = "light/effects.md#heliowledpresets";
-        mm::ModuleFactory::registerType<mm::HelioFactoryTestEffect>(
-            "HelioFactoryTestEffect", "light/effects.md#heliofactorytest");
+        mm::ModuleFactory::registerType<mm::HelioFactoryTestEffect>("HelioFactoryTestEffect", doc);
         mm::ModuleFactory::registerType<mm::HelioWledPresetsEffect>("HelioWledPresetsEffect", doc);
         mm::ModuleFactory::registerType<mm::HelioCandleMultiEffect>("HelioCandleMultiEffect", doc);
         mm::ModuleFactory::registerType<mm::HelioColorTwinklesEffect>("HelioColorTwinklesEffect", doc);

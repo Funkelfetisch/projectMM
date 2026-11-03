@@ -9,8 +9,11 @@ namespace mm {
 /// @guide Match RingLayout and RMT lengths to the physical strip and use this effect alone on its layer.
 class HelioFactoryTestEffect : public EffectBase {
 public:
+    /// Spans the whole physical light list, so the effect is volumetric.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
+    /// Tags the card with the MoonLight origin.
     const char* tags() const override { return "💫"; }
 
     enum Phase : uint8_t {
@@ -25,10 +28,12 @@ public:
         "6 White die 100%", "7 RGBW white 25%",
     };
 
+    /// Publish the phase selector.
     void defineControls() override {
         controls_.addSelect("phase", phase, kPhases, 8);
     }
 
+    /// Write the selected RGBW pattern across the buffer, leaving it dark unless the layer is four-channel and unmapped.
     void tick() MM_NONBLOCKING override {
         uint8_t* const data = buffer();
         const size_t count = static_cast<size_t>(nrOfLights());
@@ -36,9 +41,7 @@ public:
         const size_t bytes = layer()->buffer().bytes();
         if (!data || bytes == 0 || count == 0 || cpl == 0) return;
 
-        // A three-channel or remapped layer fails dark instead of showing a
-        // misleading test pattern. Clear only the allocated buffer, never the
-        // assumed physical count, even if an operator left a modifier enabled.
+        // A three-channel or remapped layer fails dark rather than showing a misleading pattern; only the allocated buffer is cleared, never the assumed physical count.
         std::memset(data, 0, bytes);
         if (cpl != 4 || bytes != count * cpl) return;
 
@@ -49,8 +52,7 @@ public:
             phaseStartMs_ = now;
         }
 
-        // Write every channel on every frame, so no previous scene/phase can
-        // leak into a current or channel-order measurement.
+        // Write every channel on every frame, so no previous scene or phase leaks into a current or channel-order measurement.
         uint8_t r = 0, g = 0, b = 0, w = 0;
         switch (selected) {
             case FullWhite: r = g = b = w = 255; break;

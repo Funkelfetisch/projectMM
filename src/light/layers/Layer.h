@@ -411,8 +411,7 @@ public:
         }
 
         reclaimUnadmittedWorkingSet(cellCount(logical));
-        // Retain an admitted raster when growth cannot fit. The coordinates are
-        // still rebuilt, so angle, crop and modifier changes apply to reused storage.
+        // Retain an admitted raster when growth cannot fit; the coordinates are still rebuilt, so angle, crop and modifier changes apply to reused storage.
         const auto request = memoryRequest(static_cast<size_t>(cellCount(logical)) * channelsPerLight_);
         const size_t tableBytes = MappingLUT::estimateBytes(cellCount(logical), driverCount);
         const size_t growth = tableBytes > lut_.memoryUsed() ? tableBytes - lut_.memoryUsed() : 0;

@@ -356,15 +356,13 @@ public:
     /// Owner of pins already held for this module's own configuration.
     virtual const void* pinReservationOwner() const { return nullptr; }
 
-    /// An active resource handover may also forbid deleting an ancestor.
-    /// Ordinary fixed children do not prevent removal of their owning parent.
+    /// An active resource handover may also forbid deleting an ancestor; ordinary fixed children do not prevent removal of their owning parent.
     virtual bool blocksAncestorRemoval() const { return false; }
-    /// Advance a checked hardware handover during application shutdown. An
-    /// owner overriding this must keep output disabled and must not block.
-    /// The ordinary render/control tick is not run during this phase.
+    /// Advance a checked hardware handover during application shutdown, when the ordinary render and control tick does not run; an override keeps output disabled and never blocks.
     virtual void shutdownStep(uint32_t now) MM_NONBLOCKING {
         for (uint8_t i = childCount_; i > 0; --i) children_[i - 1]->shutdownStep(now);
     }
+    /// Whether no module in this subtree blocks the removal of an ancestor.
     bool subtreeRemovalAllowed() const {
         if (blocksAncestorRemoval()) return false;
         for (uint8_t i = 0; i < childCount_; ++i)
@@ -378,8 +376,7 @@ public:
     /// Park any worker of this module's that reads the tree, returning once it is idle.
     virtual void quiesce() {}
 
-    /// Park resources throughout a subtree before a checked destructive
-    /// teardown. A resource may discover a failed handover only while parked.
+    /// Park resources throughout a subtree before a checked destructive teardown, since a resource may discover a failed handover only while parked.
     void quiesceSubtreeForRemoval() {
         quiesce();
         for (uint8_t i = childCount_; i > 0; --i) children_[i - 1]->quiesceSubtreeForRemoval();

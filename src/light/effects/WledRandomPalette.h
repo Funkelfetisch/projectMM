@@ -5,8 +5,7 @@
 
 namespace mm {
 
-/// Palette-1 render primitives from the archived WLED-MM v0.9 and FastLED
-/// 3.6. The caller supplies the random CHSV anchors and owns the update clock.
+/// Palette-1 render primitives from the archived WLED-MM v0.9 and FastLED 3.6; the caller supplies the random CHSV anchors and owns the update clock.
 /// @attribution WLED contributors; FastLED contributors
 class WledRandomPalette {
 public:
@@ -31,6 +30,7 @@ public:
         }
     }
 
+    /// FastLED's HSV to RGB conversion on the rainbow spectrum, with its video scaling of saturation and value.
     static RGB rainbow(HSV hsv) {
         const uint8_t o = (hsv.h & 31u) << 3;
         const uint8_t third = scale(o, 85), two = scale(o, 170);
@@ -63,17 +63,14 @@ public:
         return {r, g, b};
     }
 
-    /// WLED-MM's 5-second weighted transition, with independent truncation.
-    /// The archived profiles change palette every 5 seconds.
+    /// WLED-MM's 5-second weighted transition with independent truncation, as the archived profiles change palette every 5 seconds.
     static RGB blend(RGB before, RGB after, uint32_t elapsedMs) {
         if (elapsedMs > 5000) elapsedMs = 5000;
         return {weighted(before.r, after.r, elapsedMs), weighted(before.g, after.g, elapsedMs),
                 weighted(before.b, after.b, elapsedMs)};
     }
 
-    /// WLED-MM palette 74 performs up to 128 FastLED 48-channel blend
-    /// steps over 250 ms. Each unequal channel rises by one or falls by up
-    /// to two per step; after 250 ms the new palette is selected directly.
+    /// WLED-MM palette 74 performs up to 128 FastLED 48-channel blend steps over 250 ms: each unequal channel rises by one or falls by up to two per step, then the new palette is selected directly.
     static void transition74(const RGB (&before)[16], const RGB (&after)[16],
                              uint32_t elapsedMs, RGB (&out)[16]) {
         if (elapsedMs > 250) { for (unsigned i = 0; i < 16; ++i) out[i] = after[i]; return; }

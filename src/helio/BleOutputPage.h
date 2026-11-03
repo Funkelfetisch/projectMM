@@ -8,8 +8,7 @@
 #include <cstring>
 
 namespace mm {
-/// Reports configured driver windows and resolved fixture channels, not wiring,
-/// actual light count, pin qualification, or an exclusive role for any pixel.
+/// Reports configured driver windows and resolved fixture channels, not wiring, actual light count, pin qualification, or an exclusive role for any pixel.
 class BleOutputPage {
     static void describe(JsonSink& sink, const MoonModule& child) {
         sink.append("{\"type\":"); sink.writeJsonString(child.typeName());
@@ -26,6 +25,7 @@ class BleOutputPage {
         sink.append("}");
     }
 public:
+    /// Append the `outputs` page holding the enabled driver at `offset` and its revision, or return an error name: outputs-changed, outputs-offset or outputs-too-large; null on success.
     static const char* writeCurrent(JsonSink& sink, Scheduler& scheduler, uint16_t offset, const char* expected) {
         const MoonModule* root = nullptr;
         for (uint8_t i = 0; i < scheduler.moduleCount(); ++i) {

@@ -33,8 +33,7 @@ struct StateDocumentResult {
     uint16_t skipped = 0;      ///< members a stored file names that this build cannot place, each logged
 };
 
-/// A caller validating the document as confined to a subtree may provide its prepare scope.
-/// Apply a state document to the tree; a request is checked whole before anything changes, a stored file member by member. A root `$` key, such as a preset's `$slot`, is the file's own.
+/// Apply a state document to the tree: a request is checked whole before anything changes, a stored file member by member; a caller confined to a subtree passes its `prepareScope`. A root `$` key, such as `$slot`, is the file's own.
 StateDocumentResult applyStateDocument(Scheduler& scheduler, const char* text, StateSource source = StateSource::Request, MoonModule* prepareScope = nullptr);
 
 /// Write what applying a document did as the API answers it: `ok` and `changes`, or the `error` and where it is, and how many controls wait for the rebuild.

@@ -17,30 +17,47 @@ namespace mm {
 /// Native preset documents shared by control surfaces and HTTP, with conditional atomic writes.
 class PresetStore {
 public:
+    /// Directory holding one `<name>.json` file per preset.
     static constexpr const char* kDirectory = "/.config/presets";
+    /// Size of a name buffer including its terminator, so a valid name is shorter.
     static constexpr uint8_t kMaxNameLen = 32;
+    /// Most presets the store holds, which is also the number of pads.
     static constexpr uint8_t kMaxPresets = 64;
     inline static constexpr const char* kCapturable[] = {"Layouts", "Effects", "Drivers", "Services"};
     inline static constexpr const char* kCaptureRole[] = {"layout", "effects", "driver", "service"};
     enum class Mode { Create, Match, Overwrite };
 
     struct Result {
+        /// HTTP-style outcome: 2xx succeeded, any other value names the failure.
         int status = 200;
+        /// Why the call failed, empty on success.
         const char* error = "";
+        /// True when the write made a new file rather than replacing one.
         bool created = false;
+        /// True when the preset's document reached the running state.
         bool applied = false;
+        /// Content tag of the stored file.
         char etag[65] = {};
+        /// Tag of the rendering state after an apply.
         char outputEtag[65] = {};
+        /// What the state document changed, or why it was refused.
         StateDocumentResult state;
+        /// True for a 2xx status.
         explicit operator bool() const { return status >= 200 && status < 300; }
     };
 
     struct File {
+        /// Heap copy of the file's content, NUL-terminated and freed with the File.
         char* text = nullptr;
+        /// Content length in bytes, excluding the terminator.
         size_t size = 0;
+        /// Content tag of the file.
         char etag[65] = {};
+        /// An empty File owns nothing.
         File() = default;
+        /// Frees the text.
         ~File() { platform::free(text); }
+        /// A File owns its text exclusively, so it is never copied.
         File(const File&) = delete;
         File& operator=(const File&) = delete;
     };
@@ -51,6 +68,7 @@ public:
         uint8_t count; ///< Valid names, at most kMaxPresets.
     };
 
+    /// A name is 1 to kMaxNameLen-1 printable ASCII characters with no path separator or dot.
     static bool validName(const char* name) {
         if (!name || !name[0] || std::strlen(name) >= kMaxNameLen) return false;
         for (const unsigned char* p = reinterpret_cast<const unsigned char*>(name); *p; ++p)
@@ -58,6 +76,7 @@ public:
         return true;
     }
 
+    /// Writes the file path of the named preset under kDirectory into `path`.
     static void pathFor(const char* name, char* path, size_t capacity) {
         std::snprintf(path, capacity, "%s/%s.json", kDirectory, name);
     }
@@ -69,6 +88,7 @@ public:
         scheduler.notifyFileChanged(path);
     }
 
+    /// Loads the named preset's text and content tag into `out` under the store lock.
     static Result read(const char* name, File& out) {
         if (!validName(name)) return failure(400, "invalid preset name");
         LockGuard guard(lock_);
@@ -107,6 +127,7 @@ public:
         return result;
     }
 
+    /// Removes the named preset; `requireMatch` demands the content tag of the stored file.
     static Result erase(const char* name, const char* etag, bool requireMatch = true) {
         if (!validName(name)) return failure(400, "invalid preset name");
         if (requireMatch && (!etag || !etag[0])) return failure(428, "If-Match is required");
@@ -120,6 +141,7 @@ public:
         return platform::fsRemove(path) ? Result{} : failure(507, "could not delete preset");
     }
 
+    /// Moves a preset to a free name by writing the copy before removing the original.
     static Result rename(const char* from, const char* to) {
         if (!validName(from) || !validName(to)) return failure(400, "invalid preset name");
         if (std::strcmp(from, to) == 0) return {};
@@ -194,6 +216,7 @@ public:
         return {};
     }
 
+    /// Applies the named preset to the running state, guarded by its content tag and optionally by the output tag.
     static Result apply(Scheduler& scheduler, const char* name, const char* etag,
                         bool lookOnly = true, bool requireMatch = true, const char* outputMatch = nullptr) {
         if (!validName(name)) return failure(400, "invalid preset name");

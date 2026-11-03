@@ -4,13 +4,13 @@
 
 namespace mm {
 
-/// Timing of the legacy WLED blink effect. The caller supplies WLED's frame
-/// time and retains the iteration across frames; rendering and palette
-/// interpolation are intentionally separate.
+/// Timing of the legacy WLED blink effect. The caller supplies WLED's frame time and retains the iteration across frames; rendering and palette interpolation are separate.
 class WledBlinkTiming {
 public:
+    /// Restart the cycle count so the next call begins a fresh iteration.
     void reset() { iteration_ = 0; }
 
+    /// Whether the blink is on at `nowMs`; false when `frameMs` is zero.
     bool next(uint32_t nowMs, uint8_t speed, uint8_t intensity, uint16_t frameMs) {
         // A zero frame time and maximum speed would make the cycle zero.
         if (!frameMs) return false;

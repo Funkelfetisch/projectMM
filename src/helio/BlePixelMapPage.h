@@ -7,16 +7,13 @@
 #include <cstring>
 
 namespace mm {
-/// Paged, read-only description of configured output-to-2D coordinates.
-/// The content token prevents pages from different map versions being mixed;
-/// it is neither authentication nor a claim about physical wiring or the
-/// current Layer's modifiers, raster reduction or LED colours.
+/// Paged, read-only description of configured output-to-2D coordinates. The content token prevents pages from different map versions being mixed; it is neither authentication nor a claim about physical wiring or the current Layer's modifiers, raster reduction or LED colors.
 class BlePixelMapPage {
 public:
+    /// The points one page carries.
     static constexpr uint16_t kPageSize = 16;
 
-    /// Describe one enabled point-map layout. Other or composite layouts are
-    /// deliberately unknown, rather than inferred from a product name.
+    /// Describe one enabled point-map layout; other or composite layouts are deliberately unknown, never inferred from a product name.
     static const char* writeCurrent(JsonSink& sink, Scheduler& scheduler, uint16_t offset, const char* expectedRevision) {
         const MoonModule* layouts = nullptr;
         for (uint8_t i = 0; i < scheduler.moduleCount(); ++i) {
@@ -37,17 +34,15 @@ public:
         return write(sink, *static_cast<const PixelMapLayout*>(selected), offset, expectedRevision);
     }
 
+    /// Writes the page of `map` that starts at `offset`, a stale `expectedRevision` refused; the result is null on success or the error name.
     static const char* write(JsonSink& sink, const PixelMapLayout& map, uint16_t offset, const char* expectedRevision) {
         const uint16_t count = map.lightCount();
         if (!count) return "map-invalid";
         char revision[33];
         sha256Hex(map.points, std::strlen(map.points), revision);
-        // Page zero establishes a snapshot token. A stale continuation never
-        // combines new coordinates with an older first page.
+        // Page zero establishes a snapshot token, so a stale continuation never combines new coordinates with an older first page.
         if (offset && (!expectedRevision || std::strcmp(expectedRevision, revision))) return "map-changed";
-        // A shortened map must report its changed revision before checking the
-        // old cursor, so the reader can restart instead of seeing a range error.
-        // The end cursor is not a page: valid pages always contain a point.
+        // A shortened map reports its changed revision before the old cursor is checked, so the reader restarts instead of seeing a range error; valid pages always contain a point.
         if (offset >= count) return "map-offset";
         struct Point { uint8_t x, y; } points[PixelMapLayout::kMaxPoints]{};
         struct Capture { Point* points; uint16_t count; bool valid; } capture{points, 0, true};

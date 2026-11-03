@@ -7,8 +7,7 @@ namespace mm {
 /// Hue calculation from archived WLED-MM Flow Stripe (FX 179).
 /// @attribution WLED contributors, ldirko, Andrew Tuline
 struct WledFlowStripeMotion {
-    /// The original divides by floor(count*10/13), which is zero for one
-    /// pixel. Refuse that degenerate range instead of dividing by zero.
+    /// Writes the hue of `pixel` to `out`, false for a degenerate range: the original divides by floor(count*10/13), which is zero for one pixel.
     static bool hue(uint32_t now, uint8_t speed, uint8_t intensity,
                     uint16_t pixel, uint16_t count, uint8_t& out) {
         const uint16_t half = static_cast<uint16_t>(uint32_t(count) * 10u / 13u);

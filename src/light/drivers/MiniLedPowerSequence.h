@@ -4,9 +4,7 @@
 
 namespace mm {
 
-/// Explicit power ordering for a switched LED rail. A board adapter must own
-/// the pins and make detachAndHoldLow drain or cancel the peripheral before it
-/// hands DIN to GPIO. This policy is not wired into any product by default.
+/// Explicit power ordering for a switched LED rail. A board adapter must own the pins and make detachAndHoldLow drain or cancel the peripheral before it hands DIN to GPIO. No product wires this policy in by default.
 class MiniLedPowerSequence {
 public:
     enum class Black : uint8_t { Pending, Latched, Failed };
@@ -14,9 +12,9 @@ public:
     enum class Error : uint8_t { None, Unqualified, Hold, Rail, Attach, Black, Timeout, Release };
 
     struct Port {
+        /// Lets an adapter be destroyed through a Port reference.
         virtual ~Port() = default;
-        /// Prevent new visible frames; an already in-flight frame must be drained
-        /// or cancelled by detachAndHoldLow before DIN changes ownership.
+        /// Prevents new visible frames; detachAndHoldLow must drain or cancel an in-flight frame before DIN changes ownership.
         virtual void holdVisible() = 0;
         /// Detach/drain the data peripheral and establish DIN low.
         virtual bool detachAndHoldLow() = 0;
@@ -26,7 +24,9 @@ public:
         virtual bool setRail(bool enabled) = 0;
         /// Attach the output peripheral without permitting a visible frame.
         virtual bool attachOutput() = 0;
+        /// Requests one black frame over the whole output, which black() then reports.
         virtual void requestBlack() = 0;
+        /// The requested black frame's status: Pending, Latched, or Failed.
         virtual Black black() const = 0;
         /// Verify the owned output still has its qualified configuration.
         virtual bool healthy() const = 0;
@@ -49,19 +49,20 @@ public:
         return true;
     }
 
+    /// Where the sequence stands: Off, Settling, StartingBlack, On, StoppingBlack or Fault.
     State state() const { return state_; }
+    /// The reason for the last refusal or fault, None once cleared.
     Error error() const { return error_; }
     /// Software acknowledgement only: physical rail and DIN need measurement.
     bool safeOffAcknowledged() const { return safeOff_; }
 
-    /// Lifecycle teardown cannot wait for another frame tick. Hold and drain
-    /// DIN before dropping the rail; false means software could not confirm
-    /// that handover. The owner must retain the port until it can retry.
+    /// Lifecycle teardown cannot wait for another frame tick: holds and drains DIN before dropping the rail, and false means software could not confirm that handover, so the owner retains the port until it can retry.
     bool shutdown(Port& port) {
         stop(port);
         return safeOff_;
     }
 
+    /// Advances the sequence one step toward `requestedOn`, `now` being the millisecond clock the settle and black timeouts count against.
     void tick(Port& port, bool requestedOn, uint32_t now) {
         switch (state_) {
         case State::Off:
@@ -96,8 +97,7 @@ public:
             state_ = State::StoppingBlack;
             return;
         case State::StoppingBlack:
-            // Complete the stop even if ON was requested again; the next start
-            // repeats the full rail-settle and black-frame sequence.
+            // Complete the stop even if ON was requested again; the next start repeats the full rail-settle and black-frame sequence.
             finishBlack(port, false, now);
             return;
         case State::Fault:

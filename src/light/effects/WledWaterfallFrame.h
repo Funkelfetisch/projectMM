@@ -4,13 +4,14 @@
 #include <cstddef>
 
 namespace mm {
-/// Stateful 1D Waterfall shift. Callers own colour blending, the input frame,
-/// the segment's pixel storage and the original peak highlight colour.
+/// Stateful 1D Waterfall shift. Callers own color blending, the input frame, the segment's pixel storage and the original peak highlight color.
 /// @attribution WLED contributors
 class WledWaterfallFrame {
 public:
+    /// Restart the shift timing from a fresh state.
     void reset() { motion_.reset(); }
 
+    /// Shift the segment by one pixel when the timing allows and write the newest pixel at the end, returning whether it shifted.
     template<class Pixel, class Palette, class Blend>
     bool step(Pixel* pixels, size_t count, uint32_t micros, uint8_t speed,
               uint8_t intensity, bool peak, float frequencyHz, uint8_t magnitude,

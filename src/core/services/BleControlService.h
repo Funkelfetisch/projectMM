@@ -29,17 +29,22 @@
 namespace mm {
 
 /// Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state, named scheduled operations and a signed firmware update.
+/// @card BleControlService.png
 /// @technical The framing, session, complete-scene and firmware-update contract lives in reference/product-ble.md.
 class BleControlService : public MoonModule {
 public:
+    /// Sorts the module into the service group.
     ModuleRole role() const MM_NONBLOCKING override { return ModuleRole::Service; }
     /// Persisted group membership; empty leaves the group.
     char group[33] = {};
+    /// Stops the BLE transport, abandons it when it will not stop, and frees the RPC sessions.
     ~BleControlService() override {
         if (!platform::bleControlStop(transport_)) platform::bleControlAbandon(transport_);
         clearRpc();
     }
+    /// Replaces the scheduler the service reads module state from; the singleton is the default.
     void setScheduler(Scheduler* scheduler) { scheduler_ = scheduler; }
+    /// Names the firmware, build, version and build time the identity characteristic reports.
     void setIdentity(const char* firmware, const char* build, const char* version = "", const char* builtAt = "") {
         firmware_ = firmware; build_ = build; version_ = version; builtAt_ = builtAt;
     }
@@ -62,17 +67,21 @@ public:
     void setAdvertisingProductResolver(uint8_t (*resolve)(const char*)) { advertisingProductResolver_ = resolve; }
     void setAdvertisingScene(void (*observe)(BleAdvertisementSnapshot&, Scheduler&)) { advertisingScene_ = observe; }
 
+    /// Publish the group, the read-only link, pairing and battery state, and the pairing repair button.
     void defineControls() override {
         controls_.addText("group", group, sizeof(group));
         controls_.addReadOnly("connection", connection_, sizeof(connection_));
         controls_.addReadOnly("batteryServices", batteryServices_, sizeof(batteryServices_));
+        /// The product profile of this device as JSON, null for an unknown product.
         controls_.addReadOnly("productProfile", profileText_, sizeof(profileText_));
         controls_.addReadOnly("pairing", pairing_, sizeof(pairing_));
+        /// Connection counts and the last disconnect reason.
         controls_.addReadOnly("link diagnostics", linkDiagnostics_, sizeof(linkDiagnostics_));
-        /// Authorize one stale-bond replacement for three minutes; other phones keep their bonds.
+        /// Authorize one stale-bond replacement for three minutes; other bonds stay.
         controls_.addButton("repairPairing");
         MoonModule::defineControls();
     }
+    /// Start the BLE transport and the RPC session state; a failed start leaves a status and no link.
     void prepare() override {
         if (transport_.impl) return;
         if (!scheduler_) scheduler_ = Scheduler::instance();
@@ -99,6 +108,7 @@ public:
         replySession_ = 0; replyGeneration_ = 0; std::snprintf(replyOperation_, sizeof(replyOperation_), "%s", "ready");
         result(0, "session-required");
     }
+    /// Stop the transport and clear the RPC state; a radio that will not stop is retained with an error status.
     void release() override {
         if (!platform::bleControlStop(transport_)) {
             setStatus("BLE shutdown incomplete; radio context retained", Severity::Error);
@@ -107,21 +117,22 @@ public:
         clearRpc(); pendingText_.resize(0); job_ = {}; terminal_ = {}; epochReady_ = false; activeOwner_ = 0;
         MoonModule::release();
     }
+    /// No control restarts the transport.
     bool affectsPrepare(const char*) const override { return false; }
+    /// Opens the pairing repair window, or warns when the transport cannot.
     void onControlChanged(const char* name) override {
         if (std::strcmp(name, "repairPairing") == 0 && !platform::bleControlAllowRepair(transport_))
             setStatus("BLE unavailable for pairing repair", Severity::Warning);
         MoonModule::onControlChanged(name);
     }
+    /// Release links that went away, flush a pending reply, apply due work, then handle at most one request.
     void tick() MM_NONBLOCKING override {
         std::array<uint64_t, platform::kBleControlPeerCapacity> owners{}; size_t ownerCount = 0;
         if (rpc_ && platform::bleControlOwners(transport_, owners.data(), owners.size(), ownerCount))
             rpc_[0].releaseInactive(owners.data(), ownerCount);
         // A contended transport must not let a later request or timer overwrite an unpublished reply.
         if (!flushReply()) { MoonModule::tick(); return; }
-        // One clock sample defines the ordering boundary for this entire tick.
-        // A deadline crossed while receiving is handled on the next tick, so
-        // handle() cannot create an unpublished terminal reply and overwrite it.
+        // One clock sample bounds this tick; a deadline crossed while receiving waits for the next, so handle() cannot overwrite an unpublished terminal reply.
         const uint32_t now = platform::millis();
         applyDue(now);
         if (!flushReply()) { MoonModule::tick(); return; }
@@ -167,6 +178,7 @@ public:
         }
         return product;
     }
+    /// The scan advertisement's content: product, light count, RGBW or RGB, and power state.
     BleAdvertisementSnapshot advertisementSnapshot() {
         BleAdvertisementSnapshot scan;
         scan.product = productHint();
@@ -184,6 +196,7 @@ public:
         }
         return scan;
     }
+    /// Publish the advertisement, product profile, battery state and the pairing and link counters once a second.
     void tick1s() MM_NONBLOCKING override {
         const auto advertisement = advertisementSnapshot();
         JsonSink profileSink(profileText_, sizeof(profileText_));
@@ -286,7 +299,9 @@ public:
         job_.phase = Phase::Applying;
         apply(pendingText_.data()); pendingText_.resize(0);
     }
+    /// The reply the last request left for the transport to publish.
     const char* response() const { return response_; }
+    /// Whether a named operation waits for its due time.
     bool scheduled() const { return job_.phase == Phase::Queued; }
 
 private:
@@ -631,8 +646,7 @@ private:
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
         sink.append(",\"wifi\":"); network->writeWifi(sink, static_cast<uint8_t>(offset)); end(sink, id);
     }
-    /// Whether this build can take a signed update over BLE: a publisher key, and a slot to write it to.
-    /// An update can arrive over BLE only with a publisher key and an inactive slot to write; a single-slot table has none.
+    /// Whether this build can take a signed update over BLE: only with a publisher key and an inactive slot to write, which a single-slot table lacks.
     bool otaAvailable() const { return releaseKey_ && (platform::hasOta || firmwareSlot_) && slotCapacity() > 0; }
     size_t slotCapacity() const { return firmwareSlot_ ? firmwareSlot_->capacity() : platform::otaNextAppCapacity(); }
     /// The release target is the variant name's FNV-1a, so one rule covers every variant without a table.

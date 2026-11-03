@@ -57,8 +57,7 @@ public:
     void setup();
     /// One pass: tick every top-level module, then pace and publish the timing.
     void tick() MM_NONBLOCKING;
-    /// Release every module in reverse order; retain the entire tree when a
-    /// descendant still owns a resource that cannot safely be removed.
+    /// Release every module in reverse order; retain the entire tree when a descendant still owns a resource that cannot safely be removed.
     bool release();
     /// Advance only explicit shutdown hooks; do not run normal scene ticks.
     void shutdownStep(uint32_t now);
@@ -153,8 +152,11 @@ public:
 
     /// Cooperative pin reservations, called only while the module tree is quiesced.
     bool reservePins(const void* owner, const uint16_t* pins, size_t count) { return pinReservations_.reserve(owner, pins, count); }
+    /// Free every pin `owner` holds; false when it held none.
     bool releasePins(const void* owner) { return pinReservations_.release(owner); }
+    /// Whether `owner` holds `pin`.
     bool pinReservedBy(const void* owner, uint16_t pin) const { return pinReservations_.heldBy(owner, pin); }
+    /// Whether any pin is reserved.
     bool hasReservedPins() const { return pinReservations_.any(); }
     /// True if a declared pin control would claim a reserved GPIO; no storage is changed.
     bool pinControlConflicts(const ControlDescriptor& control, const char* valueJson, ApplyPolicy policy, const void* owner = nullptr) const;

@@ -5,6 +5,7 @@
 #include <cstdint>
 
 namespace mm {
+/// The Twinkleup sine table, built at compile time, and the motion that reads it.
 namespace detail {
 constexpr std::array<uint8_t, 256> wledSineTable() {
     std::array<uint8_t, 256> table{};
@@ -14,6 +15,7 @@ constexpr std::array<uint8_t, 256> wledSineTable() {
 inline constexpr auto kWledTwinkleSine = wledSineTable();
 }
 /// Motion and palette indices of archived WLED-MM Twinkleup (FX 106).
+///
 /// Palette expansion, RGBW blending and frame timing are owned by the caller.
 /// @attribution WLED, FastLED
 class WledTwinkleMotion {
@@ -23,6 +25,7 @@ public:
     explicit WledTwinkleMotion(uint32_t now, uint8_t speed, uint8_t intensity)
         : now_(now), speed_(speed), intensity_(intensity) {}
 
+    /// The next light's brightness and palette index, advancing the seeded random stream.
     Pixel next() {
         const uint8_t start = random();
         const uint8_t phase = uint8_t(start + uint32_t(16u * now_) / (256u - speed_));

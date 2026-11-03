@@ -6,23 +6,31 @@
 #include <cstring>
 
 namespace mm {
-/// Archived WLED-MM ColorTwinkles on a physical strip segment with palette 36.
-/// The random stream is local to this effect, rather than WLED's global stream.
+/// Archived WLED-MM ColorTwinkles on a physical strip segment with palette 36. The random stream is local to this effect, rather than WLED's global stream.
 /// @attribution WLED, FastLED
 class NebuliteSnowflakesEffect : public EffectBase {
 public:
+    /// Spans the whole physical light list, so the effect is volumetric.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
+    /// One pixel and one rising flag per light, refused above 65535 lights.
     WorkingMemory workingMemory(Coord3D raster, uint8_t) const override {
         if (raster.x <= 0 || raster.y <= 0 || raster.z <= 0) return {};
         const uint64_t count = uint64_t(raster.x) * raster.y * raster.z;
         if (count > 65535) return {SIZE_MAX, SIZE_MAX};
         return {size_t(count) * (sizeof(RGB) + sizeof(uint8_t)), size_t(count) * sizeof(RGB)};
     }
-    uint8_t speed = 35, intensity = 197, sourceBrightness = 255;
+    uint8_t speed = 35,              ///< How quickly the twinkles brighten and fade.
+            intensity = 197,         ///< How many new twinkles start each step.
+            sourceBrightness = 255;  ///< Sets the fade rate when the master is not followed.
+    /// Fades by the master brightness, not the source brightness.
     bool followMaster = true;
-    uint16_t frameMs = 24, segmentStart = 0, segmentStop = 0;
+    uint16_t frameMs = 24,           ///< The shortest time between twinkle steps, in milliseconds.
+             segmentStart = 0,       ///< The first light of the segment the effect fills.
+             segmentStop = 0;        ///< One past the last light of the segment; zero runs to the end.
 
+    /// Publish the WLED speed, intensity, brightness, frame time and segment controls.
     void defineControls() override {
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("effect intensity", intensity, 0, 255);
@@ -32,6 +40,7 @@ public:
         controls_.addControl("segment start", segmentStart);
         controls_.addControl("segment stop", segmentStop);
     }
+    /// Size the pixel and rising-flag scratch to the lights and clear the state; a size it cannot hold raises a warning.
     void prepare() override {
         const size_t count = nrOfLights();
         const bool sameBuffers = count && pixels_.count() == count && rising_.count() == count;
@@ -42,8 +51,11 @@ public:
         if (!sameBuffers) clearState();
         clearStatus();
     }
+    /// Forget the running state so the next enable restarts the twinkles.
     void release() override { started_ = false; MoonModule::release(); }
+    /// Render one frame at the layer's elapsed time.
     void tick() MM_NONBLOCKING override { renderAt(elapsed()); }
+    /// Draw the segment as of `now`, stepping the twinkles once `frameMs` has passed, and black elsewhere.
     void renderAt(uint32_t now) {
         uint8_t* out = buffer(); const uint32_t count = nrOfLights(); const uint8_t channels = channelsPerLight();
         if (!out || channels < 3 || !count) return;

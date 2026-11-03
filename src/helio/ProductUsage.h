@@ -14,18 +14,22 @@ namespace mm {
 /// Local, opt-in session durations; no persistence, identifiers or transport lives here.
 class ProductUsage {
 public:
+    /// The distinct day, scene and settings records one session keeps before the rest count as overflow.
     static constexpr uint8_t kMaxRecords = 16;
+    /// The brightness histogram's bins, each 16 levels wide.
     static constexpr uint8_t kBrightnessBins = 16;
+    /// The longest settings text hashed; a longer one sets `settingsTooLong` rather than being hashed.
     static constexpr size_t kMaxSettingsBytes = 4096;
 
+    /// Starts opted out, holding no storage.
     ProductUsage() = default;
+    /// Frees the session's storage.
     ~ProductUsage() { platform::free(data_); }
+    /// A session has one owner, so copying is deleted.
     ProductUsage(const ProductUsage&) = delete;
     ProductUsage& operator=(const ProductUsage&) = delete;
 
-    /// Samples close the previous state's monotonic interval. Opt-out erases the local session.
-    /// Settings contain only caller-allowlisted controls; their textual SHA-256/128 is not JSON canonicalisation.
-    /// Call at least once per uint32 millisecond wrap; UTC input has one-second resolution.
+    /// A sample closes the previous state's monotonic interval and opt-out erases the session; call at least once per uint32 millisecond wrap, UTC having one-second resolution. Settings are caller-allowlisted and hashed as text, not as canonical JSON.
     void record(bool enabled, uint32_t monotonicMs, uint64_t unixSeconds, const char* sceneID,
                 const char* settingsJSON, uint8_t effectiveBrightness, bool powerOn) {
         optin_ = enabled;

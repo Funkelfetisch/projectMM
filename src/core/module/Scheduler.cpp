@@ -143,12 +143,10 @@ void Scheduler::shutdownStep(uint32_t now) {
 }
 
 bool Scheduler::release() {
-    // Inspect the whole tree before touching any sibling. An owner must finish
-    // its own checked handover before the caller retries shutdown.
+    // Inspect the whole tree before touching any sibling: an owner finishes its own checked handover before the caller retries shutdown.
     for (uint8_t i = 0; i < moduleCount_; ++i)
         if (modules_[i] && !modules_[i]->subtreeRemovalAllowed()) return false;
-    // A worker can discover an unsuccessful hardware handover only while
-    // quiescing. Check again before releasing or deleting any module.
+    // A worker can discover an unsuccessful hardware handover only while quiescing, so check again before releasing or deleting any module.
     for (uint8_t i = moduleCount_; i > 0; --i)
         if (modules_[i - 1]) modules_[i - 1]->quiesceSubtreeForRemoval();
     for (uint8_t i = 0; i < moduleCount_; ++i)

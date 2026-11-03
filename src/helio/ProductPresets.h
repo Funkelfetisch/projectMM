@@ -8,6 +8,7 @@ namespace mm {
 /// Factory looks use the scene engine's native documents and the shared conditional preset store.
 class ProductPresets {
 public:
+    /// The file whose presence records that the factory looks were seeded.
     static constexpr const char* kMarker = "/.config/presets/.product-v1";
 
     /// Product templates exist independently of the user's saved, renamed or deleted preset files.
@@ -30,8 +31,7 @@ public:
         return result.ok ? nullptr : result.error;
     }
 
-    /// A display label may contain a musical note, while preset filenames are
-    /// intentionally ASCII-only. Keep the original catalogue label unchanged.
+    /// A display label may carry a musical note while preset filenames stay ASCII-only, so the note becomes `Music - `; the catalog label is left unchanged.
     static bool fileName(const char* label, char (&name)[PresetStore::kMaxNameLen]) {
         if (!label) return false;
         const bool note = std::strncmp(label, "\xe2\x99\xaa ", 4) == 0 ||
@@ -44,8 +44,7 @@ public:
     /// Seed missing factory looks once; the marker survives deliberate deletion of every preset.
     static const char* initialize(Scheduler& scheduler) {
         if (platform::fsExists(kMarker)) return nullptr;
-        // Validate the entire set before creating anything. Do not silently
-        // alias two different factory scenes to the same stored preset name.
+        // Validate the entire set before creating anything, so two different factory scenes never alias to the same stored preset name.
         for (size_t i = 0; i < BleSceneCatalog::count(); ++i) {
             char name[PresetStore::kMaxNameLen];
             if (!fileName(product_scenes::kEntries[i].name, name)) return "invalid factory preset name";

@@ -288,7 +288,7 @@ private:
     /// The board model, which selects the installer's catalog entry.
     /// @guide Tooling sets it, since a device cannot identify its own hardware.
     char deviceModel_[32] = {};
-    /// Installed sphere diameter in centimetres; zero means the owner has not supplied it.
+    /// The sphere's installed diameter in centimeters, zero until measured.
     uint8_t physicalDiameterCm_ = 0;
     /// The build variant, kept for the MoonBase recovery image to read.
     char     firmwareVariant_[24] = {};

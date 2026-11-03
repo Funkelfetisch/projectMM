@@ -2,6 +2,7 @@
 #include <cstdint>
 
 namespace mm::platform {
+/// What the refresh does with the legacy advertisement: wait, start it, or restart it.
 enum class BleAdvertisementAction : uint8_t { Wait, Start, Restart };
 
 /// Decide whether to refresh the legacy advertisement without displacing peers.

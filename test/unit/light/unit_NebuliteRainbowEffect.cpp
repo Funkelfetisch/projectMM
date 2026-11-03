@@ -1,4 +1,4 @@
-// @module NebuliteRainbowEffect
+/// @module NebuliteRainbowEffect
 #include "doctest.h"
 #include "light/effects/NebuliteRainbowEffect.h"
 #include "light/effects/PlasmaEffect.h"
@@ -114,8 +114,7 @@ TEST_CASE("Wearable-sized 2D rasters render native MoonLight and retain physical
             }
         CHECK(variedY);
     }
-    // A separate layer uses the legacy physical-output address space rather
-    // than assuming the garment's 2D cell sequence is a physical strip.
+    // A separate layer uses the legacy physical-output address space rather than assuming the garment's 2D cell sequence is a physical strip.
     mm::Layouts layouts;
     mm::GridLayout grid; grid.width = 7; grid.height = 13; grid.depth = 1;
     layouts.addChild(&grid);

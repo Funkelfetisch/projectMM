@@ -1,11 +1,10 @@
-// @module WledBlinkTiming
+/// @module WledBlinkTiming
 #include "doctest.h"
 #include "light/effects/WledBlinkTiming.h"
 
 TEST_CASE("WLED blink preserves the old wearable's speed and duty boundaries") {
     mm::WledBlinkTiming phase;
-    // speed 230 gives 500 ms plus two 24 ms frames; intensity 128
-    // gives a 274 ms on-window, inclusive at its right edge.
+    // speed 230 gives 500 ms plus two 24 ms frames; intensity 128 gives a 274 ms on-window, inclusive at its right edge.
     CHECK(phase.next(0, 230, 128, 24));
     CHECK(phase.next(274, 230, 128, 24));
     CHECK_FALSE(phase.next(275, 230, 128, 24));

@@ -12,9 +12,12 @@
 namespace mm {
 
 /// Continuous BH1750 illuminance, sampled on a worker so I²C never blocks rendering.
+/// @card Bh1750Service.png
+///
 /// Prior art: ROHM BH1750FVI Technical Note Rev.D, H-resolution mode and raw / 1.2 lux.
 class Bh1750Service : public MoonModule {
 public:
+    /// Sorts the module into the service group.
     ModuleRole role() const MM_NONBLOCKING override { return ModuleRole::Service; }
 
     /// I²C controller connected to the illuminance sensor.
@@ -38,8 +41,10 @@ public:
     /// Illuminance change needed to update the accepted reading and target brightness.
     uint16_t hysteresisLux = 15;
 
+    /// Stops the sampling worker.
     ~Bh1750Service() override { stop(); }
 
+    /// Publish the reading, the brightness response curve, the hysteresis and the advanced bus, pin and address settings.
     void defineControls() override {
         controls_.addControl("automatic", automatic);
         controls_.addReadOnly("lux", luxText_, sizeof(luxText_));
@@ -60,6 +65,7 @@ public:
         MoonModule::defineControls();
     }
 
+    /// Restart the worker on the configured bus, pins and address, and reset the reading.
     void prepare() override {
         stop();
         seat_.claim();
@@ -85,6 +91,7 @@ public:
         request(Io::Open);
     }
 
+    /// Stop the worker, drop the reading and tell the brightness consumer the target is gone.
     void release() override {
         stop();
         valid_ = false;
@@ -93,6 +100,7 @@ public:
         MoonModule::release();
     }
 
+    /// Collect the worker's finished transfer, accept the new reading, and request the next open or read.
     void tick1s() MM_NONBLOCKING override {
         seat_.claim();
         const Io done = completed_.exchange(Io::Idle, std::memory_order_acq_rel);
@@ -123,6 +131,7 @@ public:
         MoonModule::tick1s();
     }
 
+    /// Recompute the brightness target when the mode or the response curve changes.
     void onControlChanged(const char* name) override {
         if (std::strcmp(name, "automatic") == 0 || std::strcmp(name, "darkLux") == 0 ||
             std::strcmp(name, "darkBrightness") == 0 || std::strcmp(name, "brightLux") == 0 ||
@@ -135,13 +144,16 @@ public:
         MoonModule::onControlChanged(name);
     }
 
+    /// Tell the brightness consumer that the target appeared or went.
     void onEnabled(bool) override { notifyTargetChanged(); }
 
+    /// The bus, pins and address restart the worker.
     bool affectsPrepare(const char* name) const override {
         return std::strcmp(name, "bus") == 0 || std::strcmp(name, "sda") == 0 ||
                std::strcmp(name, "scl") == 0 || std::strcmp(name, "address") == 0;
     }
 
+    /// The brightness target of the active sensor; false unless it is enabled, automatic and holds a valid reading.
     static bool automaticBrightness(uint8_t& out) {
         auto* sensor = ActiveInstance<Bh1750Service>::active();
         if (!sensor || !sensor->effectivelyEnabled() || !sensor->automatic || !sensor->valid_) return false;
@@ -150,8 +162,10 @@ public:
     }
 
     using TargetChangedFn = void(*)();
+    /// Register the callback that runs when the target brightness changes.
     static void setTargetChangedHook(TargetChangedFn hook) { targetChanged_ = hook; }
 
+    /// Convert a raw H-resolution reading to lux, dividing by 1.2 and rounding to nearest.
     static uint16_t rawToLux(uint16_t raw) {
         return static_cast<uint16_t>((static_cast<uint32_t>(raw) * 5 + 3) / 6);
     }
@@ -173,7 +187,9 @@ public:
     }
 
     void injectLuxForTest(uint16_t lux) { seat_.claim(); accept(lux); }
+    /// The illuminance the target brightness was last computed from.
     uint16_t acceptedLux() const { return acceptedLux_; }
+    /// Whether a valid reading has arrived.
     bool hasReading() const { return valid_; }
 
 private:

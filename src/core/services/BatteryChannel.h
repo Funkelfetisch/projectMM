@@ -11,9 +11,11 @@
 namespace mm {
 
 /// One explicitly configured battery channel, sampled by its BatteryService parent.
+/// @card BatteryChannel.png
 /// @guide Unset pins and divider values leave the reading unknown. Presence is declared independently of voltage. Charge percentage is an optional linear voltage estimate with explicit endpoints, not a capacity measurement.
 class BatteryChannel : public MoonModule {
 public:
+    /// A service, so the container accepts it as a child.
     ModuleRole role() const MM_NONBLOCKING override { return ModuleRole::Service; }
 
     /// Stable physical battery identity, first or second, independent of the module's display name.
@@ -43,6 +45,7 @@ public:
     /// How long a last successful sample remains current after read failures.
     uint16_t staleSeconds = 15;
 
+    /// Publish the slot, the live sample, the declared presence, and the divider, calibration and estimate settings.
     void defineControls() override {
         static constexpr const char* kPresence[] = {"unknown", "present", "absent"};
         controls_.addControl("slot", slot, 1, 2);
@@ -62,25 +65,29 @@ public:
         MoonModule::defineControls();
     }
 
+    /// Apply the controls to the reading model and refresh the sample text.
     void prepare() override { configureReading(); updateText(platform::millis()); }
+    /// Forget the reading and reset the sample text to null.
     void release() override {
         reading_.configure({}, BatteryReading::Presence::Unknown);
         std::snprintf(sampleText_, sizeof(sampleText_), "%s", "null");
         MoonModule::release();
     }
+    /// Every control change rebuilds the channel, since each one changes what the sampler reads.
     bool affectsPrepare(const char*) const override { return true; }
+    /// The BatteryService parent, whose own claim already holds the channel's pins.
     const void* pinReservationOwner() const override {
         auto* owner = parent();
         return owner && std::strcmp(owner->typeName(), "BatteryService") == 0 ? owner : nullptr;
     }
+    /// Park the parent's sampler before a write, refusing it while the parent holds an active resource handover.
     bool prepareControlWrite(const char* name) override {
         if (std::strcmp(name, "sample") == 0) return true;
         MoonModule* owner = parent();
         if (!owner || std::strcmp(owner->typeName(), "BatteryService") != 0) return true;
         owner->quiesce();
         if (owner->blocksAncestorRemoval()) return false;
-        // A document may write the existing value, in which case its normal
-        // change reaction does not run. Restart the parked sampler either way.
+        // A document may write the existing value, which skips the normal change reaction, so the parked sampler restarts either way.
         if (auto* scheduler = Scheduler::instance()) scheduler->requestPrepare(owner);
         return true;
     }
@@ -89,6 +96,7 @@ public:
         MoonModule* owner = parent();
         if (owner && std::strcmp(owner->typeName(), "BatteryService") == 0) owner->quiesce();
     }
+    /// Park the sampler, re-apply the controls to the reading model and refresh the sample text.
     void onControlChanged(const char* name) override {
         quiesce();
         configureReading(); updateText(platform::millis());

@@ -6,18 +6,25 @@
 
 namespace mm {
 /// Experimental physical-order port of archived WLED-MM FX 143.
-/// Live audio levels are not yet calibrated to the archived controller;
-/// Optional WLED beat simulation runs only when no AudioService is active;
-/// a connected but quiet source stays quiet.
+///
+/// Live audio levels are not yet calibrated to the archived controller; optional WLED beat simulation runs only when no AudioService is active; a connected but quiet source stays quiet.
 /// @attribution WLED and FastLED contributors
 class NebuliteNoisefireEffect : public EffectBase {
 public:
+    /// Spans the whole physical light list, so the effect is volumetric.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
-    uint8_t speed = 128, intensity = 128, audioFloor = 0;
+    uint8_t speed = 128,       ///< How fast the flames flicker.
+            intensity = 128,   ///< How far the flames burn toward the hot end of the palette.
+            audioFloor = 0;    ///< The audio level the flames never dim below.
+    /// Simulates the audio level while no audio service runs.
     bool simulateIfNoSource = false;
-    uint16_t frameMs = 23, segmentStart = 0, segmentStop = 0;
+    uint16_t frameMs = 23,        ///< The shortest time between frame steps, in milliseconds.
+             segmentStart = 0,    ///< The first light of the segment the effect fills.
+             segmentStop = 0;     ///< One past the last light of the segment; zero runs to the end.
 
+    /// Publish the WLED speed, audio, frame time and segment controls.
     void defineControls() override {
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("effect intensity", intensity, 0, 255);
@@ -27,12 +34,15 @@ public:
         controls_.addControl("segment start", segmentStart);
         controls_.addControl("segment stop", segmentStop);
     }
+    /// Forget the running state so the next enable restarts the flames.
     void release() override { started_ = false; MoonModule::release(); }
+    /// Render one frame from the latest smoothed audio level.
     void tick() MM_NONBLOCKING override {
         const auto* audio = AudioService::latestFrame();
         renderAt(elapsed(), audio->levelSmoothed, audio != &AudioService::kSilence);
     }
 
+    /// Render the frame for the clock value `now`; public so a test can drive the clock and the audio level.
     void renderAt(uint32_t now, uint16_t audioLevel, bool sourcePresent = true) {
         uint8_t* out = buffer();
         const uint32_t count = nrOfLights();

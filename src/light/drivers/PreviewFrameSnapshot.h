@@ -10,14 +10,17 @@
 
 namespace mm {
 /// Lossy pull snapshot of the already-composited source, in output-index order.
-/// The render task never waits for the reader. A new frame replaces the old one;
-/// revision-pinned pages either describe one frame or report it changed.
+///
+/// The render task never waits for the reader. A new frame replaces the old one; revision-pinned pages either describe one frame or report it changed.
 class PreviewFrameSnapshot {
 public:
     /// The pixel copy lives on the heap of the module that owns the snapshot, sized to the captured frame, so the module object stays small.
     explicit PreviewFrameSnapshot(MoonModule& owner) : pixels_(owner) {}
+    /// The most lights a snapshot holds; a larger source reports that its frame is too large.
     static constexpr uint16_t kMaxLights = 512;
+    /// The lights one page of the snapshot carries.
     static constexpr uint16_t kPageLights = 32;
+    /// Retire every captured frame, so a revision-pinned page reports the frame changed.
     void invalidate() { generation_.fetch_add(1, std::memory_order_relaxed); }
     /// Called from the owner's prepare(), never on the encode task: hold room for `lights` (up to kMaxLights) and drop any captured frame.
     void reserve(size_t lights) {

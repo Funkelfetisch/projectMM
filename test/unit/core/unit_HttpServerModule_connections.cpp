@@ -352,8 +352,7 @@ struct PresetIndexRoot {
     std::string previous = mm::platform::fsRootPath();
     std::string root = (std::filesystem::temp_directory_path() / "mm_http_connections_presets").string();
     PresetIndexRoot() {
-        // isLook validates real module roles; a filtered run cannot borrow
-        // the production registrations as a side effect of another test.
+        // isLook validates real module roles; a filtered run cannot borrow the production registrations as a side effect of another test.
         REQUIRE(mm::ModuleFactory::registerType<mm::Layer>("Layer"));
         REQUIRE(mm::ModuleFactory::registerType<mm::SolidEffect>("SolidEffect"));
         std::filesystem::remove_all(root);
@@ -434,9 +433,7 @@ struct HeaderBudgetModule : mm::MoonModule {
     mutable size_t allocationAtPressure = 0;
     const char* tags() const override {
         ++headerObservations;
-        // The serializer calls this after its initial header append. Model a
-        // concurrent loss of send room, rather than pretending the host accounts
-        // platform allocations against setTestFreeInternalHeap's fixed value.
+        // The serializer calls this after its initial header append; model a concurrent loss of send room rather than pretending the host accounts platform allocations against setTestFreeInternalHeap's fixed value.
         if (exhaustDuringHeader && (!oneShot || !pressureTriggered)) {
             pressureTriggered = true;
             allocationAtPressure = mm::platform::allocatedBytes();
@@ -714,8 +711,7 @@ TEST_CASE("HttpServer: late metadata pressure discards only the candidate fragme
     REQUIRE(late->pressureTriggered);
     REQUIRE(reply.rfind("HTTP/1.1 200", 0) == 0);
     REQUIRE_FALSE(wholeJsonResponse(reply));
-    // The getter ran after the local sink allocated. That candidate is now gone;
-    // the live source remains so the old cursor can be retried.
+    // The getter ran after the local sink allocated: that candidate is now gone, and the live source remains so the old cursor can be retried.
     CHECK(mm::platform::allocatedBytes() + 256 <= late->allocationAtPressure);
     for (unsigned tick = 0; tick < 20; ++tick) {
         fixture.http.tick20ms();
@@ -1053,8 +1049,7 @@ TEST_CASE("HttpServer: short native preset documents and mutation replies progre
             };
             if (pauseAtFloor) {
                 if (!mutation) {
-                    // A fresh file answer now refuses at the floor. Create this
-                    // answer first, then pause its already-retained body.
+                    // A fresh file answer now refuses at the floor: create this answer first, then pause its already-retained body.
                     fixture.http.tick20ms();
                     mm::platform::delayMs(1);
                     collect(tree, treeReply);

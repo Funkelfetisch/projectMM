@@ -23,22 +23,24 @@ namespace mm {
 ///
 /// A large map on a board without PSRAM can outgrow the largest free block, so the destinations split into power-of-two pages; the output is identical either way.
 class MappingLUT {
-    // One build owns one payload budget. The current heap can shrink during its
-    // walks; the snapshot also counts earlier allocations on host heap fixtures.
-    // Admission cooperates with other users rather than reserving the heap atomically.
+    /// One build owns one payload budget: a snapshot of the free heap, checked against the current heap too, since admission cooperates with other users rather than reserving the heap atomically.
     class AllocationBudget {
     public:
+        /// A budget of the free heap above `reserve`, never below the shared heap reserve.
         explicit AllocationBudget(size_t reserve)
             : reserve_(reserve < platform::HEAP_RESERVE ? platform::HEAP_RESERVE : reserve),
               remaining_(available()) {}
 
+        /// Whether `bytes` fits both the remaining snapshot and the current heap.
         bool fits(size_t bytes) const { return bytes <= remaining_ && bytes <= available(); }
 
+        /// Credit `bytes` back after a block is freed, saturating at unlimited.
         void reclaimed(size_t bytes) {
             const size_t unlimited = static_cast<size_t>(-1);
             remaining_ = bytes > unlimited - remaining_ ? unlimited : remaining_ + bytes;
         }
 
+        /// Allocate `bytes` within the budget, or null; a block that leaves the heap under the reserve is freed again.
         void* allocate(size_t bytes) {
             if (!fits(bytes)) return nullptr;
             void* result = platform::alloc(bytes);

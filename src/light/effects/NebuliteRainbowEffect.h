@@ -5,17 +5,25 @@
 namespace mm {
 
 /// WLED Rainbow Cycle with the Rainbow palette used by the legacy wearable presets.
+///
 /// This single-segment scene blanks RGBW outside its selected physical range.
 /// @attribution WLED contributors; Rainbow palette by FastLED contributors
 class NebuliteRainbowEffect : public EffectBase {
 public:
+    /// Declares the full 3D set; the render indexes lights directly.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
+    /// How fast the rainbow cycles.
     uint8_t speed = 128;
+    /// How many rainbow cycles span the segment.
     uint8_t size = 128;
+    /// First light of the segment.
     uint16_t segmentStart = 0;
-    uint16_t segmentStop = 0;  // exclusive; zero means the end of the strip
+    /// End of the segment, exclusive; zero means the end of the strip.
+    uint16_t segmentStop = 0;
 
+    /// Publish the cycle speed, the rainbow size and the segment.
     void defineControls() override {
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("size", size, 0, 255);
@@ -23,7 +31,7 @@ public:
         controls_.addControl("segment stop", segmentStop);
     }
 
-    // FastLED 3.6 RainbowColors_p with LINEARBLEND and fixed scale8.
+    /// The color at `index` on FastLED 3.6 RainbowColors_p with LINEARBLEND and fixed scale8.
     static RGB rainbowColor(uint8_t index) {
         static constexpr RGB palette[] = {
             {255,0,0}, {213,42,0}, {171,85,0}, {171,127,0},
@@ -52,6 +60,7 @@ public:
         return static_cast<uint8_t>((static_cast<uint64_t>(pixel) * span / count) + (counter >> 8));
     }
 
+    /// Fill the segment with the cycling rainbow and blank the lights outside it.
     void tick() MM_NONBLOCKING override {
         uint8_t* out = buffer();
         const uint32_t count = nrOfLights();

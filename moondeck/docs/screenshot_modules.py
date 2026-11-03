@@ -199,6 +199,13 @@ CORE_MODULES = [
     "MidiService",
     "MoonLiveService",
     "SdCardService",
+    # The product services: present on a NEBULITE or HELIO board, and on desktop once added to Services.
+    "BatteryService",
+    "BatteryChannel",
+    "BleControlService",
+    "BleRemoteService",
+    "HelioRemoteService",
+    "Bh1750Service",
 ]
 
 # Core modules that are CHILDREN of another module (so they have no top-level nav entry
@@ -231,6 +238,12 @@ CORE_NAV_ROOT = {
     "MidiService": "Services",
     "MoonLiveService": "Services",
     "SdCardService": "Services",
+    "BatteryService": "Services",
+    "BatteryChannel": "Services",
+    "BleControlService": "Services",
+    "BleRemoteService": "Services",
+    "HelioRemoteService": "Services",
+    "Bh1750Service": "Services",
     "I2cBusModule": "SystemModule",
 }
 # FileManagerModule, FirmwareUpdateModule, SystemModule, NetworkModule are top-level
@@ -709,12 +722,31 @@ def _click_child_tab(page: Page, module_id: str) -> None:
         page.wait_for_timeout(500)
 
 
+def _ancestor_names(host: str, module_id: str) -> list[str]:
+    """The names of the modules enclosing `module_id` in the device tree, outermost first."""
+    r = _get(f"http://{host}/api/state", timeout=5)
+
+    def walk(modules: list, path: list[str]) -> list[str] | None:
+        for m in modules:
+            name = m.get("name", "")
+            if name == module_id:
+                return path
+            found = walk(m.get("children", []), path + [name])
+            if found is not None:
+                return found
+        return None
+
+    return (walk(r.json().get("modules", []), []) or []) if r.ok else []
+
+
 def screenshot_module(page: Page, host: str, module_id: str,
                       nav_root: str, out_path: Path) -> bool:
-    """Reload the UI, click nav, open the child's tab if there is one, screenshot the card."""
+    """Reload the UI, click nav, open each enclosing tab down to the module's own, screenshot the card."""
     _load_page(page, host)
     _click_nav(page, nav_root)
-    _click_child_tab(page, module_id)
+    # A grandchild (a battery channel inside the battery service) sits behind its parent's tab too.
+    for name in _ancestor_names(host, module_id) + [module_id]:
+        _click_child_tab(page, name)
     return _screenshot_card(page, module_id, out_path)
 
 

@@ -108,8 +108,7 @@
 /// The Newton step overflows when it starts at the input, which at the type's maximum made the first iteration wrap and the function return zero.
 /// Halving the bit width gives a start above the true root and inside the range, so every iteration stays representable.
 ///
-/// The distance squares in the wider unsigned type, choosing the root by the squared range.
-/// Ordinary grids use the division-free narrow root, and larger distances keep the wide root.
+/// The distance squares in the wider unsigned type, choosing the root by the squared range: the division-free narrow root for ordinary grids, the wide root for larger distances.
 /// The narrow form is wrong far inside the normal range rather than only at the extremes: two coordinates of seventy thousand already sum past the narrow maximum.
 /// It saturated and reported the type's top for that distance.
 ///

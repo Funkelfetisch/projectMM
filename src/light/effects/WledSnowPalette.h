@@ -4,10 +4,10 @@
 #include <cstdint>
 
 namespace mm {
-/// WLED-MM palette 36, expanded by FastLED 3.6. Snowflakes uses NOBLEND
-/// and brightness 64 when spawning a pixel; these are pre-driver RGB values.
+/// WLED-MM palette 36, expanded by FastLED 3.6: Snowflakes uses NOBLEND and brightness 64 when spawning a pixel, and these are pre-driver RGB values.
 /// @attribution WLED, FastLED
 struct WledSnowPalette {
+    /// The palette entry for `index` at brightness 64, without blending between entries.
     static RGB sample(uint8_t index) {
         static constexpr RGB palette[16] = {
             {0,0,0}, {0,3,15}, {0,6,30}, {0,9,45}, {0,9,45}, {0,18,115},

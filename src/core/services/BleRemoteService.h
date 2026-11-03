@@ -11,38 +11,49 @@
 namespace mm {
 
 /// An SP648E RS-protocol handset driving the existing control surface through passive BLE observation.
+/// @card BleRemoteService.png
 /// @guide
 /// Add this service to Services. ON and OFF set Control.switch1, while brightness nudges Control.fader1.
+///
 /// Every recognized key has a configurable binding; the other keys start unassigned and can fire pads or change surface controls.
+///
 /// A color key names the handset key; it does not force a light effect or edit a palette behind the control surface.
 /// @technical
-/// Reception shares the platform's NimBLE host with GATT. Raw advertisements cross a bounded queue before decoding;
-/// neither the BLE callback nor control dispatch depends on USB. Duplicate bursts produce one action, including bursts over 800 ms.
-/// Frames are structurally recognized without authentication or a decoded application checksum. Long-hold behavior is not established.
+/// Reception shares the platform's NimBLE host with GATT. Raw advertisements cross a bounded queue before decoding; neither the BLE callback nor control dispatch depends on USB. Duplicate bursts produce one action, including bursts over 800 ms. Frames are recognized by their structure, without authentication or a decoded application checksum.
 class BleRemoteService : public MoonModule, public ListSource {
 public:
+    /// Binds ON and OFF to the first switch and the two brightness keys to the first fader, leaving the other keys unassigned.
     BleRemoteService() {
         actions_[0] = {1, 1, InputAction::Kind::Set, 1};
         actions_[1] = {1, 1, InputAction::Kind::Set, 0};
         actions_[2] = {3, 1, InputAction::Kind::Delta, 16};
         actions_[3] = {3, 1, InputAction::Kind::Delta, -16};
     }
+    /// A service, so the container accepts it as a child.
     ModuleRole role() const MM_NONBLOCKING override { return ModuleRole::Service; }
+    /// Declare the key bindings and the reception readout.
     void defineControls() override {
+        /// The handset keys, each bound to the control it drives.
+        /// @field key The handset key this row binds.
+        /// @fields InputAction
         controls_.addList("keys", *this);
+        /// How many key events arrived and how many advertisements the queue dropped.
         controls_.addReadOnly("reception", reception_, sizeof(reception_));
         MoonModule::defineControls();
     }
+    /// Start the BLE observer and allocate the decoder, warning when the radio is unavailable.
     void prepare() override {
         if (!platform::bleObserverStart(receiver_)) { setStatus("BLE observer unavailable or already in use", Severity::Warning); return; }
         if (!decoder_) decoder_.reset(new (std::nothrow) RsRemoteDecoder());
         if (!decoder_) { platform::bleObserverStop(receiver_); setStatus("receiver allocation failed", Severity::Error); return; }
         setStatus("waiting for a remote key");
     }
+    /// Stop the BLE observer and free the decoder, retaining it for a retry when the host fails to stop.
     void release() override {
         if (!platform::bleObserverStop(receiver_)) { setStatus("BLE host stop failed; cleanup retained for retry", Severity::Error); return; }
         decoder_.reset();
     }
+    /// Drain the queued advertisements into key actions and refresh the reception readout.
     void tick() MM_NONBLOCKING override {
         if (!decoder_) prepare();
         else if (!platform::bleObserverStart(receiver_)) return; // reacquire after the shared GATT host restarts
@@ -52,26 +63,34 @@ public:
         formatTo(reception_, sizeof(reception_), "%lu events, %lu queue drops", static_cast<unsigned long>(events_),
                  static_cast<unsigned long>(platform::bleObserverDropped(receiver_)));
     }
+    /// One row per recognized handset key.
     uint8_t listRowCount() const override { return static_cast<uint8_t>(actions_.size()); }
+    /// Editable, since the bindings are the whole point of this service.
     bool isEditableList() const override { return true; }
+    /// The keys are the handset's own, so rows are neither added nor removed.
     bool listRowsFixed() const override { return true; }
+    /// The row's key name and its action.
     void writeListRow(JsonSink& sink, uint8_t row) const override {
         if (row >= actions_.size()) { sink.append("{}"); return; }
         sink.appendf("{\"id\":%u,\"key\":\"%s\"", static_cast<unsigned>(row + 1), kRsKeyNames[row]);
         writeInputActionFields(sink, actions_[row]); sink.append("}");
     }
+    /// The row's editable action fields.
     void writeListRowDetail(JsonSink& sink, uint8_t row) const override {
         if (row >= actions_.size()) { sink.append("{}"); return; }
         sink.append("{\"fields\":[");
         // These are absolute commands: Set intentionally persists, with no fabricated release.
         writeInputActionDetailFields(sink, actions_[row]); sink.append("]}");
     }
+    /// The target options, shared across every row rather than repeated in each.
     void writeListOptionSets(JsonSink& sink) const override { writeInputTargetOptions(sink); }
+    /// Set one field of one row's action, marking the filesystem dirty so the binding persists.
     bool setListRowField(uint32_t id, const char* field, const char* valueJson) override {
         if (id < 1 || id > actions_.size() || !setInputActionField(actions_[id - 1], field, valueJson)) return false;
         if (auto* fs = FilesystemModule::instance()) fs->noteDirty();
         return true;
     }
+    /// Rebuild the bindings from the persisted list, matching rows by key name and reporting those that no longer fit the surface.
     bool restoreList(const char* text, const char* key) override {
         unsigned dropped = 0;
         const bool ok = json::forEachListElement(text, key, [&](const json::JsonDoc& doc, const json::JsonNode* row) {

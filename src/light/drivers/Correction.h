@@ -191,8 +191,7 @@ struct Correction {
             const uint8_t sharedWhite = r < g ? (r < b ? r : b) : (g < b ? g : b);
             warmWhite = sharedWhite;
             coldWhite = explicitWhite ? explicitWhite : sharedWhite;
-            // Computed off the PRE-subtraction values, which only rebalance the RGB emitters.
-            // yellow ≈ min(R,G) (the shared red+green component).
+            // Computed off the PRE-subtraction values, which only rebalance the RGB emitters; yellow is the red and green component they share.
             if (offYellow != kAbsent)    out[offYellow] = lut[r < g ? r : g];
             // Driven from the blue with no red or green to pair with, so it stays dark on warm colors.
             if (offUV != kAbsent) {

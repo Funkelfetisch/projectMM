@@ -5,14 +5,13 @@
 #include "light/drivers/Mini80PowerPort.h"
 
 namespace mm {
-/// Conservative scan of declared GPIO controls and fixed pins before MINI80
-/// cold initialization. It is an observation, not a global pin lock: the
-/// owner must wait for every module to define its controls, serialize the scan
-/// with mutations and prevent later conflicting changes. Undeclared hardware
-/// use and physical electrical state are unknown.
+/// Conservative scan of declared GPIO controls and fixed pins before MINI80 cold initialization.
+///
+/// It is an observation, not a global pin lock: the owner must wait for every module to define its controls, serialize the scan with mutations and prevent later conflicting changes. Undeclared hardware use and physical electrical state are unknown.
 class Mini80PinPreflight {
 public:
     enum class Result : uint8_t { Clear, Conflict, Unknown };
+    /// Scan every module's pin controls and fixed pins for the MINI80 data and enable pins: Conflict on a hit, Unknown when absence cannot be proven, Clear otherwise.
     static Result check(const Scheduler& scheduler, const MoonModule* owner, const MoonModule* ownedDriver = nullptr) {
         if (!owner) return Result::Unknown;
         bool found = false;

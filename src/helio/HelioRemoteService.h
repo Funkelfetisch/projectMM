@@ -8,14 +8,19 @@
 #include "core/util/color.h"
 
 namespace mm {
-/// HELIO and NEBULITE handset commands use native presets, the solid scene and a temporary output overlay.
-/// Explicit editable bindings take priority over the product commands.
+/// HELIO and NEBULITE handset commands use native presets, the solid scene and a temporary output overlay. Explicit editable bindings take priority over the product commands.
+/// @card HelioRemoteService.png
 class HelioRemoteService : public BleRemoteService {
 public:
+    /// How long automatic mode holds a preset before stepping to the next.
     uint16_t autoIntervalSeconds = 30;
+    /// Steps through the saved presets on a timer until a color, mode or OFF key stops it.
     bool automatic = false;
+    /// The longest sleep timer; the press that would pass it clears the timer.
     uint16_t timerMaximumMinutes = 180;
-    uint8_t musicMode = 0; // Static, music, or both native preset groups.
+    /// Which native preset groups the handset steps through: static, music, or both.
+    uint8_t musicMode = 0;
+    /// Add the auto-step, timer and music-mode controls to the handset's key list.
     void defineControls() override {
         BleRemoteService::defineControls();
         controls_.addControl("auto interval seconds", autoIntervalSeconds, 1, 65535);
@@ -23,14 +28,19 @@ public:
         controls_.addControl("timer maximum minutes", timerMaximumMinutes, 0, 65535);
         static constexpr const char* modes[] = {"Static", "Music", "Static + music"};
         controls_.addSelect("music mode", musicMode, modes, 3);
+        /// The minutes left on the sleep timer.
         controls_.addReadOnly("timer remaining", remaining_, sizeof(remaining_));
     }
+    /// Re-check the preset group when the music mode changes.
     void onControlChanged(const char* name) override {
         BleRemoteService::onControlChanged(name);
         if (!std::strcmp(name, "music mode")) ensurePresetGroup();
     }
+    /// Claim the timer seat and re-check the saved preset selection before the observer starts.
     void prepare() override { timer_.seat.claim(); selectionChecked_ = false; BleRemoteService::prepare(); }
+    /// Cancel the timer and give up its seat before the observer stops.
     void release() override { timer_.cancel(); timer_.seat.vacate(); BleRemoteService::release(); }
+    /// Run the timer and the auto-step, handle the queued keys, and refresh the remaining readout.
     void tick() MM_NONBLOCKING override {
         uint32_t now = platform::millis();
         if (timer_.advance(now)) {
@@ -120,8 +130,7 @@ protected:
         }
     }
 private:
-    // Garments combine RGB strips and a separate white accent in the same four-channel layer.
-    // Resolve from output fixtures, since layer width alone cannot distinguish them from RGBW strips.
+    /// True when white is mixed from RGB: garments combine RGB strips and a separate white accent in one four-channel layer, so it resolves from output fixtures, which layer width alone cannot tell from RGBW strips.
     bool needsRgbWhite() const {
         bool physicalColor = false;
         if (auto* drivers = Drivers::active()) {

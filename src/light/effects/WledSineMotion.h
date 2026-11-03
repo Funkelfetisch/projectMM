@@ -6,7 +6,9 @@ namespace mm {
 /// Motion primitives of WLED-MM v0.9 Sine (FX 108), using FastLED 3.6 fixed scaling.
 /// @attribution WLED contributors; FastLED contributors
 struct WledSineMotion {
+    /// The phase step after one frame at `speed`.
     static uint32_t advance(uint32_t step, uint8_t speed) { return step + speed / 16u; }
+    /// The cubic-eased triangle brightness of `pixel` at `step`, its spatial frequency set by `intensity`.
     static uint8_t wave(uint32_t step, uint32_t pixel, uint8_t intensity) {
         const uint8_t phase = uint8_t(pixel * (intensity / 4u) + step);
         const uint8_t triangle = uint8_t((phase & 0x80u ? 255u - phase : phase) * 2u);
@@ -15,6 +17,7 @@ struct WledSineMotion {
         const uint16_t value = uint16_t(3u * squared - 2u * cubed);
         return value > 255u ? 255u : uint8_t(value);
     }
+    /// The palette index of `pixel` at `now` in milliseconds, drifting with the clock.
     static uint8_t paletteIndex(uint32_t now, uint32_t pixel) {
         const uint16_t colorIndex = uint16_t(now / 32u);
         return uint8_t(pixel * colorIndex / 255u);

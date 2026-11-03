@@ -7,8 +7,7 @@
 
 namespace mm::helio {
 
-/// Translate the saved HELIO audio selector when its config predates the `levels` control.
-/// The old selector is local / receive / simulate; MoonLight uses simulate / receive / local.
+/// Translate the saved HELIO audio selector when its config predates the `levels` control, from the old local / receive / simulate to MoonLight's simulate / receive / local.
 inline int migratedAudioMode(const char* savedServices) {
     if (!savedServices) return -1;
     for (unsigned i = 0; i < 256; i++) {

@@ -5,17 +5,35 @@
 #include "light/effects/WledSineMotion.h"
 
 namespace mm {
-/// Physical-strip Sine (WLED-MM FX 108) with palette 1. The random seed,
-/// palette lifetime and clock are local to this effect; physical equivalence
-/// with a restored archived device remains unverified.
+/// Physical-strip Sine (WLED-MM FX 108) with palette 1.
+///
+/// The random seed, palette lifetime and clock are local to this effect; physical equivalence with a restored archived device remains unverified.
 class NebuliteSineEffect : public EffectBase {
 public:
+    /// Declares the full 3D set; the render indexes lights directly.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
-    uint8_t speed = 128, intensity = 128;
-    uint8_t secondaryRed = 0, secondaryGreen = 0, secondaryBlue = 0, secondaryWhite = 0;
-    uint16_t frameMs = 23, segmentStart = 0, segmentStop = 0;
+    /// How fast the wave moves along the strip.
+    uint8_t speed = 128;
+    /// How many waves fit along the strip.
+    uint8_t intensity = 128;
+    /// Red part of the secondary color shown between waves.
+    uint8_t secondaryRed = 0;
+    /// Green part of the secondary color shown between waves.
+    uint8_t secondaryGreen = 0;
+    /// Blue part of the secondary color shown between waves.
+    uint8_t secondaryBlue = 0;
+    /// White part of the secondary color shown between waves.
+    uint8_t secondaryWhite = 0;
+    /// Time between simulation steps, in milliseconds.
+    uint16_t frameMs = 23;
+    /// First light of the segment the effect fills.
+    uint16_t segmentStart = 0;
+    /// End of the segment, exclusive; zero means the end of the strip.
+    uint16_t segmentStop = 0;
 
+    /// Publish the wave's speed and density, the secondary color, the frame time and the segment.
     void defineControls() override {
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("effect intensity", intensity, 0, 255);
@@ -27,8 +45,10 @@ public:
         controls_.addControl("segment start", segmentStart);
         controls_.addControl("segment stop", segmentStop);
     }
+    /// Render one frame at the effect's own clock.
     void tick() MM_NONBLOCKING override { renderAt(elapsed()); }
 
+    /// Render one frame at `now`, public so tests can drive the clock.
     void renderAt(uint32_t now) {
         uint8_t* out = buffer();
         const uint32_t count = nrOfLights();

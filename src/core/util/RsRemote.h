@@ -19,13 +19,15 @@ inline constexpr std::array<const char*, 20> kRsKeyNames = {
 
 /// One structurally recognized frame; source bytes and the signature do not authenticate a handset.
 struct RsRemoteEvent {
+    /// The handset key, Unknown when the command code is not recognized.
     RsKey key = RsKey::Unknown;
+    /// The handset's rolling counter, byte 14 of the payload.
     uint8_t counter = 0;
+    /// The eight source bytes of the payload, which name a handset without authenticating it.
     std::array<uint8_t, 8> source{};
 };
 
-/// Decode raw payloads rather than BLE AD fields: the leading 0x52 is not an AD length.
-/// Bytes 12/13/15 remain undecoded; this validates structure, not an application checksum.
+/// Decode a raw payload rather than BLE AD fields, since the leading 0x52 is no AD length; bytes 12/13/15 remain undecoded, and this validates structure, not an application checksum.
 inline bool decodeRsRemote(std::span<const uint8_t> data, RsRemoteEvent& event) {
     constexpr uint8_t prefix[] = {0x52, 0x53, 0x02, 0x00};
     constexpr uint8_t suffix[] = {0x02, 0x02, 0xff};
@@ -70,9 +72,11 @@ inline bool decodeRsRemote(std::span<const uint8_t> data, RsRemoteEvent& event) 
 }
 
 /// Suppress whole retransmission bursts while admitting a changed counter/payload immediately.
+///
 /// The caller owns time in milliseconds; unsigned subtraction survives the device timer wrapping.
 class RsRemoteDecoder {
 public:
+    /// Decode `data` into `event`; false for an unrecognized frame or a retransmission within two seconds of the last copy.
     bool receive(std::span<const uint8_t> data, uint32_t nowMs, RsRemoteEvent& event) {
         if (!decodeRsRemote(data, event)) return false;
         size_t oldest = 0;

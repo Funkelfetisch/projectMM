@@ -855,8 +855,7 @@ bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf,
 bool otaWrite(OtaWrite& w, const uint8_t* data, size_t len);
 /// Finish the image: with `commit` check it whole and, for the application, point the boot at it; without, abandon it. True once committed.
 bool otaEnd(OtaWrite& w, bool commit);
-/// Abort an application upload; true confirms the platform accepted the abort,
-/// not that previously written flash bytes were erased. Releases an app writer.
+/// Abort an application upload and release its writer; true confirms the platform accepted the abort, not that previously written flash bytes were erased.
 bool otaAbortApp(OtaWrite& w);
 
 /// Does this partition table carry MoonBase, the second boot image (a board cannot rewrite the partition it executes from)?
@@ -958,8 +957,11 @@ struct BlePairingState {
 };
 /// Volatile, aggregate link diagnostics; no peer identity or key material.
 struct BleLinkState {
+    /// Links the peripheral accepted.
     uint32_t accepted = 0;
+    /// Links the peripheral refused or failed to establish.
     uint32_t failed = 0;
+    /// Links that ended.
     uint32_t disconnected = 0;
     int32_t lastDisconnectReason = -1; ///< Native stack reason; -1 means no disconnect observed.
     int32_t lastUpdateStatus = -1; ///< Native connection-update status; -1 means no update observed.
@@ -979,8 +981,7 @@ bool bleControlEpoch(const BleControlHandle& handle, std::array<uint8_t, 16>& ep
 bool bleControlPublishBattery(BleControlHandle& handle, const BleBatterySnapshot& batteries) MM_NONBLOCKING;
 /// Stop the host before releasing its callback storage; failure retains the handle for a retry.
 bool bleControlStop(BleControlHandle& handle);
-/// Transfer a failed-stop host to platform ownership when its service is destroyed.
-/// A later start may retry the stop; this does not claim that the radio is off.
+/// Transfer a failed-stop host to platform ownership when its service is destroyed; a later start may retry the stop, and this does not claim that the radio is off.
 void bleControlAbandon(BleControlHandle& handle);
 /// Take one complete, newline-delimited request; zero when empty or contended leaves generation unchanged.
 size_t bleControlReceive(BleControlHandle& handle, char* out, size_t capacity, uint64_t& generation) MM_NONBLOCKING;
@@ -1215,8 +1216,7 @@ uint32_t testRmtTransmitCount();
 /// Release the channel.
 void rmtWs2812Deinit(RmtWs2812Handle& h);
 
-/// Detach only after transmission drains. On failure retain the handle for
-/// retry; success does not prove the external DIN voltage.
+/// Detach only after transmission drains; failure retains the handle for a retry, and success does not prove the external DIN voltage.
 bool rmtWs2812DetachChecked(RmtWs2812Handle& h);
 
 /// Host test seam: refuse a checked detach without releasing the handle.
@@ -1596,8 +1596,7 @@ bool gpioRead(uint8_t gpio);
 /// Drive one GPIO as a push-pull output, configuring it on first use; false where it has no driver.
 bool gpioWrite(uint8_t gpio, bool high);
 
-/// Set the output latch before enabling output. The caller must first detach
-/// any peripheral from this pin; this does not prove the external wire level.
+/// Set the output latch before enabling output; the caller must first detach any peripheral from this pin, and this does not prove the external wire level.
 bool gpioPreloadOutput(uint8_t gpio, bool high);
 /// Low-level convenience for an explicitly owned, detached output.
 bool gpioPreloadLowOutput(uint8_t gpio);
@@ -1717,10 +1716,14 @@ namespace mm::platform {
 struct BleObserverHandle { void* impl = nullptr; };
 /// A legacy advertisement as received, including payloads that are not valid AD field sequences.
 struct BleAdvertisement {
+    /// When the host received it, in platform milliseconds.
     uint32_t receivedMs = 0;
     uint8_t address[6] = {};
+    /// The address type the host reported beside the address.
     uint8_t addressType = 0;
+    /// The signal strength in dBm.
     int8_t rssi = 0;
+    /// How many bytes of `data` the advertisement carries.
     uint8_t length = 0;
     uint8_t data[31] = {};
 };

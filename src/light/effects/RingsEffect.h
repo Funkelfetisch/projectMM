@@ -28,10 +28,12 @@ public:
     uint8_t thickness = 3;
     /// Rotates every ring's hue.
     uint8_t hue_shift = 0;
-    /// Background brightness at hue_shift's palette position; a black palette color stays black.
+    /// Brightness behind the rings.
+    /// @guide The background takes the palette color at the `hue_shift` position, so a black palette color stays black.
     uint8_t backgroundBrightness = 0;
 
-    /// Maximum fully dark mapped-source interval in milliseconds; zero rescues the first dark frame.
+    /// Longest fully dark mapped-source interval, in milliseconds.
+    /// @guide Zero rescues the first dark frame.
     uint16_t maxPauseMs = 500;
 
     /// Cache physical geometry during preparation, outside the rendering hot path.

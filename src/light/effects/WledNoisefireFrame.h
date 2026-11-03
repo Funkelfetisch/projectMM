@@ -4,11 +4,7 @@
 #include "light/effects/WledRandomPalette.h"
 
 namespace mm {
-/// Archived WLED-MM Noisefire pixel calculation with FastLED 3.6 fixed scaling.
-/// Brightness is the already converted 0..255 audio amplitude; callers must
-/// saturate the floating-point microphone value before converting it.
-/// The caller supplies the clock and the logical strip size, which may differ
-/// from the physical strip on wearable layouts.
+/// Archived WLED-MM Noisefire pixel calculation with FastLED 3.6 fixed scaling. Brightness is the already converted 0..255 audio amplitude; callers must saturate the floating-point microphone value before converting it. The caller supplies the clock and the logical strip size, which may differ from the physical strip on wearable layouts.
 /// @attribution WLED contributors; FastLED contributors
 class WledNoisefireFrame {
 public:
@@ -23,6 +19,7 @@ public:
         return palette(uint8_t(index), brightness);
     }
 
+    /// The fire palette color at `index`, interpolated between its sixteen entries and scaled by `brightness`.
     static RGB palette(uint8_t index, uint8_t brightness) {
         static const RGB colors[16] = {
             WledRandomPalette::rainbow({0, 255, 2}), WledRandomPalette::rainbow({0, 255, 4}),

@@ -64,6 +64,7 @@ public:
     /// The rate the preview aims for: lower for detail, raise for smoothness.
     uint8_t targetFps = 24;
 
+    /// The pixel snapshot the BLE preview reads, captured on request from the same source buffer.
     PreviewFrameSnapshot& bleFrame() { return bleFrame_; }
 
     /// RGB appearance of a full-scale physical white emitter in the browser preview.

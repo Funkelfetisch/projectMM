@@ -5,15 +5,15 @@
 
 namespace mm {
 
-/// WLED palette 3 (primary, primary, secondary, secondary), using the
-/// FastLED 16-entry RGB gradient and fixed scale8 interpolation. Colours are
-/// already corrected by the caller; this helper does not apply gamma.
+/// WLED palette 3 (primary, primary, secondary, secondary), using the FastLED 16-entry RGB gradient and fixed scale8 interpolation.
+///
+/// Colors are already corrected by the caller; this helper does not apply gamma.
 class WledTwoColorPalette {
 public:
+    /// The color of `pixel` among `count`, its position mapped to a palette index by `blendMode` and then sampled.
     static RGB sample(RGB primary, RGB secondary, uint32_t pixel, uint32_t count, uint8_t blendMode) {
         uint8_t index = count > 1 ? static_cast<uint8_t>((pixel * 255u) / (count - 1u)) : 0;
-        // WLED's solid-palette policy: modes 0 and 2 do not wrap; mode 3
-        // samples without interpolation. The last cell still may blend to 0.
+        // WLED's solid-palette policy: modes 0 and 2 do not wrap and mode 3 samples without interpolation; the last cell still may blend to 0.
         if (blendMode != 1 && blendMode != 3) index = scale(index, 240);
         return sampleIndex(primary, secondary, index, blendMode == 3);
     }

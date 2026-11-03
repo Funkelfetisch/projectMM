@@ -3,10 +3,10 @@
 #include "light/effects/WledRandomPalette.h"
 
 namespace mm {
-/// Archived WLED-MM palette 35, expanded by FastLED 3.6 into sixteen slots.
-/// The caller supplies the WLED palette index; this samples no-wrap blend mode 0.
+/// Archived WLED-MM palette 35, expanded by FastLED 3.6 into sixteen slots. The caller supplies the WLED palette index; this samples no-wrap blend mode 0.
 /// @attribution WLED, FastLED
 struct WledFirePalette {
+    /// The palette color at `index`, blended between its sixteen slots without wrapping.
     static RGB sample(uint8_t index) {
         static constexpr RGB palette[16] = {
             {0,0,0}, {9,0,0}, {18,0,0}, {18,0,0}, {49,0,0}, {81,0,0},

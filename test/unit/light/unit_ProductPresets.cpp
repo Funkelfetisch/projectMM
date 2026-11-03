@@ -134,8 +134,7 @@ TEST_CASE("Product preset application preserves the actual RGBW layer and its wo
     auto* effect = static_cast<mm::SolidEffect*>(tree.scheduler.firstByName("BLE Scene"));
     REQUIRE(effect != nullptr);
     CHECK(effect->red == 255); CHECK(effect->green == 133); CHECK(effect->white == 0);
-    // A fresh output below the product reserve cannot allocate a raster, even
-    // above the generic reserve. Retaining an existing admitted scene is tested separately.
+    // A fresh output below the product reserve cannot allocate a raster, even above the generic reserve; retaining an existing admitted scene is tested separately.
     mm::platform::setTestFreeHeap(39 * 1024); mm::platform::setTestFreeInternalHeap(39 * 1024);
     tree.layer->prepare();
     CHECK(tree.layer->width() == 0);

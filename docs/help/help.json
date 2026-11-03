@@ -488,10 +488,11 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/layouts/PanelLayout.h"
   },
   "PixelMapLayout": {
-   "line": "A bounded 2D point per output, listed in physical output order.\nCoordinates are integer `x,y` pairs separated by semicolons. Repeated\ncoordinates intentionally sample the same field point.",
+   "line": "A bounded 2D point per output, listed in physical output order.",
+   "summary": "Coordinates are integer `x,y` pairs separated by semicolons. Repeated coordinates intentionally sample the same field point.",
    "controls": {
     "points": {
-     "line": ""
+     "line": "The `x,y` pairs, separated by semicolons, in output order."
     }
    },
    "role": "layout",
@@ -1611,20 +1612,21 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#rainboweffect"
   },
   "NebuliteRainbowEffect": {
-   "line": "WLED Rainbow Cycle with the Rainbow palette used by the legacy wearable presets.\nThis single-segment scene blanks RGBW outside its selected physical range.",
+   "line": "WLED Rainbow Cycle with the Rainbow palette used by the legacy wearable presets.",
+   "summary": "This single-segment scene blanks RGBW outside its selected physical range.",
    "attribution": "WLED contributors; Rainbow palette by FastLED contributors",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the rainbow cycles."
     },
     "size": {
-     "line": ""
+     "line": "How many rainbow cycles span the segment."
     },
     "segment start": {
-     "line": ""
+     "line": "First light of the segment."
     },
     "segment stop": {
-     "line": ""
+     "line": "End of the segment, exclusive; zero means the end of the strip."
     }
    },
    "role": "effect",
@@ -1633,46 +1635,47 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebuliterainboweffect"
   },
   "NebuliteBlinkEffect": {
-   "line": "Single-segment WLED Blink with palette 3, used by the old Blaulicht look.\nColor inputs are linear scene values; the output driver applies its curve.\nWLED's global frame time and palette transition can change its appearance,\nso this effect alone is not a verified migration of an archived preset.",
+   "line": "Single-segment WLED Blink with palette 3, used by the old Blaulicht look.",
+   "summary": "Color inputs are linear scene values; the output driver applies its curve.\n\nWLED's global frame time and palette transition can change its appearance, so this effect alone is not a verified migration of an archived preset.",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the blink repeats."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How long the on phase lasts within each blink."
     },
     "red": {
-     "line": ""
+     "line": "Primary color, red part."
     },
     "green": {
-     "line": ""
+     "line": "Primary color, green part."
     },
     "blue": {
-     "line": ""
+     "line": "Primary color, blue part."
     },
     "secondary red": {
-     "line": ""
+     "line": "Secondary color, red part."
     },
     "secondary green": {
-     "line": ""
+     "line": "Secondary color, green part."
     },
     "secondary blue": {
-     "line": ""
+     "line": "Secondary color, blue part."
     },
     "secondary white": {
-     "line": ""
+     "line": "White part of the secondary color, shown in the off phase."
     },
     "palette blend": {
-     "line": ""
+     "line": "How the two colors blend along the segment."
     },
     "frame ms": {
-     "line": ""
+     "line": "WLED frame time in milliseconds, the truncated 1000 / FPS."
     },
     "segment start": {
-     "line": ""
+     "line": "First light of the segment."
     },
     "segment stop": {
-     "line": ""
+     "line": "End of the segment, exclusive; zero means the end of the strip."
     }
    },
    "role": "effect",
@@ -1681,28 +1684,29 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebuliteblinkeffect"
   },
   "NebuliteSolidEffect": {
-   "line": "A constant RGBW color on one physical strip segment. This preserves the\narchived wearable looks' segment bounds; the output driver's curve is\napplied later and is not a claim of WLED gamma equivalence.",
+   "line": "A constant RGBW color on one physical strip segment.",
+   "summary": "This preserves the archived wearable looks' segment bounds; the output driver's curve is applied later and is not a claim of WLED gamma equivalence.",
    "controls": {
     "red": {
-     "line": ""
+     "line": "The red part of the color."
     },
     "green": {
-     "line": ""
+     "line": "The green part of the color."
     },
     "blue": {
-     "line": ""
+     "line": "The blue part of the color."
     },
     "white": {
-     "line": ""
+     "line": "The white part of the color, shown on RGBW lights."
     },
     "brightness": {
-     "line": ""
+     "line": "Scales every part of the color, white included."
     },
     "segment start": {
-     "line": ""
+     "line": "The first light of the segment that shows the color."
     },
     "segment stop": {
-     "line": ""
+     "line": "One past the last light of the segment; zero runs to the end."
     }
    },
    "role": "effect",
@@ -1711,22 +1715,23 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebulitesolideffect"
   },
   "NebuliteWashingEffect": {
-   "line": "Experimental physical-strip port of WLED Washing Machine, palette 1.\nIts phase and palette math match WLED, but random seed, initial palette,\nmissed frames and global palette sharing differ; it is not a qualified\nrestoration of the archived preset or its original output curve.",
+   "line": "Experimental physical-strip port of WLED Washing Machine, palette 1.",
+   "summary": "Its phase and palette math match WLED, but random seed, initial palette, missed frames and global palette sharing differ; it is not a qualified restoration of the archived preset or its original output curve.",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the washing waves move."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How many waves span the segment."
     },
     "frame ms": {
-     "line": ""
+     "line": "WLED frame time in milliseconds, which paces the wave's motion."
     },
     "segment start": {
-     "line": ""
+     "line": "First light of the segment."
     },
     "segment stop": {
-     "line": ""
+     "line": "End of the segment, exclusive; zero means the end of the strip."
     }
    },
    "role": "effect",
@@ -1735,34 +1740,35 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebulitewashingeffect"
   },
   "NebuliteSineEffect": {
-   "line": "Physical-strip Sine (WLED-MM FX 108) with palette 1. The random seed,\npalette lifetime and clock are local to this effect; physical equivalence\nwith a restored archived device remains unverified.",
+   "line": "Physical-strip Sine (WLED-MM FX 108) with palette 1.",
+   "summary": "The random seed, palette lifetime and clock are local to this effect; physical equivalence with a restored archived device remains unverified.",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the wave moves along the strip."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How many waves fit along the strip."
     },
     "secondary red": {
-     "line": ""
+     "line": "Red part of the secondary color shown between waves."
     },
     "secondary green": {
-     "line": ""
+     "line": "Green part of the secondary color shown between waves."
     },
     "secondary blue": {
-     "line": ""
+     "line": "Blue part of the secondary color shown between waves."
     },
     "secondary white": {
-     "line": ""
+     "line": "White part of the secondary color shown between waves."
     },
     "frame ms": {
-     "line": ""
+     "line": "Time between simulation steps, in milliseconds."
     },
     "segment start": {
-     "line": ""
+     "line": "First light of the segment the effect fills."
     },
     "segment stop": {
-     "line": ""
+     "line": "End of the segment, exclusive; zero means the end of the strip."
     }
    },
    "role": "effect",
@@ -1770,37 +1776,38 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteSineEffect.h"
   },
   "NebulitePaletteEffect": {
-   "line": "Archived WLED-MM Palette (FX 65), palette 3, moving-wrap mode 0.\nRGB output is uncorrected; WLED gamma, transitions and physical output need qualification.",
+   "line": "Archived WLED-MM Palette (FX 65), palette 3, moving-wrap mode 0.",
+   "summary": "RGB output is uncorrected; WLED gamma, transitions and physical output need qualification.",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the palette slides along the strip."
     },
     "red": {
-     "line": ""
+     "line": "Primary color, red part."
     },
     "green": {
-     "line": ""
+     "line": "Primary color, green part."
     },
     "blue": {
-     "line": ""
+     "line": "Primary color, blue part."
     },
     "secondary red": {
-     "line": ""
+     "line": "Secondary color, red part."
     },
     "secondary green": {
-     "line": ""
+     "line": "Secondary color, green part."
     },
     "secondary blue": {
-     "line": ""
+     "line": "Secondary color, blue part."
     },
     "frame ms": {
-     "line": ""
+     "line": "WLED frame time in milliseconds, which paces the palette's motion."
     },
     "segment start": {
-     "line": ""
+     "line": "First light of the segment."
     },
     "segment stop": {
-     "line": ""
+     "line": "End of the segment, exclusive; zero means the end of the strip."
     }
    },
    "role": "effect",
@@ -1808,35 +1815,36 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebulitePaletteEffect.h"
   },
   "NebuliteFireflyEffect": {
-   "line": "Archived WLED-MM Twinkleup (FX 106) with Fire palette 35 and no-wrap mode 0.\nRGB is uncorrected; source gamma and physical output need qualification.",
+   "line": "Archived WLED-MM Twinkleup (FX 106) with Fire palette 35 and no-wrap mode 0.",
+   "summary": "RGB is uncorrected; source gamma and physical output need qualification.",
    "attribution": "[WLED](https://moonmodules.org/MoonLight/reference/attributions.html#wled), [FastLED](https://moonmodules.org/MoonLight/reference/attributions.html#fastled), [Andrew Tuline](https://moonmodules.org/MoonLight/reference/attributions.html#andrew-tuline)",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the lights twinkle."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How many lights twinkle at once."
     },
     "secondary red": {
-     "line": ""
+     "line": "The red part of the background color between twinkles."
     },
     "secondary green": {
-     "line": ""
+     "line": "The green part of the background color."
     },
     "secondary blue": {
-     "line": ""
+     "line": "The blue part of the background color."
     },
     "secondary white": {
-     "line": ""
+     "line": "The white part of the background color."
     },
     "frame ms": {
-     "line": ""
+     "line": "The shortest time between frame steps, in milliseconds."
     },
     "segment start": {
-     "line": ""
+     "line": "The first light of the segment the effect fills."
     },
     "segment stop": {
-     "line": ""
+     "line": "One past the last light of the segment; zero runs to the end."
     }
    },
    "role": "effect",
@@ -1844,29 +1852,29 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteFireflyEffect.h"
   },
   "NebuliteSnowflakesEffect": {
-   "line": "Archived WLED-MM ColorTwinkles on a physical strip segment with palette 36.\nThe random stream is local to this effect, rather than WLED's global stream.",
+   "line": "Archived WLED-MM ColorTwinkles on a physical strip segment with palette 36. The random stream is local to this effect, rather than WLED's global stream.",
    "attribution": "[WLED](https://moonmodules.org/MoonLight/reference/attributions.html#wled), [FastLED](https://moonmodules.org/MoonLight/reference/attributions.html#fastled)",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How quickly the twinkles brighten and fade."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How many new twinkles start each step."
     },
     "source brightness": {
-     "line": ""
+     "line": "Sets the fade rate when the master is not followed."
     },
     "follow master": {
-     "line": ""
+     "line": "Fades by the master brightness, not the source brightness."
     },
     "frame ms": {
-     "line": ""
+     "line": "The shortest time between twinkle steps, in milliseconds."
     },
     "segment start": {
-     "line": ""
+     "line": "The first light of the segment the effect fills."
     },
     "segment stop": {
-     "line": ""
+     "line": "One past the last light of the segment; zero runs to the end."
     }
    },
    "role": "effect",
@@ -1878,19 +1886,19 @@
    "attribution": "WLED contributors, [ldirko](https://moonmodules.org/MoonLight/reference/attributions.html#ldirko), [Andrew Tuline](https://moonmodules.org/MoonLight/reference/attributions.html#andrew-tuline), FastLED contributors",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "Sets the pace of the stripe's hue drift."
     },
     "effect intensity": {
-     "line": ""
+     "line": "Sets the pace of the stripe's brightness waves."
     },
     "frame ms": {
-     "line": ""
+     "line": "The shortest time between frame steps, in milliseconds."
     },
     "segment start": {
-     "line": ""
+     "line": "The first light of the segment the effect fills."
     },
     "segment stop": {
-     "line": ""
+     "line": "One past the last light of the segment; zero runs to the end."
     }
    },
    "role": "effect",
@@ -1898,41 +1906,42 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteFlowStripeEffect.h"
   },
   "NebulitePlasmoidEffect": {
-   "line": "Experimental wearable port of WLED-MM FX 133 with random palette 74.\nAudio level scaling, local random stream and clock are not calibrated to\nan archived physical controller. Silence stays dark with the saved black\nsecondary color; optional simulation applies only with no audio service.",
+   "line": "Experimental wearable port of WLED-MM FX 133 with random palette 74.",
+   "summary": "Audio level scaling, local random stream and clock are not calibrated to an archived physical controller. Silence stays dark with the saved black secondary color; optional simulation applies only with no audio service.",
    "attribution": "WLED and FastLED contributors",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How tightly the plasma waves pack along the strip."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How much of each wave a given audio level reveals."
     },
     "audio floor": {
-     "line": ""
+     "line": "The lowest audio level the waves are drawn from."
     },
     "simulate if no source": {
-     "line": ""
+     "line": "Simulates the audio level while no audio service runs."
     },
     "secondary red": {
-     "line": ""
+     "line": "The red part of the secondary color the waves fade into."
     },
     "secondary green": {
-     "line": ""
+     "line": "The green part of the secondary color."
     },
     "secondary blue": {
-     "line": ""
+     "line": "The blue part of the secondary color."
     },
     "secondary white": {
-     "line": ""
+     "line": "The white part of the secondary color."
     },
     "frame ms": {
-     "line": ""
+     "line": "The shortest time between frame steps, in milliseconds."
     },
     "segment start": {
-     "line": ""
+     "line": "The first light of the segment the effect fills."
     },
     "segment stop": {
-     "line": ""
+     "line": "One past the last light of the segment; zero runs to the end."
     }
    },
    "role": "effect",
@@ -1940,29 +1949,30 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebulitePlasmoidEffect.h"
   },
   "NebuliteNoisefireEffect": {
-   "line": "Experimental physical-order port of archived WLED-MM FX 143.\nLive audio levels are not yet calibrated to the archived controller;\nOptional WLED beat simulation runs only when no AudioService is active;\na connected but quiet source stays quiet.",
+   "line": "Experimental physical-order port of archived WLED-MM FX 143.",
+   "summary": "Live audio levels are not yet calibrated to the archived controller; optional WLED beat simulation runs only when no AudioService is active; a connected but quiet source stays quiet.",
    "attribution": "WLED and FastLED contributors",
    "controls": {
     "speed": {
-     "line": ""
+     "line": "How fast the flames flicker."
     },
     "effect intensity": {
-     "line": ""
+     "line": "How far the flames burn toward the hot end of the palette."
     },
     "audio floor": {
-     "line": ""
+     "line": "The audio level the flames never dim below."
     },
     "simulate if no source": {
-     "line": ""
+     "line": "Simulates the audio level while no audio service runs."
     },
     "frame ms": {
-     "line": ""
+     "line": "The shortest time between frame steps, in milliseconds."
     },
     "segment start": {
-     "line": ""
+     "line": "The first light of the segment the effect fills."
     },
     "segment stop": {
-     "line": ""
+     "line": "One past the last light of the segment; zero runs to the end."
     }
    },
    "role": "effect",
@@ -2004,10 +2014,12 @@
      "line": "Rotates every ring's hue."
     },
     "background brightness": {
-     "line": "Background brightness at hue_shift's palette position; a black palette color stays black."
+     "line": "Brightness behind the rings.",
+     "more": "The background takes the palette color at the `hue_shift` position, so a black palette color stays black."
     },
     "max pause ms": {
-     "line": "Maximum fully dark mapped-source interval in milliseconds; zero rescues the first dark frame."
+     "line": "Longest fully dark mapped-source interval, in milliseconds.",
+     "more": "Zero rescues the first dark frame."
     }
    },
    "role": "effect",
@@ -2028,7 +2040,6 @@
    "role": "effect",
    "tags": "💫",
    "dim": 3,
-   "doc": "light/effects.md#heliofactorytest",
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioFactoryTestEffect.h",
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#heliofactorytesteffect"
   },
@@ -4428,7 +4439,7 @@
      "more": "Tooling sets it, since a device cannot identify its own hardware."
     },
     "physicalDiameterCm": {
-     "line": "Installed sphere diameter in centimetres; zero means the owner has not supplied it."
+     "line": "The sphere's installed diameter in centimeters, zero until measured."
     },
     "firmware": {
      "line": "The build variant, kept for the MoonBase recovery image to read."
@@ -4762,7 +4773,9 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#oscservice"
   },
   "Bh1750Service": {
-   "line": "Continuous BH1750 illuminance, sampled on a worker so I²C never blocks rendering.\nPrior art: ROHM BH1750FVI Technical Note Rev.D, H-resolution mode and raw / 1.2 lux.",
+   "line": "Continuous BH1750 illuminance, sampled on a worker so I²C never blocks rendering.",
+   "summary": "Prior art: ROHM BH1750FVI Technical Note Rev.D, H-resolution mode and raw / 1.2 lux.",
+   "image": "https://moonmodules.org/MoonLight/assets/core/Bh1750Service.png",
    "controls": {
     "automatic": {
      "line": "Use the sensor's target brightness while a valid reading is available."
@@ -4808,13 +4821,15 @@
    "tests": "https://github.com/MoonModules/MoonLight/blob/main/test/unit/core/unit_Bh1750Service.cpp"
   },
   "BatteryService": {
-   "line": "One background sampler for up to two independent, explicitly configured BatteryChannel children.\n@guide A mains-only product has no battery children. Sampling never runs on the render thread, and charging remains unknown without a qualified detector.",
+   "line": "One background sampler for up to two independent, explicitly configured BatteryChannel children.",
+   "image": "https://moonmodules.org/MoonLight/assets/core/BatteryService.png",
+   "alt": "@guide A mains-only product has no battery children. Sampling never runs on the render thread, and charging remains unknown without a qualified detector.",
    "controls": {
     "pollSeconds": {
      "line": "Interval between measurement batches; each channel sets its own sample lifetime."
     },
     "configuration": {
-     "line": ""
+     "line": "Whether the battery channels form a valid configuration."
     }
    },
    "role": "service",
@@ -4824,7 +4839,9 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#batteryservice"
   },
   "BatteryChannel": {
-   "line": "One explicitly configured battery channel, sampled by its BatteryService parent.\n@guide Unset pins and divider values leave the reading unknown. Presence is declared independently of voltage. Charge percentage is an optional linear voltage estimate with explicit endpoints, not a capacity measurement.",
+   "line": "One explicitly configured battery channel, sampled by its BatteryService parent.",
+   "image": "https://moonmodules.org/MoonLight/assets/core/BatteryChannel.png",
+   "alt": "@guide Unset pins and divider values leave the reading unknown. Presence is declared independently of voltage. Charge percentage is an optional linear voltage estimate with explicit endpoints, not a capacity measurement.",
    "controls": {
     "slot": {
      "line": "Stable physical battery identity, first or second, independent of the module's display name."
@@ -4875,22 +4892,23 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/BatteryChannel.h"
   },
   "HelioRemoteService": {
-   "line": "HELIO and NEBULITE handset commands use native presets, the solid scene and a temporary output overlay.\nExplicit editable bindings take priority over the product commands.",
+   "line": "HELIO and NEBULITE handset commands use native presets, the solid scene and a temporary output overlay. Explicit editable bindings take priority over the product commands.",
+   "image": "https://moonmodules.org/MoonLight/assets/core/HelioRemoteService.png",
    "controls": {
     "auto interval seconds": {
-     "line": ""
+     "line": "How long automatic mode holds a preset before stepping to the next."
     },
     "automatic": {
-     "line": ""
+     "line": "Steps through the saved presets on a timer until a color, mode or OFF key stops it."
     },
     "timer maximum minutes": {
-     "line": ""
+     "line": "The longest sleep timer; the press that would pass it clears the timer."
     },
     "music mode": {
-     "line": ""
+     "line": "Which native preset groups the handset steps through: static, music, or both."
     },
     "timer remaining": {
-     "line": ""
+     "line": "The minutes left on the sleep timer."
     }
    },
    "role": "service",
@@ -4901,12 +4919,30 @@
   },
   "BleRemoteService": {
    "line": "An SP648E RS-protocol handset driving the existing control surface through passive BLE observation.",
+   "image": "https://moonmodules.org/MoonLight/assets/core/BleRemoteService.png",
    "controls": {
     "keys": {
-     "line": ""
+     "line": "The handset keys, each bound to the control it drives.",
+     "fields": {
+      "key": {
+       "line": "The handset key this row binds."
+      },
+      "target": {
+       "line": "The bank of the Control card the row drives: a switch, an encoder, a fader or a pad."
+      },
+      "number": {
+       "line": "Which control of that bank, from 1."
+      },
+      "kind": {
+       "line": "Toggle flips the target each press, set writes the value while held and 0 on release, delta nudges the target by the value."
+      },
+      "value": {
+       "line": "What set writes, or the signed step delta adds; a toggle ignores it."
+      }
+     }
     },
     "reception": {
-     "line": ""
+     "line": "How many key events arrived and how many advertisements the queue dropped."
     }
    },
    "role": "service",
@@ -4916,7 +4952,9 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#bleremoteservice"
   },
   "BleControlService": {
-   "line": "Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state, named scheduled operations and a signed firmware update.\n@technical The framing, session, complete-scene and firmware-update contract lives in reference/product-ble.md.",
+   "line": "Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state, named scheduled operations and a signed firmware update.",
+   "image": "https://moonmodules.org/MoonLight/assets/core/BleControlService.png",
+   "alt": "@technical The framing, session, complete-scene and firmware-update contract lives in reference/product-ble.md.",
    "controls": {
     "group": {
      "line": "Persisted group membership; empty leaves the group."
@@ -4928,16 +4966,16 @@
      "line": "BAS declarations remain fixed until the next real service startup."
     },
     "productProfile": {
-     "line": ""
+     "line": "The product profile of this device as JSON, null for an unknown product."
     },
     "pairing": {
      "line": "Repeat-pairing counters and the remaining explicit repair window."
     },
     "link diagnostics": {
-     "line": ""
+     "line": "Connection counts and the last disconnect reason."
     },
     "repairPairing": {
-     "line": "Authorize one stale-bond replacement for three minutes; other phones keep their bonds."
+     "line": "Authorize one stale-bond replacement for three minutes; other bonds stay."
     }
    },
    "role": "service",

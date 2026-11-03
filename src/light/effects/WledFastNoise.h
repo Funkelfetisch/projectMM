@@ -3,12 +3,10 @@
 #include <cstdint>
 
 namespace mm {
-/// FastLED 3.6 fixed 8-bit two-dimensional noise, for archived WLED looks.
-/// Coordinates are 8.8 and wrap as uint16_t. This is distinct from MoonLight's
-/// improved-Perlin noise. Copyright (c) 2013 FastLED; MIT terms are retained
-/// in docs/licenses/FastLED-3.6.0.txt. @attribution FastLED contributors
+/// FastLED 3.6 fixed 8-bit two-dimensional noise, for archived WLED looks. Coordinates are 8.8 and wrap as uint16_t. This is distinct from MoonLight's improved-Perlin noise. Copyright (c) 2013 FastLED; MIT terms are retained in docs/licenses/FastLED-3.6.0.txt. @attribution FastLED contributors
 class WledFastNoise {
 public:
+    /// The noise value, 0 to 255, at the 8.8 coordinates `x` and `y`.
     static uint8_t sample(uint16_t x, uint16_t y) {
         const uint8_t X = uint8_t(x >> 8), Y = uint8_t(y >> 8);
         const uint8_t A = uint8_t(p_[X] + Y), B = uint8_t(p_[unsigned(X) + 1] + Y);

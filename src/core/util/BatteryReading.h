@@ -15,12 +15,19 @@ public:
 
     /// Divider conversion uses integer millivolts; no historical gain, offset or charge curve is implied.
     struct Config {
+        /// Numerator of the divider gain applied to the ADC millivolts; zero rejects every sample.
         uint32_t gainNumerator = 0;
+        /// Denominator of the divider gain; zero rejects every sample.
         uint32_t gainDenominator = 0;
+        /// Millivolts added after the gain.
         int32_t offsetMv = 0;
+        /// Pack voltage the estimate reads as 0 percent.
         uint16_t emptyMv = 0;
+        /// Pack voltage the estimate reads as 100 percent.
         uint16_t fullMv = 0;
+        /// How long a sample counts as fresh, in milliseconds.
         uint32_t staleAfterMs = 15000;
+        /// Whether the voltage is also reported as a percentage.
         bool estimateEnabled = false;
         bool operator==(const Config&) const = default;
     };

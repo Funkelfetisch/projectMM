@@ -66,8 +66,7 @@ constexpr size_t kChipIdOffset = 12;
 /// Enough bytes to identify an image: through the descriptor's version and project name.
 constexpr size_t kIdentifyBytes = kDescOffset + 96;
 
-/// Optional custom descriptor immediately after ESP-IDF's 256-byte app descriptor.
-/// Untagged historical images remain readable; a tag is identity metadata, not a signature.
+/// Optional custom descriptor immediately after ESP-IDF's 256-byte app descriptor; untagged historical images remain readable, and a tag is identity metadata, not a signature.
 constexpr size_t kVariantOffset = kDescOffset + 256;
 constexpr size_t kVariantBytes = 40;
 inline constexpr char kVariantMagic[8] = {'M','M','V','A','R','0','1','\0'};

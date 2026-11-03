@@ -1,8 +1,7 @@
 #pragma once
 
 namespace mm::platform {
-/// A checked detach is retryable across partially completed SDK operations.
-/// Ops retains its disabled/channel/encoder state when any operation fails.
+/// A checked detach is retryable across partially completed SDK operations, since Ops retains its disabled, channel and encoder state when any operation fails.
 template <typename Ops>
 bool rmtCheckedDetachPhases(Ops& ops) {
     if (!ops.disabled()) {

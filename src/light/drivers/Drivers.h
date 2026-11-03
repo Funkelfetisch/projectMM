@@ -148,6 +148,7 @@ public:
     /// Global output brightness, multiplied with each driver's `localBrightness`.
     /// @guide It starts low, so a fresh device on USB 5 V never browns out at full white.
     uint8_t brightness = 20;
+    /// The brightness the drivers below multiply into their own.
     uint8_t masterBrightness() const override { return brightness; }
     /// Master power.
     /// @guide Off scales the output to black and keeps `brightness`, so switching on restores the level. The UI, infrared, the WLED app, Home Assistant and MQTT all drive it.
@@ -383,6 +384,7 @@ public:
         }
         return false;
     }
+    /// Drive each listed relay pin closed while the output is on and bright, release pins that left the list, and warn about a list it cannot drive.
     void applyRelay() {
         const bool closed = on && brightness > 0;
         // Each call judges the list afresh, so a warning a mid-edit list left goes once the list is fixed or cleared.

@@ -43,9 +43,12 @@ class HelioWledPresetsEffect : public EffectBase {
     };
 
 public:
+    /// Load the selected scene's source settings into the controls.
     HelioWledPresetsEffect() { loadPresetControls(preset); }
 
-    Dim dimensions() const override { return Dim::D3; }  // writes the whole linear strip buffer
+    /// Declares the full 3D set; the render writes the whole linear strip buffer.
+    Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
 
     /// Chooses the static or audio scene sequence.
@@ -95,6 +98,7 @@ public:
     /// Scales this scene's output channels.
     uint8_t output = 255;
 
+    /// Publish the scene selectors, the scene knobs and the source defaults button, hiding what the selected scene does not use.
     void defineControls() override {
         const bool locked = lockedScene();
         if (locked) {
@@ -151,6 +155,7 @@ public:
         }
     }
 
+    /// Pick the active scene, rebuild the controls and size the twinkle and scene-state buffers.
     void prepare() override {
         cursor_ = 0;
         const bool locked = lockedScene();
@@ -171,6 +176,7 @@ public:
         setDynamicBytes(twinkleCount_ * (sizeof(RGB) + 2u) + sceneStateBytes_);
     }
 
+    /// React to a change: reload on a scene choice or the source defaults, and reset the twinkles on a color or option edit.
     void onControlChanged(const char* controlName) override {
         if (!controlName) return;
         if (std::strcmp(controlName, "source defaults") == 0) {
@@ -213,14 +219,17 @@ public:
         }
     }
 
+    /// Free the twinkle and scene state and clear the dynamic byte count.
     void release() override {
         releaseTwinkles();
         releaseSceneState();
         setDynamicBytes(0);
         MoonModule::release();
     }
+    /// Free the twinkle and scene state.
     ~HelioWledPresetsEffect() override { releaseTwinkles(); releaseSceneState(); }
 
+    /// Render the active scene for one frame, switching scenes first when the playlist or the selection moves on.
     void tick() MM_NONBLOCKING override {
         if (lightCount() == 0 || channelsPerLight() == 0 || !buffer()) return;
         const uint32_t now = elapsed();
@@ -1460,6 +1469,7 @@ private:
 template<uint8_t PresetIndex>
 class HelioPresetSceneEffect : public HelioWledPresetsEffect {
 public:
+    /// Lock the effect to the one scene `PresetIndex` names.
     HelioPresetSceneEffect() { configureSinglePreset(PresetIndex); }
 
 protected:

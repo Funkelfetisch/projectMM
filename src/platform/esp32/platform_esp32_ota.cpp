@@ -167,8 +167,7 @@ void otaSetStatus(OtaTaskParams* p, const char* fmt, ...) {
 void abortHttpsOta(OtaTaskParams* p, esp_https_ota_handle_t handle) {
     const esp_err_t err = esp_https_ota_abort(handle);
     if (err != ESP_OK) {
-        // The HTTPS helper reports its underlying app-abort result. Keep the
-        // shared reservation if cleanup failed, just as the upload path does.
+        // The HTTPS helper reports its underlying app-abort result; keep the shared reservation if cleanup failed, just as the upload path does.
         otaSetStatus(p, "error: ota abort %s; restart required", esp_err_to_name(err));
         if (p->lease.held()) committedAppLease = std::move(p->lease);
     }
@@ -280,9 +279,7 @@ void otaTask(void* arg) {
         return;
     }
 
-    // ESP-IDF's HTTPS helper exposes only the standard app descriptor. Read
-    // our optional extension from the inactive slot before finish() can
-    // select it for boot. Untagged historical images remain compatible.
+    // ESP-IDF's HTTPS helper exposes only the standard app descriptor. Read our optional extension from the inactive slot before finish() can select it for boot. Untagged historical images remain compatible.
     if (isProductFirmware(kFirmwareName)) {
         const auto* running = esp_ota_get_running_partition();
         const auto* target = esp_ota_get_next_update_partition(nullptr);

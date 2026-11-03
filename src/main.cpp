@@ -554,8 +554,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
 
     std::printf("\nShutting down.\n");
     if (!scheduler.release()) {
-        // Retain the owner and its buffers while its explicit shutdown hook
-        // advances; do not resume the ordinary render/control loop.
+        // Retain the owner and its buffers while its explicit shutdown hook advances, and do not resume the ordinary render/control loop.
         std::printf("Shutdown blocked: a hardware resource is still owned.\n");
         std::fflush(stdout);
         do {

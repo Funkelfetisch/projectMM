@@ -4,6 +4,7 @@
 #include <cstring>
 
 namespace mm::ble_advertisement {
+/// A wire code and the name the catalog gives it.
 struct NamedCode { uint8_t code; const char* name; };
 /// Exact persisted setup profile names; unknown and custom models remain unclassified.
 inline uint8_t productCodeForModel(const char* model) {

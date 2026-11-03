@@ -5,11 +5,11 @@
 #include <cstdint>
 
 namespace mm {
-/// Cooperative, serialized GPIO reservations. A reservation does not by
-/// itself arbitrate GPIO APIs or controls that do not consult this table.
+/// Cooperative, serialized GPIO reservations: a reservation does not by itself arbitrate GPIO APIs or controls that do not consult this table.
 template <size_t Capacity>
 class PinReservations {
 public:
+    /// Claim `count` distinct pins for `owner`, all or none; repeating an owner's own claim succeeds, and a pin another owner holds fails.
     bool reserve(const void* owner, const uint16_t* pins, size_t count) {
         if (!owner || !pins || !count || count > Capacity) return false;
         size_t owned = 0, free = 0;
@@ -32,22 +32,27 @@ public:
         }
         return true;
     }
+    /// Free every pin `owner` holds; false when it held none.
     bool release(const void* owner) {
         if (!owner) return false;
         bool found = false;
         for (auto& slot : slots_) if (slot.owner == owner) { slot = {}; found = true; }
         return found;
     }
+    /// Whether `owner` holds `pin`.
     bool heldBy(const void* owner, uint16_t pin) const {
         if (!owner) return false;
         for (const auto& slot : slots_) if (slot.owner == owner && slot.pin == pin) return true;
         return false;
     }
+    /// Whether any pin is reserved.
     bool any() const { for (const auto& slot : slots_) if (slot.owner) return true; return false; }
+    /// Whether any owner holds `pin`.
     bool reserved(uint16_t pin) const {
         for (const auto& slot : slots_) if (slot.owner && slot.pin == pin) return true;
         return false;
     }
+    /// Whether an owner other than `owner` holds `pin`.
     bool reservedByOther(const void* owner, uint16_t pin) const {
         for (const auto& slot : slots_) if (slot.owner && slot.pin == pin && slot.owner != owner) return true;
         return false;

@@ -3,20 +3,9 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdlib>  // std::strtol
-#include "core/module/Control.h"  // MM_MAX_GPIO — the build-injected per-chip GPIO ceiling
+#include "core/module/Control.h"  // MM_MAX_GPIO: the build-injected per-chip GPIO ceiling
 
-namespace mm {
-
-/// Driver-style text lists use names ending in "pins", regardless of case.
-inline bool isPinListControl(const char* name) {
-    if (!name) return false;
-    size_t n = 0; while (name[n]) ++n;
-    auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; };
-    return n >= 4 && lower(name[n-4]) == 'p' && lower(name[n-3]) == 'i' &&
-           lower(name[n-2]) == 'n' && lower(name[n-1]) == 's';
-}
-
-/// One text control such as `18,17,16` turned into the pins a driver claims.
+/// Parses a pin list: one text control such as `18,17,16` turned into the pins a driver claims.
 ///
 /// @technical
 ///
@@ -39,6 +28,17 @@ inline bool isPinListControl(const char* name) {
 /// The ceiling check is the crash guard.
 /// A pin like 999 parses as a valid integer but is not a GPIO, and handing it to IDF's `gpio_func_sel` faults with a GPIO number error and resets the board.
 /// Rejecting it at the one parse boundary every driver shares, RMT, Parlio and i80 alike, keeps a garbage pin from reaching hardware, so no driver re-guards it.
+
+namespace mm {
+
+/// Driver-style text lists use names ending in "pins", regardless of case.
+inline bool isPinListControl(const char* name) {
+    if (!name) return false;
+    size_t n = 0; while (name[n]) ++n;
+    auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; };
+    return n >= 4 && lower(name[n-4]) == 'p' && lower(name[n-3]) == 'i' &&
+           lower(name[n-2]) == 'n' && lower(name[n-1]) == 's';
+}
 
 /// Append one pin, enforcing the chip ceiling, the duplicate check and the lane cap.
 inline const char* appendPin(long v, uint16_t* out, uint8_t maxPins, uint8_t& nOut) {

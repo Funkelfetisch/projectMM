@@ -36,8 +36,7 @@ public:
     /// The hardware block this driver claims, so two drivers cannot corrupt one peripheral; virtual rather than RTTI, which ESP32 builds compile without.
     virtual LedHwBlock hwBlock() const { return LedHwBlock::None; }
 
-    /// A driver that sequences its own power can reserve that pin from the
-    /// container's generic relay path, including during disable/cleanup.
+    /// A driver that sequences its own power can reserve that pin from the container's generic relay path, including during disable and cleanup.
     virtual bool reservesPowerPin(uint8_t /*pin*/) const { return false; }
 
     /// Lead every driver card with the correction block, then the window, then the driver's own controls; a driver overrides defineDriverControls, so the placement is never re-implemented.

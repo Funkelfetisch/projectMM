@@ -196,8 +196,7 @@ public:
         return {};
     }
 
-    /// Seed a missing card from its unique existing instance; ambiguous instances retain factory defaults.
-    /// Disabled native effects have no remembered global palette, so only an active instance contributes Drivers.palette.
+    /// Seed a missing card from its unique existing instance; ambiguous instances retain factory defaults, and only an active instance contributes Drivers.palette, since disabled native effects remember no global palette.
     static StateDocumentResult writeSeedDocument(Scheduler& scheduler, const char* id, JsonSink& document) {
         const Entry* entry = find(id);
         if (!entry) return failure("scene-id");

@@ -1,12 +1,12 @@
 {
  "(appendix lines)": 4328,
- "(total)": 2157,
+ "(total)": 2062,
  "appendix sections nothing refers to": 192,
- "files opening with //": 12,
- "member deep dives": 38,
+ "files opening with //": 10,
+ "member deep dives": 37,
  "missing file leads": 3,
- "multi-line comment blocks": 317,
+ "multi-line comment blocks": 291,
  "over-wide comment lines": 716,
  "over-wide doc lines": 34,
- "split paragraphs": 845
+ "split paragraphs": 779
 }

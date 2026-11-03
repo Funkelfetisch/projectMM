@@ -435,8 +435,7 @@ TEST_CASE("battery service: declared pin conflicts are refused and held pins blo
     };
     CHECK_FALSE(service->samplePending()); CHECK(service->severity() == mm::MoonModule::Severity::Error);
     CHECK_FALSE(mm::platform::gpioRead(2));
-    // A previously valid sample must disappear immediately when re-preparing
-    // with conflicting pin ownership, rather than looking fresh until timeout.
+    // A previously valid sample must disappear immediately when re-preparing with conflicting pin ownership, rather than looking fresh until timeout.
     channel->configureReading(); channel->acceptAdc(1800, mm::platform::millis());
     uint8_t percentage = 0; REQUIRE(channel->reading().percent(mm::platform::millis(), percentage));
     scheduler.prepareSubtree(service);

@@ -8,6 +8,7 @@ namespace mm::platform {
 
 /// The declared BAS instances at host startup, using physical slot identities rather than an invented aggregate.
 struct BleBatteryConfig {
+    /// How many BAS instances are declared, zero to two.
     uint8_t count = 0;
     std::array<uint8_t, 2> slots{};
     bool operator==(const BleBatteryConfig&) const = default;
@@ -31,9 +32,13 @@ struct BleBatteryConfig {
 
 /// A copied measurement for the GATT callback; it never performs ADC or model work.
 struct BleBatteryValue {
+    /// Whether the sampler has decided that a battery is present or absent.
     bool presenceKnown = false;
+    /// Whether a battery is fitted, meaningful once `presenceKnown`.
     bool present = false;
+    /// Whether `level` holds a measurement.
     bool levelValid = false;
+    /// Charge in percent, 0 to 100, meaningful when `levelValid`.
     uint8_t level = 0;
     bool operator==(const BleBatteryValue&) const = default;
 
@@ -53,19 +58,22 @@ struct BleBatterySnapshot {
     bool operator==(const BleBatterySnapshot&) const = default;
 };
 
-/// Coalesce changes while retaining failed notifications for the next bounded
-/// publisher tick. The caller serializes this state with its subscriber list.
+/// Coalesce changes while retaining failed notifications for the next bounded publisher tick; the caller serializes this state with its subscriber list.
 struct BleBatteryUpdates {
-    // The service normally publishes every second. Refuse an old snapshot if
-    // that task stops, even when the last published value was valid.
+    /// The service normally publishes every second, so an old snapshot is refused once that task stops, even when the last value was valid.
     static constexpr uint32_t kPublishTimeoutMs = 5000;
     BleBatterySnapshot values{};
+    /// A notification failed and goes out again on the next publisher tick.
     bool retry = false;
+    /// Whether any snapshot has been published yet.
     bool published = false;
+    /// When the last snapshot was published, in milliseconds.
     uint32_t publishedAt = 0;
+    /// Whether the last publish is recent enough to trust.
     bool fresh(uint32_t now) const {
         return published && uint32_t(now - publishedAt) < kPublishTimeoutMs;
     }
+    /// Store `next` at `now` and return whether subscribers need a notification: a change, a pending retry or a stale snapshot.
     bool publish(const BleBatterySnapshot& next, uint32_t now) {
         const bool notify = values != next || retry || !fresh(now);
         values = next;
@@ -74,6 +82,7 @@ struct BleBatteryUpdates {
         retry = false;
         return notify;
     }
+    /// Mark the last notification undelivered so the next publish sends it again.
     void deliveryFailed() { retry = true; }
 };
 

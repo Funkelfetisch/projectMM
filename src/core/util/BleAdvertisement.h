@@ -6,21 +6,33 @@
 namespace mm {
 /// Public scan hints; every absent observation keeps its independent unknown marker.
 struct BleAdvertisementProduct {
+    /// Product identity from the append-only registry; zero is unclassified.
     uint8_t code = 0;
     uint8_t diameterCm = 0;  ///< Explicit physical metadata from the product profile.
 };
 struct BleAdvertisementSnapshot {
+    /// The product the advertisement names.
     BleAdvertisementProduct product;
+    /// Lights on the fixture; zero, or more than 65535, is left out of the advertisement.
     uint32_t ledCount = 0;
+    /// Whether the power state was observed, and whether it is on.
     bool powerKnown = false, powerOn = false;
+    /// Whether the RGBW kind was observed, and whether the fixture is RGBW.
     bool rgbwKnown = false, rgbw = false;
+    /// Scene identity from the append-only registry; zero is unknown.
     uint8_t animation = 0;
+    /// Whether the speed was observed; `speed` then carries it.
     bool speedKnown = false;
     int32_t speed = 0;       ///< Native integer units; negative values retain their sign.
+    /// Whether the color was observed; red, green and blue then carry it.
     bool rgbKnown = false;
+    /// The color channels, each advertised only within 0 to 255.
     int32_t red = 0, green = 0, blue = 0;
+    /// Whether the white level was observed; it is advertised for an RGBW fixture only.
     bool whiteKnown = false;
+    /// The white level, advertised only within 0 to 255.
     int32_t white = 0;
+    /// Palette identity from the append-only registry; 255 is unknown.
     uint8_t palette = 255;
 };
 inline bool bleAdvertisementByte(int32_t value) { return value >= 0 && value <= 255; }

@@ -8,13 +8,12 @@
 #include <limits>
 
 namespace mm {
-/// Bounded reassembly for a transport that supplies a frame length and offset.
-/// This specifies no wire encoding and does not authorize or dispatch an update.
-/// Calls must be serialized; owner is a unique connection generation, never zero.
+/// Bounded reassembly for a transport that supplies a frame length and offset. This specifies no wire encoding and does not authorize or dispatch an update. Calls must be serialized; owner is a unique connection generation, never zero.
 class FirmwareUploadAssembly {
 public:
     enum class Result { Pending, Ready, Invalid, Owner, Offset, Busy };
 
+    /// An empty assembly that drops an owner after `timeoutMs` without progress.
     explicit FirmwareUploadAssembly(uint32_t timeoutMs) : timeoutMs_(timeoutMs) {}
 
     Result append(uint64_t owner, size_t total, size_t offset,
@@ -34,9 +33,13 @@ public:
         ready_ = received_ == total_;
         return ready_ ? Result::Ready : Result::Pending;
     }
+    /// The whole image once ready, otherwise null.
     const uint8_t* data() const { return ready_ ? buffer_.data() : nullptr; }
+    /// Bytes of the ready image, otherwise zero.
     size_t size() const { return ready_ ? received_ : 0; }
+    /// Drop the upload `owner` started; any other owner is ignored.
     void release(uint64_t owner) { if (owner && owner == owner_) clear(); }
+    /// Drop an upload that made no progress for the timeout, returning whether one was dropped.
     bool expire(uint32_t now) {
         if (!owner_ || !timeoutMs_ || timeoutMs_ > uint32_t(std::numeric_limits<int32_t>::max()) ||
             uint32_t(now - lastProgress_) < timeoutMs_) return false;

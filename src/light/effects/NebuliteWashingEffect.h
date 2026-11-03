@@ -8,16 +8,26 @@
 namespace mm {
 
 /// Experimental physical-strip port of WLED Washing Machine, palette 1.
-/// Its phase and palette math match WLED, but random seed, initial palette,
-/// missed frames and global palette sharing differ; it is not a qualified
-/// restoration of the archived preset or its original output curve.
+///
+/// Its phase and palette math match WLED, but random seed, initial palette, missed frames and global palette sharing differ; it is not a qualified restoration of the archived preset or its original output curve.
 class NebuliteWashingEffect : public EffectBase {
 public:
+    /// Declares the full 3D set; the render indexes lights directly.
     Dim dimensions() const override { return Dim::D3; }
+    /// Indexes the real lights in wiring order rather than the layout's bounding box.
     bool usesPhysicalLightOrder() const override { return true; }
-    uint8_t speed = 128, intensity = 128;
-    uint16_t frameMs = 23, segmentStart = 0, segmentStop = 0;
+    /// How fast the washing waves move.
+    uint8_t speed = 128;
+    /// How many waves span the segment.
+    uint8_t intensity = 128;
+    /// WLED frame time in milliseconds, which paces the wave's motion.
+    uint16_t frameMs = 23;
+    /// First light of the segment.
+    uint16_t segmentStart = 0;
+    /// End of the segment, exclusive; zero means the end of the strip.
+    uint16_t segmentStop = 0;
 
+    /// Publish the speed, wave count, frame time and segment.
     void defineControls() override {
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("effect intensity", intensity, 0, 255);
@@ -26,8 +36,10 @@ public:
         controls_.addControl("segment stop", segmentStop);
     }
 
+    /// Render one frame at the effect's own clock.
     void tick() MM_NONBLOCKING override { renderAt(elapsed()); }
 
+    /// Draw the washing waves across the segment as of `now`, drifting the palette every five seconds, and black elsewhere.
     void renderAt(uint32_t now) {
         uint8_t* out = buffer();
         const uint32_t count = nrOfLights();

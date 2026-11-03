@@ -17,22 +17,29 @@
 namespace mm {
 
 /// One background sampler for up to two independent, explicitly configured BatteryChannel children.
+/// @card BatteryService.png
 /// @guide A mains-only product has no battery children. Sampling never runs on the render thread, and charging remains unknown without a qualified detector.
 class BatteryService : public MoonModule {
 public:
+    /// A service, so the scheduler runs it with the other background services.
     ModuleRole role() const MM_NONBLOCKING override { return ModuleRole::Service; }
+    /// Only service children, which `collect` narrows to BatteryChannel.
     const char* acceptsChildRoles() const override { return "service"; }
     /// Interval between measurement batches; each channel sets its own sample lifetime.
     uint16_t pollSeconds = 3;
 
+    /// Stops the sampler and releases its pins.
     ~BatteryService() override { stop(); }
     /// Structural edits and child control changes park the sampler until prepare.
     void quiesce() override { restartAfterGateFault_ = false; stop(); }
+    /// Publish the poll interval and the configuration verdict.
     void defineControls() override {
         controls_.addControl("pollSeconds", pollSeconds, 1, 60);
+        /// Whether the battery channels form a valid configuration.
         controls_.addReadOnly("configuration", configurationText_, sizeof(configurationText_));
         MoonModule::defineControls();
     }
+    /// Validate the channels, reserve their pins and restart the sampler task when its inputs changed.
     void prepare() override {
         seat_.claim();
         pinConflict_ = false;
@@ -84,26 +91,32 @@ public:
         request(platform::millis());
         setStatus("waiting for battery measurement");
     }
+    /// Stop the sampler and give up the active-service seat.
     void release() override {
         restartAfterGateFault_ = false;
         if (!stop()) return;
         seat_.vacate();
         MoonModule::release();
     }
+    /// True while a stopped sampler still holds its worker, so an ancestor cannot be removed yet.
     bool blocksAncestorRemoval() const override {
         return io_ && io_->stopped.load(std::memory_order_acquire);
     }
+    /// Reclaim a stopped sampler during shutdown.
     void shutdownStep(uint32_t now) MM_NONBLOCKING override {
         restartAfterGateFault_ = false;
         if (io_ && io_->stopped.load(std::memory_order_acquire)) stop();
         MoonModule::shutdownStep(now);
     }
+    /// No control change needs a prepare.
     bool affectsPrepare(const char*) const override { return false; }
+    /// A new poll interval schedules the next batch at once.
     void onControlChanged(const char* name) override {
         if (std::strcmp(name, "pollSeconds") == 0) nextSampleMs_ = platform::millis();
         MoonModule::onControlChanged(name);
     }
 
+    /// Take in a finished batch, and request a prepare after a sense-gate fault.
     void tick20ms() MM_NONBLOCKING override {
         seat_.claim();
         if (io_ && io_->stopped.load(std::memory_order_acquire)) { MoonModule::tick20ms(); return; }
@@ -128,6 +141,7 @@ public:
         }
         MoonModule::tick20ms();
     }
+    /// Refresh the channels and request the next batch once the poll interval has passed.
     void tick1s() MM_NONBLOCKING override {
         seat_.claim();
         if (restartAfterGateFault_) {
@@ -310,8 +324,7 @@ private:
                 if (channel != other && channel->adcPin == other->adcPin) {
                     return invalidConfiguration("independent batteries require distinct ADC inputs");
                 }
-                // A partially configured channel still declares its ADC pin:
-                // never drive it as another channel's switched divider gate.
+                // A partially configured channel still declares its ADC pin: never drive it as another channel's switched divider gate.
                 if (channel->senseGate >= 0 && channel->senseGate == other->adcPin) {
                     return invalidConfiguration("battery ADC and sense gate cannot share a pin");
                 }
