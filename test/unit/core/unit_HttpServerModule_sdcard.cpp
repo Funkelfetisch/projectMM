@@ -151,6 +151,79 @@ TEST_CASE("the root listing does not advertise /sd once the card is unmounted") 
     CHECK(std::find(names.begin(), names.end(), "sd") == names.end());
 }
 
+TEST_CASE("filesystem names-only listing preserves directories and symlinks with zero sizes") {
+    SdFixture fix;
+    REQUIRE(mm::platform::fsMkdir("/listed/nested"));
+    REQUIRE(mm::platform::fsWriteAtomic("/listed/file.bin", "hello", 5));
+    REQUIRE(mm::platform::fsWriteAtomic("/listed/nested/child.bin", "inside", 6));
+    struct Entry { std::string name; bool isDir; uint32_t size; };
+    const auto list = [](const char* path, mm::platform::FsListMode mode) {
+        std::vector<Entry> entries;
+        mm::platform::fsList(path, [](const char* name, bool isDir, uint32_t size, void* user) {
+            static_cast<std::vector<Entry>*>(user)->push_back({name, isDir, size});
+        }, &entries, mode);
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.name < b.name; });
+        return entries;
+    };
+    SUBCASE("one level and real sizes remain the default") {
+        std::vector<Entry> entries;
+        mm::platform::fsList("/listed", [](const char* name, bool isDir, uint32_t size, void* user) {
+            static_cast<std::vector<Entry>*>(user)->push_back({name, isDir, size});
+        }, &entries);
+        REQUIRE(entries.size() == 2);
+        for (const auto& entry : entries) {
+            CHECK(entry.isDir == (entry.name == "nested"));
+            CHECK(entry.size == (entry.isDir ? 0 : 5));
+        }
+    }
+    SUBCASE("names only keeps the same membership and directory classification") {
+        const auto entries = list("/listed", mm::platform::FsListMode::NamesOnly);
+        REQUIRE(entries.size() == 2);
+        CHECK(entries[0].name == "file.bin"); CHECK_FALSE(entries[0].isDir); CHECK(entries[0].size == 0);
+        CHECK(entries[1].name == "nested"); CHECK(entries[1].isDir); CHECK(entries[1].size == 0);
+        const auto nested = list("/listed/nested", mm::platform::FsListMode::NamesOnly);
+        REQUIRE(nested.size() == 1);
+        CHECK(nested[0].name == "child.bin"); CHECK_FALSE(nested[0].isDir); CHECK(nested[0].size == 0);
+    }
+    SUBCASE("symlink targets keep their directory and file semantics") {
+        std::error_code ec;
+        const auto dir = std::filesystem::path(fix.root) / "listed";
+        std::filesystem::create_directory_symlink(dir / "nested", dir / "linked-dir", ec);
+        if (ec) { WARN_MESSAGE(false, "The host denies symlink creation: ", ec.message()); return; }
+        std::filesystem::create_symlink(dir / "file.bin", dir / "linked-file", ec);
+        REQUIRE_FALSE(ec);
+        const auto metadata = list("/listed", mm::platform::FsListMode::Metadata);
+        const auto names = list("/listed", mm::platform::FsListMode::NamesOnly);
+        REQUIRE(metadata.size() == 4); REQUIRE(names.size() == metadata.size());
+        for (size_t i = 0; i < names.size(); ++i) {
+            CHECK(names[i].name == metadata[i].name);
+            CHECK(names[i].isDir == metadata[i].isDir);
+            CHECK(names[i].size == 0);
+            CHECK(metadata[i].size == (metadata[i].isDir ? 0 : 5));
+        }
+    }
+}
+
+TEST_CASE("filesystem names-only listing retains the synthetic SD mount and card children") {
+    SdFixture fix;
+    REQUIRE(mm::platform::fsMkdir("/sd/nested"));
+    REQUIRE(mm::platform::fsWriteAtomic("/sd/card.bin", "card", 4));
+    struct Seen { unsigned mounts = 0; unsigned files = 0; unsigned dirs = 0; } seen;
+    mm::platform::fsList("/", [](const char* name, bool isDir, uint32_t size, void* user) {
+        if (std::strcmp(name, "sd")) return;
+        CHECK(isDir); CHECK(size == 0);
+        ++static_cast<Seen*>(user)->mounts;
+    }, &seen, mm::platform::FsListMode::NamesOnly);
+    CHECK(seen.mounts == 1);
+    mm::platform::fsList("/sd", [](const char* name, bool isDir, uint32_t size, void* user) {
+        CHECK(size == 0);
+        auto& counts = *static_cast<Seen*>(user);
+        if (!std::strcmp(name, "nested")) { CHECK(isDir); ++counts.dirs; }
+        if (!std::strcmp(name, "card.bin")) { CHECK_FALSE(isDir); ++counts.files; }
+    }, &seen, mm::platform::FsListMode::NamesOnly);
+    CHECK(seen.files == 1); CHECK(seen.dirs == 1);
+}
+
 TEST_CASE("an upload to /sd without a mounted card answers \"no card mounted\", not a generic failure") {
     SdFixture fix;
     REQUIRE(mm::platform::sdUnmount());

@@ -46,7 +46,7 @@ TEST_CASE("a Ring layout without a center places itself by its own size, and one
     r.rotation = 90;   // a partial arc, so the count is the filter's
     const auto own = lightsOf(r);
     CHECK(own.size() == r.lightCount());
-    const mm::lengthType c = static_cast<mm::lengthType>(1.1f * mm::RingLayout::radius(24));
+    const mm::lengthType c = static_cast<mm::lengthType>(1.1f * mm::RingLayout::getRadius(24));
     CHECK(own == ring(c, c, 24, 0, 90, true, 1));
     const auto moved = ring(c + 5, c + 2, 24, 0, 90, true, 1);
     REQUIRE(moved.size() == own.size());
@@ -85,8 +85,8 @@ TEST_CASE("the 241 disc is nine Ring layout rings about one center") {
     mm::Rings241Layout disc;
     const auto v = lightsOf(disc);
     REQUIRE(v.size() == 241);
-    const auto outer = ring(static_cast<mm::lengthType>(static_cast<uint8_t>(1.1f * mm::RingLayout::radius(60))),
-                            static_cast<mm::lengthType>(static_cast<uint8_t>(1.1f * mm::RingLayout::radius(60))), 60, 0, 360, true, disc.scale);
+    const auto outer = ring(static_cast<mm::lengthType>(static_cast<uint8_t>(1.1f * mm::RingLayout::getRadius(60))),
+                            static_cast<mm::lengthType>(static_cast<uint8_t>(1.1f * mm::RingLayout::getRadius(60))), 60, 0, 360, true, disc.scale);
     CHECK(std::vector<Light>(v.end() - 60, v.end()) == outer);
 }
 

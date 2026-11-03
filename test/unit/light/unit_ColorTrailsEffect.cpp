@@ -12,6 +12,7 @@
 #include "light/effects/ColorTrailsEffect.h"
 
 #include <cstdlib>
+#include <algorithm>
 
 using namespace mm;
 
@@ -83,4 +84,26 @@ TEST_CASE("the center cell has no direction to move in, and does not divide by z
     layer.applyState();
     for (uint16_t i = 0; i < 20; i++) { platform::setTestNowMs(1000 + i * 20u); layer.tick(); }
     CHECK(layer.buffer().bytes() > 0);   // still rendering
+}
+
+TEST_CASE("working memory: Color Trails releases a partial allocation and recovers") {
+    struct Restore { ~Restore() { platform::setTestAllocRefusedFrom(0); } } restore;
+    golden::ScopedTestClock clock(1000);
+    Layouts layouts; GridLayout grid; Layer layer; ColorTrailsEffect effect;
+    grid.width = 50; grid.height = 51; grid.depth = 1;
+    layouts.addChild(&grid); layer.setLayouts(&layouts); layer.setChannelsPerLight(4);
+    layer.prepare();
+    layer.addChild(&effect);
+    platform::setTestAllocRefusedFrom(8000);
+    effect.prepare();
+    CHECK(effect.dynamicBytes() == 0);
+    CHECK(effect.severity() == MoonModule::Severity::Error);
+    CHECK(effect.status() != nullptr);
+    platform::setTestAllocRefusedFrom(0);
+    effect.prepare();
+    CHECK(effect.dynamicBytes() > 0);
+    CHECK(effect.status() == nullptr);
+    for (uint16_t i = 0; i < 30; i++) { platform::setTestNowMs(1000 + i * 20u); layer.tick(); }
+    CHECK(std::any_of(layer.buffer().span().begin(), layer.buffer().span().end(),
+                      [](uint8_t value) { return value != 0; }));
 }

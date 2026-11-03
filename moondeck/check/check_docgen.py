@@ -491,7 +491,8 @@ _TOP_DECL_RE = re.compile(r"^(inline|constexpr|extern|template|using|typedef)\b|
 _FUNC_TAIL = r"(?:\s*(?:const|noexcept|override|final|[A-Z][A-Z0-9_]+)\b)*\s*(?:=\s*(?:0|default|delete)\s*)?"
 _FUNC_RE = re.compile(r"^[\w:<>,\s\*&]+\s+(\w+)\s*\([^)]*\)" + _FUNC_TAIL + r"[;{]")
 # A constructor and a destructor have no return type, so the form above misses both.
-_SPECIAL_FUNC_RE = re.compile(r"^(?:explicit\s+|virtual\s+)*~?(\w+)\s*\([^)]*\)" + _FUNC_TAIL + r"[;{:]")
+# static_assert has the same shape, but introduces no callable member.
+_SPECIAL_FUNC_RE = re.compile(r"^(?!static_assert\b)(?:explicit\s+|virtual\s+)*~?(\w+)\s*\([^)]*\)" + _FUNC_TAIL + r"[;{:]")
 _VAR_RE = re.compile(r"^[\w:<>,\s\*&]+\s+(\w+)\s*(=[^;]+)?;")
 
 

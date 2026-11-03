@@ -6,6 +6,7 @@
 #include "core/module/MoonModule.h"
 #include "core/module/Scheduler.h"   // topOfType: the Effects it finds when nothing injected a source
 #include "core/util/ActiveInstance.h"  // the summary-seat election (the seat + its RAII vacate)
+#include "core/services/Bh1750Service.h"
 #include "light/layers/Buffer.h"
 #include "light/layers/Layer.h"
 #include "light/layers/Effects.h"
@@ -57,6 +58,7 @@ public:
 
     /// Release the children, then vacate every static seat this container published, since each seat references this object's members.
     void release() override {
+        Bh1750Service::setTargetChangedHook(nullptr);
         // BEFORE the children release: the worker ticks them, so it must stop before they free.
         stopEncodeTask();
         renderSplitActive_ = false;
@@ -70,41 +72,64 @@ public:
 
     /// Stop the worker and free the palette script, for a tree torn down without release(); a destructor runs where release() may not.
     ~Drivers() override {
+        Bh1750Service::setTargetChangedHook(nullptr);
         stopEncodeTask();
         MoonLivePalette::clearActiveInstance(&paletteScriptModule_);
         // Free the script rather than detach: release() may never run, and the engine holds a block.
         paletteScriptModule_.release();
     }
 
-    /// Stop the core-1 worker so a structural tree mutation can free nodes safely, since a driver walks the whole tree.
+    /// Stop the worker and invalidate borrowed sources before a structural mutation can delete a layer.
     void quiesceRenderSplit() {
         stopEncodeTask();
         renderSplitActive_ = false;
+        source_ = nullptr;
+        if (effects_) layer_ = nullptr;   // re-resolved from the surviving container at the next bind
+        for (uint8_t i = 0; i < childCount(); i++) {
+            if (child(i)->role() != ModuleRole::Driver) continue;
+            auto* driver = static_cast<DriverBase*>(child(i));
+            driver->setLayer(nullptr);
+            driver->setSourceBuffer(nullptr);
+        }
+    }
+    /// Hold an idle frame for task observation; resume encoding after the snapshot.
+    void waitForTaskSnapshot() {
+        if (!quiesceEncode()) stopEncodeTask();
     }
     /// Reach the live Drivers (the one that owns the encode worker) to quiesce it around a mutation.
     static Drivers* active() { return ActiveInstance<Drivers>::active(); }
 
-    /// Where this rig's fixtures keep their motion channels, as LAYER slots, callable before prepare so Effects sizes its buffer first.
-    void publishFixtureChannels() {
+    /// Publish this rig's color count and motion slots; optionally prepare a layer whose buffer needs widening.
+    void publishFixtureChannels(bool prepareLayers = false) {
+        resolveSourceLayer();
         const FixtureChannels fc = fixtureChannels();
+        const auto publish = [&](Layer* layer) {
+            const bool wider = layer->setFixtureChannels(fc);
+            // A document-created layer can prepare before Drivers publishes its fixture requirements.
+            if (prepareLayers && wider && layer->effectivelyEnabled()) layer->applyState();
+        };
         if (effects_) {
             for (uint8_t i = 0; i < effects_->childCount(); i++)
                 if (effects_->child(i)->role() == ModuleRole::Layer)
-                    static_cast<Layer*>(effects_->child(i))->setFixtureChannels(fc);
+                    publish(static_cast<Layer*>(effects_->child(i)));
         } else if (layer_) {
-            layer_->setFixtureChannels(fc);
+            publish(layer_);
         }
     }
 
-    /// Resolve every enabled driver's fixture profile and fold their motion channels into one map.
+    /// Resolve every enabled driver's color width and keep the first motion layout as layer slots.
     FixtureChannels fixtureChannels() {
-        FixtureChannels fc;   // every offset absent: a rig with no motion, the common case
+        resolveSourceLayer();
+        FixtureChannels fc;   // RGB and every motion offset absent, the common case
+        bool motionSelected = false;
         for (uint8_t i = 0; i < childCount(); i++) {
             if (child(i)->role() != ModuleRole::Driver || !child(i)->enabled()) continue;
             auto* d = static_cast<DriverBase*>(child(i));
+            d->setLayer(layer_);
             d->rebuildCorrection(brightness);        // resolve the profile if it has not been yet
             const Correction& c = d->correction();
-            if (!c.hasMotion) continue;
+            if (c.offWhite != Correction::kAbsent) fc.colorChannels = 4;
+            if (motionSelected || !c.hasMotion) continue;
             // Layer slots, not channel numbers: packed after RGBW so a pan write cannot collide.
             const bool present[5] = {c.offPan    != Correction::kAbsent,
                                      c.offTilt   != Correction::kAbsent,
@@ -114,7 +139,7 @@ public:
             uint8_t* const dst[5] = {&fc.pan, &fc.tilt, &fc.zoom, &fc.rotate, &fc.gobo};
             FixtureChannels::forEachMotionSlot(present,
                 [&](uint8_t role, uint8_t slot) { *dst[role] = slot; });
-            break;   // a chain is homogeneous (architecture.md), so one layout describes it
+            motionSelected = true;   // one homogeneous motion layout; later drivers can still require white
         }
         return fc;
     }
@@ -122,6 +147,7 @@ public:
     /// Global output brightness, multiplied with each driver's `localBrightness`.
     /// @guide It starts low, so a fresh device on USB 5 V never browns out at full white.
     uint8_t brightness = 20;
+    uint8_t masterBrightness() const override { return brightness; }
     /// Master power.
     /// @guide Off scales the output to black and keeps `brightness`, so switching on restores the level. The UI, infrared, the WLED app, Home Assistant and MQTT all drive it.
     bool on = true;
@@ -229,13 +255,15 @@ public:
     /// The engine that runs the selected scripted palette, one per Drivers.
     MoonLivePalette paletteScriptModule_;
 
-    /// Bind the Effects container, which is self-healing: the source Layer re-resolves on every prepareTree.
+    /// Bind a caller-owned Effects container; clear or rebind it before external destruction, while its layers re-resolve on prepare.
     void setEffects(Effects* layers) {
+        quiesceRenderSplit();
         effects_ = layers;
-        if (effects_) layer_ = effects_->activeLayer();
+        layer_ = effects_ ? effects_->activeLayer() : nullptr;
     }
-    /// Pin one Layer directly, for a rig built outside an Effects container.
+    /// Pin a caller-owned Layer outside Effects; clear or rebind it before external destruction.
     void setLayer(Layer* layer) {
+        quiesceRenderSplit();
         effects_ = nullptr;  // explicit pin overrides container resolution
         layer_ = layer;
     }
@@ -243,10 +271,12 @@ public:
     /// The brightness the LUT is built from: 0 when powered off, else the set level, rising through the soft start; `on` stays independent, so off never clobbers the level.
     uint8_t effectiveBrightness() const MM_NONBLOCKING {
         if (!on || dark_) return 0;
-        if (!softStarting_) return brightness;
+        uint8_t target = brightness;
+        Bh1750Service::automaticBrightness(target);
+        if (!softStarting_) return target;
         if (!softStartBegun_) return 0;   // dark until the first frame, where the rise starts
         const uint32_t up = platform::millis() - softStartAt_;
-        return up < kSoftStartMs ? static_cast<uint8_t>(brightness * up / kSoftStartMs) : brightness;
+        return up < kSoftStartMs ? static_cast<uint8_t>(target * up / kSoftStartMs) : target;
     }
 
     /// How long the lights take to rise to their brightness after the device boots, so a supply that cannot hold the level fails within the boot record's minute.
@@ -267,6 +297,9 @@ public:
 
     /// Bind the global controls: power, brightness, relays, palette and the multicore split.
     void defineControls() override {
+        resolveSourceLayer();
+        // Resolve each child's default fixture before fixtureChannels() rebuilds its correction.
+        MoonModule::defineControls();
         controls_.addControl("on", on);   // master power: first so it renders at the top of the card
         // A deviceModel fills this in, the same way it fills in the LED pins.
         controls_.addText("relayPins", relayPins, sizeof(relayPins));
@@ -296,7 +329,6 @@ public:
         controls_.addReadOnly("renderWait", renderWaitStr_, sizeof(renderWaitStr_));
         controls_.setHidden(controls_.count() - 1, !multicore);
         controls_.setAdvanced(controls_.count() - 1);
-        MoonModule::defineControls();  // cascade to driver children (each owns its fixture/whiteMode)
     }
 
     /// React to a control change: re-bake the LUTs (no pipeline realloc, so the slider stays fluent), resolve a palette, drive the relay.
@@ -342,6 +374,14 @@ public:
     }
 
     /// Drive the power relay: closed while `on` and brightness is above zero, open otherwise, so a WLED-style slider at 0 reads as off.
+    bool powerPinReserved(uint8_t pin) const {
+        for (uint8_t i = 0; i < childCount(); ++i) {
+            const auto* childDriver = child(i);
+            if (childDriver && childDriver->role() == ModuleRole::Driver &&
+                static_cast<const DriverBase*>(childDriver)->reservesPowerPin(pin)) return true;
+        }
+        return false;
+    }
     void applyRelay() {
         const bool closed = on && brightness > 0;
         // Each call judges the list afresh, so a warning a mid-edit list left goes once the list is fixed or cleared.
@@ -349,7 +389,7 @@ public:
         // Release a pin the user cleared, or it stays asserted on a GPIO nothing owns.
         if (!relayPins[0]) {
             for (uint8_t i = 0; i < lastRelayCount_; i++)
-                platform::gpioWrite(static_cast<uint8_t>(lastRelayPins_[i]), false);
+                if (!powerPinReserved(lastRelayPins_[i])) platform::gpioWrite(lastRelayPins_[i], false);
             lastRelayCount_ = 0;
             return;
         }
@@ -361,7 +401,7 @@ public:
             showingRelayProblem_ = true;
             // Release what the OLD list held, or a typo mid-edit leaves the relays asserted.
             for (uint8_t i = 0; i < lastRelayCount_; i++)
-                platform::gpioWrite(lastRelayPins_[i], false);
+                if (!powerPinReserved(lastRelayPins_[i])) platform::gpioWrite(lastRelayPins_[i], false);
             lastRelayCount_ = 0;
             return;
         }
@@ -370,17 +410,23 @@ public:
             bool stillListed = false;
             for (uint8_t j = 0; j < n; j++)
                 if (lastRelayPins_[i] == static_cast<uint8_t>(pins[j])) { stillListed = true; break; }
-            if (!stillListed) platform::gpioWrite(lastRelayPins_[i], false);
+            if (!stillListed && !powerPinReserved(lastRelayPins_[i])) platform::gpioWrite(lastRelayPins_[i], false);
         }
+        uint8_t claimed = 0;
         for (uint8_t i = 0; i < n; i++) {
+            if (powerPinReserved(static_cast<uint8_t>(pins[i]))) {
+                setStatus("relay pin is owned by a driver", Severity::Warning);
+                showingRelayProblem_ = true;
+                continue;
+            }
             // An input-only pin refuses the write, and the seam says so rather than going quiet.
             if (!platform::gpioWrite(static_cast<uint8_t>(pins[i]), closed)) {
                 setStatus("relay pin cannot drive an output", Severity::Warning);
                 showingRelayProblem_ = true;
             }
-            lastRelayPins_[i] = static_cast<uint8_t>(pins[i]);
+            lastRelayPins_[claimed++] = static_cast<uint8_t>(pins[i]);
         }
-        lastRelayCount_ = n;
+        lastRelayCount_ = claimed;
     }
 
     /// Relays one device can carry; four is the most any board in the catalog wires.
@@ -474,6 +520,7 @@ public:
 
     /// Start the saved palette, publish the fixture layout, and close the relay for `on`; the scripted palettes were listed when the controls were bound.
     void setup() override {
+        resolveSourceLayer();
         // The saved choice starts as picking it does, a script palette compiled, since at boot nothing reacts to the value.
         onControlChanged("palette");
         dark_ = MoonModule::safeMode();
@@ -481,11 +528,17 @@ public:
         softStarting_ = platform::bootRecord().booted && !dark_;
         softStartBegun_ = false;
         MoonModule::setup();
+        Bh1750Service::setTargetChangedHook(&Drivers::refreshAmbientBrightness);
         passBufferToDrivers();           // seeds each driver's correction via rebuildCorrection()
         // HERE rather than in prepare: every setup runs first, and a Layer sizes its buffer there.
         publishFixtureChannels();
         // Without this a relay board comes up dark until something toggles the control.
         applyRelay();
+    }
+
+    /// Rebuild output corrections when the ambient service changes its target.
+    static void refreshAmbientBrightness() {
+        if (auto* drivers = active()) drivers->rebuildAllCorrections();
     }
 
     /// Size the composition buffer, engage or drop the core-1 split, publish the summary.
@@ -496,9 +549,9 @@ public:
         LivePalettes::set(live_.ptrs, live_.tags, live_.count, live_.present);
         // A CHANGED count needs the control rebuilt: `palette`'s maximum is baked at define time.
         if (live_.count != hadLive) rebuildControls();
-        // The top-level Effects, found by type when nothing injected a source, so a tree built from a document needs no wiring.
-        if (!effects_ && !layer_)
-            if (Scheduler* s = Scheduler::instance()) effects_ = static_cast<Effects*>(s->topOfType("Effects"));
+        // A wedged worker may still be reading a layer that its new fixture requirements must widen.
+        if (!quiesceEncode()) stopEncodeTask();
+        publishFixtureChannels(true);
         // Re-resolved from the bound container, so an API-rebuilt Layer is picked up here.
         if (effects_) layer_ = effects_->activeLayer();
         // A failed allocation leaves data_ null, which tick() checks before blending.
@@ -507,14 +560,10 @@ public:
         const bool needOutput = out && (enabled > 1 || out->lut().hasLUT());
 
         // The split wants a buffer even in the identity case: core 1 reads it while core 0 renders.
-        publishFixtureChannels();
-
         const bool haveLights = out && out->physicalLightCount() > 0;
         const bool splitWanted = multicore && anyDriver() && haveLights;
         const bool wantOutput = (needOutput && haveLights) || splitWanted;
 
-        // A wedged worker may still be READING the buffer, so tear the task down before freeing.
-        if (!quiesceEncode()) stopEncodeTask();
         if (wantOutput) {
             if (!outputBuffer_.allocate(out->physicalLightCount(), out->channelsPerLight())) {
                 std::printf("  DEGRADE  Drivers::outputBuffer_ allocate failed for %u lights\n",
@@ -606,8 +655,8 @@ public:
             wired->copyWiringFrame(outputBuffer_.data(), outputBuffer_.bytes(), !wiredLast_);
             return;
         }
-        // A mapped layer goes through its LUT; an identity one is copied only for the split, as core 1 must not read a buffer core 0 is mutating.
-        if (srcLayer && (srcLayer->lut().hasLUT() || renderSplitActive_))
+        // Refresh allocated identity output after structural quiescence or worker fallback.
+        if (srcLayer)
             blendMap(srcLayer->buffer(), outputBuffer_, srcLayer->lut(), srcLayer->channelsPerLight());
     }
 
@@ -618,6 +667,13 @@ public:
     void quiesce() override { if (!quiesceEncode()) stopEncodeTask(); }
 
 private:
+    /// Refresh the borrowed layer from its fixed top-level container before a bind or correction callback.
+    void resolveSourceLayer() {
+        if (!effects_ && !layer_)
+            if (Scheduler* scheduler = Scheduler::instance()) effects_ = static_cast<Effects*>(scheduler->topOfType("Effects"));
+        if (effects_) layer_ = effects_->activeLayer();
+    }
+
     Effects* effects_ = nullptr;  // bound container; layer_ re-resolved from it at prepareTree
     Layer* layer_ = nullptr;
     Buffer outputBuffer_;
@@ -739,6 +795,7 @@ private:
     }
 
     void passBufferToDrivers() {
+        resolveSourceLayer();
         // Keyed off the buffer prepare() allocated, so ONE decision rather than two that disagree.
         Layer* const out = effects_ ? effects_->firstEnabledLayer() : layer_;
         Buffer* buf = out ? (outputBuffer_.data() ? &outputBuffer_ : &out->buffer())

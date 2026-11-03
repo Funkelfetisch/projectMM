@@ -49,6 +49,7 @@ public:
     /// Re-snapshot the tasks once a second, the module costs being read live on each serialize.
     void tick1s() MM_NONBLOCKING override {
         MoonModule::tick1s();
+        MoonModule::beforeTaskSnapshot();
         tasks_.refresh();
         platform::currentTaskOnCore(0, core0_, sizeof(core0_));
         platform::currentTaskOnCore(1, core1_, sizeof(core1_));

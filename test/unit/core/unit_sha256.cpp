@@ -4,6 +4,7 @@
 #include "core/util/sha256.h"
 
 #include <string>
+#include <array>
 
 namespace {
 std::string hex(const std::string& in) {
@@ -39,6 +40,35 @@ TEST_CASE("messages around the block boundary hash correctly") {
 TEST_CASE("a multi-block message hashes correctly") {
     CHECK(hex(std::string(1000, 'a'))
           == "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
+}
+
+TEST_CASE("incremental SHA-256 matches published vectors across chunk and padding boundaries") {
+    const std::string input(1000000, 'a');
+    std::array<uint8_t, mm::kSha256DigestSize> expected{};
+    mm::sha256(input.data(), input.size(), expected.data());
+    CHECK(hex(input) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    for (size_t chunk : {size_t(1), size_t(55), size_t(56), size_t(64), size_t(65), size_t(511)}) {
+        mm::Sha256 state;
+        bool accepted = true;
+        for (size_t offset = 0; offset < input.size();) {
+            const size_t left = input.size() - offset;
+            const size_t n = left < chunk ? left : chunk;
+            accepted = state.update(input.data() + offset, n) && accepted; offset += n;
+        }
+        REQUIRE(accepted);
+        std::array<uint8_t, mm::kSha256DigestSize> actual{};
+        state.digest(actual.data()); CHECK(actual == expected);
+        state.digest(actual.data()); CHECK(actual == expected);
+    }
+}
+
+TEST_CASE("incremental SHA-256 rejects invalid chunks without mutating the running digest") {
+    mm::Sha256 state; REQUIRE(state.update("a", 1)); CHECK(state.update(nullptr, 0));
+    CHECK_FALSE(state.update(nullptr, 1));
+    std::array<uint8_t, mm::kSha256DigestSize> snapshot{}, expected{};
+    state.digest(snapshot.data()); mm::sha256("a", 1, expected.data()); CHECK(snapshot == expected);
+    REQUIRE(state.update("bc", 2)); state.digest(snapshot.data());
+    mm::sha256("abc", 3, expected.data()); CHECK(snapshot == expected);
 }
 
 /// The hex helper truncates to the requested length and always terminates, which is what the installation id relies on for its 32 characters.

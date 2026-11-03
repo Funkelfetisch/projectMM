@@ -39,7 +39,7 @@ namespace mm {
 
 class JsonSink {
 public:
-    /// Socket mode: a staging buffer flushes to the connection as it fills.
+    /// Socket mode: a staging buffer flushes to the connection as it fills; a failed write stops the sink.
     explicit JsonSink(platform::TcpConnection& conn)
         : conn_(&conn), stage_(static_cast<char*>(platform::alloc(STAGE_SIZE))) {}
 
@@ -69,12 +69,16 @@ public:
     }
     /// Append `len` bytes, a slice of a larger document that carries no terminator of its own.
     void append(const char* s, size_t len) {
-        if (!s) return;
+        if (!s || overflowed_) return;
         written_ += len;
-        if (conn_ && !stage_) { conn_->write(reinterpret_cast<const uint8_t*>(s), len); return; }
+        if (conn_ && !stage_) {
+            if (!conn_->write(reinterpret_cast<const uint8_t*>(s), len)) overflowed_ = true;
+            return;
+        }
         for (const char* end = s + len; s < end; ) {
             if (conn_) {
                 if (pos_ == STAGE_SIZE) flushStage();
+                if (overflowed_) return;
                 stage_[pos_++] = *s++;
             } else if (fixed_) {
                 // One byte reserved for the terminator; once overflow trips, later appends do nothing.
@@ -93,6 +97,7 @@ public:
 
     /// Append a formatted fragment; the common case fits a stack buffer and a longer one is re-formatted so nothing is silently truncated.
     void appendf(const char* fmt, ...) MM_PRINTF_FORMAT(2, 3) {
+        if (overflowed_) return;
         char frag[FRAG_MAX];
         va_list ap;
         va_start(ap, fmt);
@@ -196,7 +201,7 @@ public:
     /// Bytes appended so far in any mode, a socket's included, which `size()` cannot tell: whether a writer wrote anything.
     size_t written() const { return written_; }
 
-    /// Whether a write was refused for want of capacity, which makes the document incomplete.
+    /// Whether capacity or a socket write failed, which makes the document incomplete and stops later writes.
     bool overflowed() const { return overflowed_; }
 
     /// Which single option a palette call wants, the default meaning the whole set: it rides here because the callback takes only a sink, the one channel into the light domain.
@@ -213,8 +218,8 @@ private:
     static constexpr size_t FRAG_MAX = 256;
 
     void flushStage() {
-        if (conn_ && pos_ > 0) {
-            conn_->write(reinterpret_cast<const uint8_t*>(stage_), pos_);
+        if (conn_ && pos_ > 0 && !overflowed_) {
+            if (!conn_->write(reinterpret_cast<const uint8_t*>(stage_), pos_)) overflowed_ = true;
             pos_ = 0;
         }
     }
@@ -222,7 +227,8 @@ private:
     /// Grow to hold at least what is needed plus a terminator: @xref{growth-steps-down-when-doubling-is-refused|what a refused doubling does}.
     bool ensureHeap(size_t need) {
         if (need + 1 <= heapCap_) return true;
-        size_t want = heapCap_ == 0 ? 2048 : heapCap_ * 2;
+        // Short replies and transport fragments keep a small block; larger documents grow geometrically.
+        size_t want = heapCap_ == 0 ? 256 : heapCap_ * 2;
         while (want < need + 1) want *= 2;
         // In quarters rather than to the bare minimum: @xref{growth-steps-down-when-doubling-is-refused|why a minimal step thrashes}.
         const size_t step = heapCap_ / 4 > 4096 ? heapCap_ / 4 : 4096;

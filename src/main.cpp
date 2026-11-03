@@ -22,7 +22,7 @@
 ///
 /// Auto-wiring once forced an I2S init on boards with no microphone, which hung setup and boot-looped a classic ESP32.
 /// Its pins now default to empty so it idles until real ones are entered, and the effects read a silent frame when no microphone exists.
-/// `mode` is synthesized by default, so a board with a microphone names it in its catalog entry the way it already names its pins.
+/// Generic firmware synthesizes by default; a fixed product build seeds its local input and pins before persistence loads.
 ///
 /// ## Why the device-wide tools are boot-wired
 ///
@@ -57,12 +57,13 @@
 /// A device-model catalog entry can REPLACE it through `"$patch":"replace"` on the Layer, with its own effects and modifiers, the way the testbench swaps in AudioSpectrum plus RandomMap.
 /// Pulse is the one because a first boot has to answer three questions at once: the lights work, the device runs, and it hears the room.
 /// A sparse shell answers all three, where a dense field answers only the first since every light is already lit.
+/// HELIO starts with the same RingsEffect used by its native Ripple scene, on its physical ring layout.
 ///
 /// ## Why output drivers are not boot-wired
 ///
 /// Output drivers are added per board through the catalog, so a device carries only what its board has.
 /// The container wires any child generically, so one added at runtime is wired exactly like one added at boot and persists across a reboot.
-/// A bare flash therefore has no output until a board is selected, which is the deliberate model.
+/// A generic bare flash has no output until a board is selected. A fixed product build wires its strip directly.
 /// The preview is the one exception: it needs the broadcaster only this file holds, which the catalog cannot supply.
 /// PreviewDriver pushes the coordinate table plus per-frame RGB to the HTTP server's WS broadcaster, HttpServerModule being a BinaryBroadcaster.
 /// Light owns the preview wire format end to end; core writes the bytes.
@@ -118,18 +119,22 @@
 #include "core/module/Scheduler.h"
 #include "core/util/ModuleFactory.h"
 #include "light/layers/Effects.h"
+#include "light/effects/RingsEffect.h"
 #include "light/layers/Layer.h"
 #include "light/layouts/Layouts.h"
 #include "light/layouts/GridLayout.h"
+#include "light/layouts/RingLayout.h"
 #include "light/drivers/Drivers.h"
 #include "light/drivers/FixtureProfilesModule.h"
 #include "light/drivers/PreviewDriver.h"
+#include "light/drivers/RmtLedDriver.h"
 #include "core/system/HttpServerModule.h"
 #include "core/system/SystemModule.h"
 #include "core/system/ControlModule.h"
 #include "core/services/Services.h"
 #include "core/services/AudioService.h"
 #include "core/system/I2cBusModule.h"
+#include "core/services/Bh1750Service.h"
 #include "core/system/TasksModule.h"
 #include "core/system/PinsModule.h"
 #include "core/system/FileManagerModule.h"
@@ -146,6 +151,15 @@
 #include "core/system/AccessPointModule.h"
 #include "core/system/NetworkModule.h"
 #include "platform/platform.h"
+#include "core/util/build_info.h"
+#include "helio/HelioAudioMigration.h"
+#include "core/services/BleControlService.h"
+#include "helio/BleSceneCatalog.h"
+#include "helio/BlePixelMapPage.h"
+#include "helio/BleOutputPage.h"
+#include "helio/BlePreviewFramePage.h"
+#include "helio/ProductPresets.h"
+#include "core/util/PresetTemplates.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -178,9 +192,27 @@ static void printModuleMetrics(mm::MoonModule* mod, int depth) {
     }
 }
 
+static int savedHelioAudioMode() {
+    constexpr const char* path = "/.config/Services.json";
+    const long size = mm::platform::fsSize(path);
+    if (size <= 0) return -1;
+    auto* saved = static_cast<char*>(mm::platform::alloc(static_cast<size_t>(size) + 1));
+    if (!saved) return -1;
+    const int count = mm::platform::fsRead(path, saved, static_cast<size_t>(size) + 1);
+    int mode = -1;
+    if (count > 0) {
+        saved[count] = '\0';
+        mode = mm::helio::migratedAudioMode(saved);
+    }
+    mm::platform::free(saved);
+    return mode;
+}
+
 void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     mm::registerModuleTypes();
     mm::Scheduler scheduler;
+    const bool helioProduct = std::strcmp(mm::kFirmwareName, "helio1") == 0;
+    const bool productFirmware = mm::isProductFirmware(mm::kFirmwareName);
 
     // Every container is created as the device boots it, from the one table the scenario runner builds its trees from too: @xref{how-the-boot-tree-is-created}.
     // Each carries the apparatus wired into it, marked wired so a saved tree that predates a child keeps it: @xref{why-markwiredbycode-matters}.
@@ -209,9 +241,47 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // System (deviceName needed by other modules), with the device's inspection toolkit and its I2C bus wired in, which no container accepts as an editable child.
     auto* systemModule = static_cast<mm::SystemModule*>(top("SystemModule"));
     systemModule->setScheduler(&scheduler);
+    if (helioProduct) {
+        systemModule->setDefaultDeviceName("HELIO");
+        systemModule->setDefaultDeviceModel("HELIO 1");
+    }
 
     // Services, the core-domain twin of Effects/Drivers, with the AudioService wired in: @xref{why-the-audio-service-is-boot-wired}.
     auto* servicesModule = top("Services");
+    auto* audioService = static_cast<mm::AudioService*>(wired(servicesModule, "AudioService"));
+    if (helioProduct) {
+        audioService->mode = mm::AudioService::kLocalMode;
+        audioService->sckPin = 40;
+        audioService->wsPin = 38;
+        audioService->sdPin = 39;
+        audioService->mclkPin = -1;
+        audioService->sampleRateSel = 2;
+        audioService->floor = 75;
+        auto* ambient = createOrDie<mm::Bh1750Service>("Bh1750Service");
+        ambient->setName("Ambient Light");
+        ambient->markWiredByCode();
+        servicesModule->addChild(ambient);
+    }
+    if (productFirmware) {
+        auto* ble = createOrDie<mm::BleControlService>("BleControlService");
+        ble->setName("BLE");
+        ble->setScheduler(&scheduler);
+        ble->setIdentity(mm::kFirmwareName, mm::kBuildId, mm::kVersion, mm::kBuildDate);
+        static constexpr mm::BleSceneApi sceneApi{
+            &mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+            &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply,
+            &mm::BleSceneCatalog::writeState};
+        ble->setScenes(&sceneApi);
+        ble->setPixelMapReader(&mm::BlePixelMapPage::writeCurrent);
+        ble->setOutputReader(&mm::BleOutputPage::writeCurrent);
+        ble->setPreviewFrameReader(&mm::BlePreviewFramePage::writeCurrent);
+        ble->setAdvertisingScene(&mm::BleSceneCatalog::advertisement);
+        // The firmware target identifies HELIO 1; physical size comes only from explicit saved metadata.
+        if (helioProduct) ble->setAdvertisingProduct({1, 0});
+        else if (productFirmware) ble->setAdvertisingProductResolver(&mm::ble_advertisement::productCodeForModel);
+        ble->markWiredByCode();
+        servicesModule->addChild(ble);
+    }
 
     // ControlModule puts the device into a named state, top-level because a preset reaches ACROSS Layouts, Effects, Drivers and Services: @xref{why-the-device-wide-tools-are-boot-wired}.
     auto* controlModule = static_cast<mm::ControlModule*>(top("ControlModule"));
@@ -227,6 +297,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // Network, its interfaces first in the order the cascade tries them, then Improv (compile-time gated: @xref{why-improv-is-compile-time-gated}), MQTT (@xref{why-mqtt-is-built-on-every-networked-target}) and device discovery.
     auto* networkModule = static_cast<mm::NetworkModule*>(top("NetworkModule"));
     networkModule->setScheduler(&scheduler);
+    networkModule->allowWifiToggle(productFirmware);
     networkModule->setSystemModule(systemModule);
     networkModule->setEthernet(static_cast<mm::EthernetModule*>(wired(networkModule, "EthernetModule")));
     networkModule->setWiFi(static_cast<mm::WiFiModule*>(wired(networkModule, "WiFiModule")));
@@ -243,28 +314,67 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // Our own name, so the self row in the device list matches the device's identity elsewhere; deviceName has static lifetime as SystemModule's member.
     if (auto* devices = static_cast<mm::DevicesModule*>(wired(networkModule, "DevicesModule"))) devices->setSelfName(systemModule->deviceName());
 
-    // Layouts, the top-level container for one or more layouts, today one GridLayout that self-initializes to defaultGridSize with no boot-time dimensions threaded in.
+    // Layouts, the top-level container for one or more layouts; a fixed product seeds its physical shape.
     auto* layouts = static_cast<mm::Layouts*>(top("Layouts"));
-    auto* grid = createOrDie<mm::GridLayout>("GridLayout");
-    layouts->addChild(grid);
+    mm::GridLayout* grid = nullptr;
+    if (helioProduct) {
+        auto* ring = createOrDie<mm::RingLayout>("RingLayout");
+        ring->setName("HELIO Circle");
+        ring->nrOfLEDs = 222;
+        ring->radius = 24;
+        ring->markWiredByCode();
+        layouts->addChild(ring);
+    } else {
+        grid = createOrDie<mm::GridLayout>("GridLayout");
+        layouts->addChild(grid);
+    }
 
     // Effects: top-level container; one or more layers, each rendering into its own buffer. Effects finds the top-level Layouts itself when it prepares, and hands it to every child Layer.
     auto* effectsContainer = top("Effects");
     auto* layer = createOrDie<mm::Layer>("Layer");
+    layer->setChannelsPerLight(helioProduct ? 4 : 3);
+    // A cold web client needs room above the product sender's lower, bounded-write floor.
+    if (productFirmware) layer->setWorkingMemoryReserve(mm::HttpServerModule::kSendFloor);
     effectsContainer->addChild(layer);
 
     // One default effect so a bare device still shows lights out of the box, but NO default modifier: @xref{why-the-boot-layer-is-one-pulse-effect}.
-    auto* pulse = createOrDie<mm::MoonModule>("PulseEffect");
-    layer->addChild(pulse);
+    if (helioProduct) {
+        auto* ripple = createOrDie<mm::RingsEffect>("RingsEffect");
+        ripple->setName("Ripple");
+        ripple->count = 4;
+        ripple->speed = 42;
+        ripple->thickness = 5;
+        layer->addChild(ripple);
+    } else {
+        layer->addChild(createOrDie<mm::MoonModule>("PulseEffect"));
+    }
 
     // Drivers finds the top-level Effects itself when it prepares. Output drivers are added per board through the catalog, with the fixture-profile library and the preview wired in: @xref{why-output-drivers-are-not-boot-wired}.
     auto* drivers = static_cast<mm::Drivers*>(top("Drivers"));
+    if (helioProduct) {
+        auto* strip = createOrDie<mm::RmtLedDriver>("RmtLedDriver");
+        strip->setDefaultCorrection("RGBW", mm::WhiteMode::Accurate);
+        strip->setDefaultCurve(mm::Correction::Curve::Linear);
+        strip->setDefaultTiming(mm::RmtLedDriver::kTimingSk6812Rgbw);
+        std::snprintf(strip->pins, sizeof(strip->pins), "%s", "35");
+        std::snprintf(strip->ledsPerPin, sizeof(strip->ledsPerPin), "%s", "222");
+        strip->markWiredByCode();
+        drivers->addChild(strip);
+    }
 
     auto* httpServer = static_cast<mm::HttpServerModule*>(top("HttpServerModule"));
     httpServer->port = httpPort;
     httpServer->setScheduler(&scheduler);
+    if (productFirmware) {
+        static constexpr mm::PresetTemplates templates{&mm::ProductPresets::writeIndex, &mm::ProductPresets::writeDocument};
+        httpServer->setPresetTemplates(&templates);
+    }
+    if (productFirmware) httpServer->setSendBudget(mm::platform::HEAP_RESERVE, 1024);
     // PreviewDriver pushes the coordinate table and per-frame RGB to the HTTP server's WS broadcaster.
-    if (auto* preview = static_cast<mm::PreviewDriver*>(wired(drivers, "PreviewDriver"))) preview->setBroadcaster(httpServer);
+    if (auto* preview = static_cast<mm::PreviewDriver*>(wired(drivers, "PreviewDriver"))) {
+        preview->setBroadcaster(httpServer);
+        if (helioProduct) preview->setPreviewWhitePoint(255, 176, 110);
+    }
 
     // Registration order matters, and the scheduler walks the roots in it each tick: @xref{why-registration-order-matters}.
     scheduler.addModule(filesystemModule);
@@ -283,12 +393,32 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
 
     scheduler.setup();
 
+    if (productFirmware) {
+        if (const char* error = mm::ProductPresets::initialize(scheduler))
+            std::printf("Product preset initialization: %s\n", error);
+    }
+
+    if (helioProduct) {
+        const int migratedMode = savedHelioAudioMode();
+        if (migratedMode >= 0) {
+            audioService->mode = static_cast<uint8_t>(migratedMode);
+            audioService->rebuildControls();
+            audioService->applyState();
+            audioService->markDirty();
+            std::printf("HELIO audio selector migrated from saved configuration\n");
+        }
+    }
+
     uint32_t lights = layouts->totalLightCount();
-    uint32_t bufBytes = lights * 3;
-    std::printf("MoonLight running — grid %dx%d, %lu lights, buffer %lu bytes\n",
-                grid->width, grid->height,
-                static_cast<unsigned long>(lights),
-                static_cast<unsigned long>(bufBytes));
+    uint32_t bufBytes = lights * (helioProduct ? 4u : 3u);
+    if (helioProduct) {
+        std::printf("HELIO 1 running — %lu lights, buffer %lu bytes\n",
+                    static_cast<unsigned long>(lights), static_cast<unsigned long>(bufBytes));
+    } else {
+        std::printf("MoonLight running — grid %dx%d, %lu lights, buffer %lu bytes\n",
+                    grid->width, grid->height,
+                    static_cast<unsigned long>(lights), static_cast<unsigned long>(bufBytes));
+    }
     std::printf("sizeof: MoonModule=%zu Layer=%zu Drivers=%zu Grid=%zu HttpServer=%zu\n",
                 sizeof(mm::MoonModule), sizeof(mm::Layer), sizeof(mm::Drivers),
                 sizeof(mm::GridLayout), sizeof(mm::HttpServerModule));
@@ -374,5 +504,14 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     }
 
     std::printf("\nShutting down.\n");
-    scheduler.release();
+    if (!scheduler.release()) {
+        // Retain the owner and its buffers while its explicit shutdown hook
+        // advances; do not resume the ordinary render/control loop.
+        std::printf("Shutdown blocked: a hardware resource is still owned.\n");
+        std::fflush(stdout);
+        do {
+            scheduler.shutdownStep(mm::platform::millis());
+            mm::platform::yield(); mm::platform::delayMs(10);
+        } while (!scheduler.release());
+    }
 }

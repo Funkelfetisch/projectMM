@@ -51,7 +51,7 @@ bool flatToStateDocument(const char* text, MoonModule& top, JsonSink& out);
 /// Temporary with flatToStateDocument: whether `text` is a config file in the flat format, which records its module's `enabled` at the root.
 bool isFlatConfig(const char* text);
 
-/// Set the controls a document named before the script declaring them had compiled; the tree's prepare calls it.
-void applyDeferredControls(Scheduler& scheduler);
+/// Set controls held for script compilation and report all writes, with the first failure; shared across the rebuild's documents.
+StateDocumentResult applyDeferredControls(Scheduler& scheduler);
 
 }  // namespace mm

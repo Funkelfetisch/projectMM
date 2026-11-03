@@ -17,6 +17,9 @@
 #include "core/system/Sha1.h"
 #include "core/system/Base64.h"
 #include "core/system/FilesystemModule.h"
+#include "core/system/ControlModule.h"
+#include "core/util/PresetStore.h"
+#include "core/util/PresetTemplates.h"
 #include "core/system/FirmwareUpdateModule.h"
 #include "core/system/SystemModule.h"      // deviceName() for the WLED /json/info shim
 #include "core/moonlive/MoonLiveScriptFile.h"   // kFactoryScriptDir: where a download lands
@@ -37,6 +40,37 @@
 #include <new>       // placement new: a send's source built in its heap block
 
 namespace mm {
+
+struct HttpServerModule::PresetIndexSource {
+    PresetStore::IndexSnapshot snapshot;
+    char active[PresetStore::kMaxNameLen] = {};
+    uint8_t next = 0;
+    bool last = false;
+
+    PresetStore::Result writeFragment(JsonSink& sink) {
+        if (next == 0) sink.append("{\"items\":[");
+        if (next < snapshot.count) {
+            if (next) sink.append(",");
+            const auto item = PresetStore::writeIndexItem(snapshot.names[next], sink);
+            if (!item) return item;
+            next++;
+        }
+        if (next == snapshot.count) {
+            sink.appendf("],\"limit\":%u,\"active\":{\"effects\":", static_cast<unsigned>(PresetStore::kMaxPresets));
+            if (active[0]) sink.writeJsonString(active);
+            else sink.append("null");
+            sink.append("}}");
+        }
+        if (sink.overflowed()) {
+            PresetStore::Result result;
+            result.status = 507;
+            result.error = "out of memory reading preset index";
+            return result;
+        }
+        last = next == snapshot.count;
+        return {};
+    }
+};
 
 
 // The UI file named `name`, from the table embed_ui.cmake generates, or null.
@@ -428,7 +462,8 @@ bool HttpServerModule::handleConnection(platform::TcpConnection& conn, int patie
             const size_t headerSize = static_cast<size_t>(headerEnd + 4 - req);
             const size_t whole = headerSize + static_cast<size_t>(parsed);
             // A state document holds an effects stack and outgrows the request buffer; every other body is read whole within it, so an oversized one is 413, never a truncated parse.
-            const bool state = isStatePath(req, "PATCH /api/state") || isStatePath(req, "POST /api/state");
+            const bool state = isStatePath(req, "PATCH /api/state") || isStatePath(req, "POST /api/state") ||
+                               std::strncmp(req, "PUT /api/presets/", 17) == 0;
             if (whole > (state ? headerSize + kStateDocumentMax : sizeof(buf) - 1)) {
                 sendResponse(conn, 413, "application/json", state ? "{\"error\":\"document too large\"}" : "{\"error\":\"request body too large\"}");
                 return true;
@@ -502,6 +537,19 @@ void HttpServerModule::routeRequest(platform::TcpConnection& conn, char* req, si
     // The body starts after the headers
     char* body = headerEnd ? const_cast<char*>(headerEnd) + 4 : nullptr;
 
+    if (std::strcmp(method, "OPTIONS") != 0 &&
+        (std::strcmp(path, "/api/presets") == 0 || std::strncmp(path, "/api/presets/", 13) == 0)) {
+        handlePresets(conn, method, path, req, queryStart ? queryStart + 1 : "", body, hasContentLen, contentLen);
+        conn.close();
+        return;
+    }
+    if (std::strcmp(method, "OPTIONS") != 0 &&
+        (std::strcmp(path, "/api/preset-templates") == 0 || std::strncmp(path, "/api/preset-templates/", 22) == 0)) {
+        handlePresetTemplates(conn, method, path);
+        conn.close();
+        return;
+    }
+
     // A phone on the access point asking for its own captive-check page gets the UI, which is what shows it the sign-in screen.
     if (std::strcmp(method, "GET") == 0) {
         const char* host = findHeaderCI(req, "Host:");
@@ -515,7 +563,7 @@ void HttpServerModule::routeRequest(platform::TcpConnection& conn, char* req, si
     // Route
     if (std::strcmp(method, "GET") == 0) {
         const char* ifNoneMatch = findHeaderCI(req, "If-None-Match:");
-        if (std::strcmp(path, "/") == 0) serveFile(conn, *embeddedFile("index.html"), ifNoneMatch);
+        if (std::strcmp(path, "/") == 0 || std::strcmp(path, "/modules") == 0) serveFile(conn, *embeddedFile("index.html"), ifNoneMatch);
         // Every UI file at `/<name>`, from the one list embed_ui.cmake generates.
         else if (const ui::EmbeddedFile* file = embeddedFile(path + 1)) serveFile(conn, *file, ifNoneMatch);
         else if (std::strcmp(path, "/api/state") == 0) serveState(conn);
@@ -654,8 +702,9 @@ void HttpServerModule::sendPreflightResponse(platform::TcpConnection& conn) {
     const char* response =
         "HTTP/1.1 204 No Content\r\n"
         "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\n"
-        "Access-Control-Allow-Headers: Content-Type\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, If-Match, If-None-Match, If-Output-Match\r\n"
+        "Access-Control-Expose-Headers: ETag\r\n"
         "Access-Control-Max-Age: 3600\r\n"
         "Connection: close\r\n"
         "\r\n";
@@ -665,8 +714,9 @@ void HttpServerModule::sendPreflightResponse(platform::TcpConnection& conn) {
 // The reason phrase for each status this server answers (RFC 9110 section 15); a code not listed reads "Error", which a client ignores.
 static const char* reasonPhrase(int status) {
     static constexpr struct { int code; const char* text; } kReasons[] = {
-        {200, "OK"}, {202, "Accepted"}, {400, "Bad Request"}, {403, "Forbidden"}, {404, "Not Found"},
-        {405, "Method Not Allowed"}, {409, "Conflict"}, {411, "Length Required"}, {413, "Content Too Large"},
+        {200, "OK"}, {201, "Created"}, {202, "Accepted"}, {400, "Bad Request"}, {403, "Forbidden"}, {404, "Not Found"},
+        {405, "Method Not Allowed"}, {409, "Conflict"}, {411, "Length Required"}, {412, "Precondition Failed"}, {413, "Content Too Large"},
+        {428, "Precondition Required"},
         {500, "Internal Server Error"}, {501, "Not Implemented"}, {503, "Service Unavailable"}, {507, "Insufficient Storage"},
     };
     for (const auto& r : kReasons) if (r.code == status) return r.text;
@@ -687,6 +737,286 @@ void HttpServerModule::sendResponse(platform::TcpConnection& conn, int status, c
         status, statusText, contentType, bodyLen);
     conn.write(reinterpret_cast<const uint8_t*>(header), headerLen);
     conn.write(reinterpret_cast<const uint8_t*>(body), bodyLen);
+}
+
+namespace {
+// A preset name occupies one URI segment; decode once and reject overflow, malformed escapes and NUL.
+bool presetSegment(const char* begin, size_t length, char (&name)[PresetStore::kMaxNameLen]) {
+    size_t written = 0;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char byte = static_cast<unsigned char>(begin[i]);
+        if (byte == '%') {
+            if (i + 2 >= length) return false;
+            const int high = hexDigit(begin[i + 1]), low = hexDigit(begin[i + 2]);
+            if (high < 0 || low < 0) return false;
+            byte = static_cast<unsigned char>((high << 4) | low); i += 2;
+        }
+        if (!byte || written + 1 >= sizeof(name)) return false;
+        name[written++] = static_cast<char>(byte);
+    }
+    name[written] = 0;
+    return PresetStore::validName(name);
+}
+
+int presetHeaderValue(const char* header, char (&value)[68]) {
+    if (!header) return 0;
+    const char* start = std::strchr(header, ':');
+    if (!start) return -1;
+    ++start;
+    while (*start == ' ' || *start == '\t') ++start;
+    const char* end = start;
+    while (*end && *end != '\r' && *end != '\n') ++end;
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t')) --end;
+    const size_t size = static_cast<size_t>(end - start);
+    if (!size || size >= sizeof(value)) return -1;
+    std::memcpy(value, start, size); value[size] = 0;
+    return 1;
+}
+
+bool presetTag(char (&value)[68]) {
+    if (std::strlen(value) != 66 || value[0] != '"' || value[65] != '"') return false;
+    for (size_t i = 1; i < 65; ++i)
+        if (!((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f'))) return false;
+    std::memmove(value, value + 1, 64); value[64] = 0;
+    return true;
+}
+
+bool presetQueryHas(const char* query, const char* name) {
+    const size_t length = std::strlen(name);
+    for (const char* p = query; p && *p;) {
+        const char* end = std::strchr(p, '&');
+        const size_t size = end ? static_cast<size_t>(end - p) : std::strlen(p);
+        if (size >= length && std::strncmp(p, name, length) == 0 && (size == length || p[length] == '=')) return true;
+        p = end ? end + 1 : nullptr;
+    }
+    return false;
+}
+
+void writePresetHeader(char* header, size_t capacity, int status, size_t size, const char* etag) {
+    char tag[80] = {};
+    if (etag && etag[0]) std::snprintf(tag, sizeof(tag), "ETag: \"%s\"\r\n", etag);
+    std::snprintf(header, capacity,
+        "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n"
+        "Cache-Control: no-cache\r\n%sAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: ETag\r\n"
+        "Connection: close\r\n\r\n", status, reasonPhrase(status), size, tag);
+}
+}  // namespace
+
+void HttpServerModule::answerPreset(platform::TcpConnection& conn, int status, JsonSink& sink, const char* etag) {
+    if (sink.overflowed()) { sendResponse(conn, 507, "application/json", "{\"error\":\"out of memory\"}"); return; }
+    const size_t size = sink.size();
+    answerPresetBlock(conn, status, sink.detach(), size, etag);
+}
+
+void HttpServerModule::answerPresetBlock(platform::TcpConnection& conn, int status, char* data, size_t size, const char* etag) {
+    char header[384];
+    writePresetHeader(header, sizeof(header), status, size, etag);
+    answerBlock(conn, header, data, size);
+}
+
+HttpServerModule::Send* HttpServerModule::reservePresetReply(platform::TcpConnection& conn) {
+    Send* slot = claimSend(conn);
+    if (!slot) return nullptr;
+    char* data = static_cast<char*>(platform::alloc(kPresetReplyBytes));
+    if (!data) { sendResponse(conn, 507, "application/json", "{\"error\":\"out of memory reserving preset reply\"}"); return nullptr; }
+    slot->owned = data;
+    slot->busy = true;
+    slot->lastActivityMs = platform::millis();
+    return slot;
+}
+
+void HttpServerModule::answerPresetReply(platform::TcpConnection& conn, Send& slot, int status, JsonSink& sink, const char* etag) {
+    if (sink.overflowed()) {
+        endSendSlot(slot);
+        sendResponse(conn, 500, "application/json", "{\"error\":\"preset reply exceeds its buffer\"}");
+        return;
+    }
+    char header[384];
+    writePresetHeader(header, sizeof(header), status, sink.size(), etag);
+    if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) {
+        endSendSlot(slot); conn.close(); return;
+    }
+    slot.body = reinterpret_cast<const uint8_t*>(slot.owned);
+    slot.bodyLeft = sink.size();
+    slot.conn = std::move(conn);
+}
+
+void HttpServerModule::servePresetIndex(platform::TcpConnection& conn) {
+    Send* slot = claimSend(conn);
+    if (!slot) return;
+    const auto refuse = [&](int status, const char* error) {
+        endSendSlot(*slot);
+        char data[kPresetReplyBytes];
+        JsonSink reply(data, sizeof(data));
+        reply.append("{\"error\":"); reply.writeJsonString(error); reply.append("}");
+        sendResponse(conn, status, "application/json", reply.data());
+    };
+    if (sendRoom() == 0) { refuse(503, "insufficient memory to send preset index"); return; }
+    auto* source = static_cast<PresetIndexSource*>(platform::alloc(sizeof(PresetIndexSource)));
+    if (!source) { refuse(507, "out of memory reading preset index"); return; }
+    new (source) PresetIndexSource;
+    slot->source = Send::Source::PresetIndex;
+    slot->block = source;
+    slot->busy = true;
+    slot->lastActivityMs = platform::millis();
+    const auto listed = PresetStore::snapshotIndex(source->snapshot);
+    if (!listed) { refuse(listed.status, listed.error); return; }
+    const auto* control = scheduler_ == Scheduler::instance() ? ControlModule::active() : nullptr;
+    if (control) mm::formatTo(source->active, sizeof(source->active), "%s", control->currentLook());
+    PresetStore::Result first;
+    {
+        JsonSink fragment;
+        first = source->writeFragment(fragment);
+        if (first) {
+            slot->bodyLeft = fragment.size();
+            slot->owned = fragment.detach();
+            slot->body = reinterpret_cast<const uint8_t*>(slot->owned);
+        }
+    }
+    if (!first) { refuse(first.status, first.error); return; }
+    if (sendRoom() == 0) { refuse(503, "insufficient memory to send preset index"); return; }
+    const char* header =
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-cache\r\n"
+        "Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: ETag\r\nConnection: close\r\n\r\n";
+    if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) { endSendSlot(*slot); return; }
+    slot->conn = std::move(conn);
+}
+
+void HttpServerModule::handlePresets(platform::TcpConnection& conn, const char* method, const char* path,
+                                    const char* request, const char* query, const char* body, bool hasLength, size_t length) {
+    auto refuse = [&](int status, const char* error) {
+        char data[kPresetReplyBytes]; JsonSink reply(data, sizeof(data));
+        reply.append("{\"error\":"); reply.writeJsonString(error); reply.append("}");
+        sendResponse(conn, status, "application/json", reply.data());
+    };
+    if (std::strcmp(path, "/api/presets") == 0) {
+        if (std::strcmp(method, "GET")) { refuse(405, "preset index is read only"); return; }
+        servePresetIndex(conn); return;
+    }
+    const char* segment = path + 13;
+    const char* slash = std::strchr(segment, '/');
+    const bool apply = slash && std::strcmp(slash, "/apply") == 0;
+    char name[PresetStore::kMaxNameLen];
+    if ((slash && !apply) || !presetSegment(segment, slash ? static_cast<size_t>(slash - segment) : std::strlen(segment), name)) {
+        refuse(400, "invalid preset name"); return;
+    }
+    if (!apply && std::strcmp(method, "GET") == 0) {
+        PresetStore::File file;
+        const auto loaded = PresetStore::read(name, file);
+        if (!loaded) { refuse(loaded.status, loaded.error); return; }
+        char* document = file.text;
+        file.text = nullptr;   // the send slot takes ownership, including every refusal path
+        answerPresetBlock(conn, 200, document, file.size, file.etag); return;
+    }
+    if ((apply && std::strcmp(method, "POST")) || (!apply && std::strcmp(method, "PUT") && std::strcmp(method, "DELETE"))) {
+        refuse(405, "unsupported preset operation"); return;
+    }
+    char match[68] = {}, absent[68] = {};
+    const int matchHeader = presetHeaderValue(findHeaderCI(request, "If-Match:"), match);
+    const int absentHeader = presetHeaderValue(findHeaderCI(request, "If-None-Match:"), absent);
+    if (matchHeader < 0 || absentHeader < 0 || (matchHeader && !presetTag(match)) ||
+        (absentHeader && std::strcmp(absent, "*")) || (matchHeader && absentHeader)) {
+        refuse(400, "use one strong If-Match tag or If-None-Match: *"); return;
+    }
+    if (std::strcmp(method, "PUT") == 0) {
+        if (!hasLength) { refuse(411, "Content-Length is required"); return; }
+        if (!body || std::strlen(body) != length) { refuse(400, "invalid preset body"); return; }
+        if (presetQueryHas(query, "apply")) { refuse(400, "PUT stores only; apply the preset explicitly"); return; }
+        if (presetQueryHas(query, "scope") &&
+            ((!queryHas(query, "scope", "look") && !queryHas(query, "scope", "all")) ||
+             (queryHas(query, "scope", "look") && queryHas(query, "scope", "all")))) {
+            refuse(400, "invalid preset scope"); return;
+        }
+        if (!matchHeader && !absentHeader) { refuse(428, "If-Match is required"); return; }
+        Send* slot = reservePresetReply(conn);
+        if (!slot) return;
+        JsonSink reply(slot->owned, kPresetReplyBytes);
+        const auto stored = PresetStore::put(name, body, absentHeader ? PresetStore::Mode::Create : PresetStore::Mode::Match,
+                                             matchHeader ? match : nullptr, !queryHas(query, "scope", "all"));
+        if (!stored) {
+            reply.append("{\"error\":"); reply.writeJsonString(stored.error); reply.append("}");
+            answerPresetReply(conn, *slot, stored.status, reply); return;
+        }
+        if (scheduler_) PresetStore::notifyChanged(*scheduler_, name);
+        reply.append("{\"stored\":true,\"applied\":false,\"name\":"); reply.writeJsonString(name);
+        reply.append(",\"etag\":"); reply.writeJsonString(stored.etag);
+        reply.append(stored.created ? ",\"created\":true}" : ",\"created\":false}");
+        answerPresetReply(conn, *slot, stored.status, reply, stored.etag); return;
+    }
+    if (!matchHeader) { refuse(428, "If-Match is required"); return; }
+    if (!apply) {
+        Send* slot = reservePresetReply(conn);
+        if (!slot) return;
+        JsonSink reply(slot->owned, kPresetReplyBytes);
+        const auto removed = PresetStore::erase(name, match);
+        if (!removed) {
+            reply.append("{\"error\":"); reply.writeJsonString(removed.error); reply.append("}");
+            answerPresetReply(conn, *slot, removed.status, reply); return;
+        }
+        if (scheduler_) PresetStore::notifyChanged(*scheduler_, name);
+        reply.append("{\"deleted\":true,\"name\":"); reply.writeJsonString(name); reply.append("}");
+        answerPresetReply(conn, *slot, 200, reply); return;
+    }
+    bool lookOnly = true;
+    if (body && body[0]) {
+        if (!hasLength || std::strlen(body) != length) { refuse(400, "invalid apply body"); return; }
+        json::JsonDoc doc;
+        if (!json::parse(body, doc) || !doc.rootNode() || doc.rootNode()->type != json::JsonType::Object) {
+            refuse(400, "invalid apply document"); return;
+        }
+        const auto* scope = json::member(doc, doc.rootNode(), "scope");
+        unsigned fields = 0;
+        for (const auto* field = doc.node(doc.rootNode()->firstChild); field; field = doc.node(field->next)) {
+            if (std::strcmp(field->key, "scope") || ++fields > 1) { refuse(400, "apply accepts one scope field"); return; }
+        }
+        if (scope && (scope->type != json::JsonType::String || (std::strcmp(scope->str, "look") && std::strcmp(scope->str, "all")))) {
+            refuse(400, "invalid preset scope"); return;
+        }
+        lookOnly = !scope || std::strcmp(scope->str, "all") != 0;
+    }
+    if (!scheduler_) { refuse(503, "device is not ready"); return; }
+    char outputMatch[68] = {};
+    const int outputHeader = presetHeaderValue(findHeaderCI(request, "If-Output-Match:"), outputMatch);
+    if (outputHeader < 0 || (outputHeader && !presetTag(outputMatch))) { refuse(400, "use a strong If-Output-Match tag"); return; }
+    Send* slot = reservePresetReply(conn);
+    if (!slot) return;
+    JsonSink reply(slot->owned, kPresetReplyBytes);
+    auto* control = scheduler_ == Scheduler::instance() ? ControlModule::active() : nullptr;
+    const auto applied = control ? control->applyStoredPreset(name, match, lookOnly, true, outputHeader ? outputMatch : nullptr)
+                                 : PresetStore::apply(*scheduler_, name, match, lookOnly, true, outputHeader ? outputMatch : nullptr);
+    if (!applied) {
+        reply.append("{\"error\":"); reply.writeJsonString(applied.error);
+        reply.append(",\"at\":"); reply.writeJsonString(applied.state.where);
+        reply.appendf(",\"changes\":%u}", static_cast<unsigned>(applied.state.changes));
+        answerPresetReply(conn, *slot, applied.status, reply); return;
+    }
+    reply.append("{\"applied\":"); reply.append(applied.applied ? "true" : "false");
+    reply.append(",\"name\":"); reply.writeJsonString(name);
+    reply.append(",\"etag\":"); reply.writeJsonString(applied.etag);
+    reply.append(",\"outputEtag\":");
+    if (applied.outputEtag[0]) reply.writeJsonString(applied.outputEtag);
+    else reply.append("null,\"warning\":\"output guard unavailable\"");
+    reply.appendf(",\"changes\":%u}", static_cast<unsigned>(applied.state.changes));
+    answerPresetReply(conn, *slot, 200, reply, applied.etag);
+}
+
+void HttpServerModule::handlePresetTemplates(platform::TcpConnection& conn, const char* method, const char* path) {
+    if (std::strcmp(method, "GET")) { sendResponse(conn, 405, "application/json", "{\"error\":\"templates are read only\"}"); return; }
+    if (!presetTemplates_) { sendResponse(conn, 404, "application/json", "{\"error\":\"no preset templates\"}"); return; }
+    JsonSink document;
+    if (std::strcmp(path, "/api/preset-templates") == 0) {
+        if (!presetTemplates_->writeIndex) { sendResponse(conn, 404, "application/json", "{\"error\":\"no preset templates\"}"); return; }
+        presetTemplates_->writeIndex(document);
+    } else {
+        char id[PresetStore::kMaxNameLen];
+        if (!presetSegment(path + 22, std::strlen(path + 22), id)) { sendResponse(conn, 400, "application/json", "{\"error\":\"invalid template id\"}"); return; }
+        if (!scheduler_ || !presetTemplates_->writeDocument) { sendResponse(conn, 503, "application/json", "{\"error\":\"templates are not ready\"}"); return; }
+        if (const char* error = presetTemplates_->writeDocument(document, *scheduler_, id)) {
+            JsonSink reply; reply.append("{\"error\":"); reply.writeJsonString(error); reply.append("}");
+            answerPreset(conn, 404, reply); return;
+        }
+    }
+    answerPreset(conn, 200, document);
 }
 
 // The /api/file endpoints: a file body is not a control value; parseFilePath vets the `path=<rel>` query (rejects "..", roots at the mount), the one traversal guard every filesystem entry shares.
@@ -842,6 +1172,13 @@ void HttpServerModule::streamFsFile(platform::TcpConnection& conn, const char* p
     if (!platform::fsReadStreamOpen(f->stream, path)) {
         platform::free(f);
         sendResponse(conn, 500, "application/json", "{\"error\":\"read failed\"}");
+        return;
+    }
+    // The stream buffer also consumes internal RAM; refuse before 200 when a nonempty body cannot start.
+    if (size > 0 && sendRoom() == 0) {
+        platform::fsReadStreamClose(f->stream);
+        platform::free(f);
+        sendResponse(conn, 503, "application/json", "{\"error\":\"insufficient memory to send file\"}");
         return;
     }
     if (!conn.write(reinterpret_cast<const uint8_t*>(header), static_cast<size_t>(hn))) {
@@ -1108,6 +1445,7 @@ static const char* uiContentType(const char* name) {
     if (std::strcmp(ext, ".css") == 0) return "text/css";
     if (std::strcmp(ext, ".js") == 0) return "application/javascript";
     if (std::strcmp(ext, ".png") == 0) return "image/png";
+    if (std::strcmp(ext, ".webp") == 0) return "image/webp";
     return "application/octet-stream";
 }
 
@@ -1130,7 +1468,13 @@ bool HttpServerModule::serveUiFromDisk(platform::TcpConnection& conn, const char
 
 void HttpServerModule::answerBlock(platform::TcpConnection& conn, const char* header, char* data, size_t len) {
     Send* slot = claimSend(conn);
-    if (!slot || !conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) {
+    if (!slot) { platform::free(data); return; }
+    if (len > 0 && sendRoom() == 0) {
+        platform::free(data);
+        sendResponse(conn, 503, "application/json", "{\"error\":\"insufficient memory to send answer\"}");
+        return;
+    }
+    if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) {
         platform::free(data);
         return;
     }
@@ -1301,7 +1645,10 @@ void HttpServerModule::serveSystem(platform::TcpConnection& conn) {
         }
     }
 
-    sink.append("]}");
+    sink.append("],\"ui\":");
+    const bool product = isProductFirmware(kFirmwareName);
+    sink.writeJsonString(product ? ui::kProductRuntimeVersion : "");
+    sink.append("}");
     sink.flush();
 }
 
@@ -1530,17 +1877,32 @@ void HttpServerModule::serveModule(platform::TcpConnection& conn, const char* na
         "Connection: close\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "\r\n";
+    if (!document) {
+        Send* slot = claimSend(conn);
+        if (!slot) return;
+        if (!startTree(*slot, nullptr, false, SecretsHidden::active(), 0)) {
+            sendResponse(conn, 507, "application/json", "{\"error\":\"out of memory\"}");
+            return;
+        }
+        auto* tree = static_cast<TreeSource*>(slot->block);
+        tree->cursor.single = mod;
+        std::snprintf(tree->singleName, sizeof(tree->singleName), "%s", decoded);
+        if (!primeHttpTree(*slot, conn)) return;
+        if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) {
+            endSendSlot(*slot);
+            return;
+        }
+        slot->conn = std::move(conn);
+        return;
+    }
+
     conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header));
 
-    // The SAME writer /api/state uses, so the two can never disagree about a module's shape; a document comes from the writer a preset save uses.
+    // A document comes from the writer a preset save uses; metadata uses the bounded state sender above.
     JsonSink sink(conn);
-    if (document) {
-        sink.append("{");
-        writeStateMember(sink, *mod);
-        sink.append("}");
-    } else {
-        writeModuleJson(sink, mod);
-    }
+    sink.append("{");
+    writeStateMember(sink, *mod);
+    sink.append("}");
     sink.flush();
 }
 
@@ -2245,6 +2607,26 @@ bool HttpServerModule::startTree(Send& s, const Subscription* sub, bool ws, bool
     return true;
 }
 
+bool HttpServerModule::primeHttpTree(Send& s, platform::TcpConnection& conn) {
+    const Refill result = sendRoom() == 0 ? Refill::Pressure : refill(s);
+    if (result == Refill::More) return true;
+    endSendSlot(s);
+    if (result == Refill::Pressure)
+        sendResponse(conn, 503, "application/json", "{\"error\":\"insufficient memory to send state\"}");
+    else sendResponse(conn, 507, "application/json", "{\"error\":\"out of memory\"}");
+    return false;
+}
+
+void HttpServerModule::requestFullResync() {
+    fullResyncPending_ = true;
+    // A single-module response owns no module: a schema mutation ends it before a name can identify a replacement.
+    for (auto& s : sends_) {
+        if (!s.busy || s.source != Send::Source::Tree || !static_cast<TreeSource*>(s.block)->singleName[0]) continue;
+        endSendSlot(s);
+        s.conn.close();
+    }
+}
+
 void HttpServerModule::queueFrame(int client, uint8_t opcode, const char* payload, size_t len) {
     Send& s = controlSends_[client];
     auto& ws = wsClients_[client];
@@ -2316,21 +2698,41 @@ HttpServerModule::Refill HttpServerModule::refill(Send& s) {
     if (s.source == Send::Source::Types) {
         auto* t = static_cast<TypesSource*>(s.block);
         if (t->last) return Refill::End;
+        TypesSource candidate = *t;
         JsonSink sink;
-        if (t->next == 0) sink.append("{\"types\":[");
+        if (candidate.next == 0) sink.append("{\"types\":[");
         // One type a refill: building it to read its defaults is the costly part.
         const uint8_t count = ModuleFactory::typeCount();
-        while (t->next < count && !ModuleFactory::typeName(t->next)) t->next++;
-        if (t->next < count) {
-            writeTypeJson(sink, t->next, !t->wrote);
-            t->wrote = true;
-            t->next++;
+        while (candidate.next < count && !ModuleFactory::typeName(candidate.next)) candidate.next++;
+        if (candidate.next < count) {
+            writeTypeJson(sink, candidate.next, !candidate.wrote);
+            candidate.wrote = true;
+            candidate.next++;
         }
-        if (t->next >= count) {
+        if (candidate.next >= count) {
             sink.append("]}");
-            t->last = true;
+            candidate.last = true;
         }
         if (sink.overflowed()) return Refill::Failed;
+        if (sendRoom() == 0) return Refill::Pressure;
+        *t = candidate;
+        s.bodyLeft = sink.size();
+        s.owned = sink.detach();
+        s.body = reinterpret_cast<const uint8_t*>(s.owned);
+        return Refill::More;
+    }
+    if (s.source == Send::Source::PresetIndex) {
+        auto* index = static_cast<PresetIndexSource*>(s.block);
+        if (index->last) return Refill::End;
+        const uint8_t next = index->next;
+        const bool last = index->last;
+        JsonSink sink;
+        if (!index->writeFragment(sink)) return Refill::Failed;
+        if (sendRoom() == 0) {
+            index->next = next;
+            index->last = last;
+            return Refill::Pressure;
+        }
         s.bodyLeft = sink.size();
         s.owned = sink.detach();
         s.body = reinterpret_cast<const uint8_t*>(s.owned);
@@ -2339,23 +2741,36 @@ HttpServerModule::Refill HttpServerModule::refill(Send& s) {
     if (s.source == Send::Source::Tree) {
         auto* t = static_cast<TreeSource*>(s.block);
         if (t->last) return Refill::End;
+        if (t->singleName[0] && findModuleByName(t->singleName) != t->cursor.single)
+            return Refill::Failed;
+        TreeCursor candidate = t->cursor;
         JsonSink sink;
+        constexpr size_t kWsHeaderBytes = 10; // RFC 6455's largest frame header shares the payload allocation.
+        if (t->ws) sink.append("          ", kWsHeaderBytes);
+        const size_t target = t->ws ? std::max(fragmentBytes(), kWsHeaderBytes + 1) : fragmentBytes();
         bool done;
         {
             // Per reader: one on the device's own access point gets its passwords empty, the others as stored.
             const SecretsHidden hide(t->hide);
-            done = writeTreeFragment(sink, t->cursor, fragmentBytes());
+            done = writeTreeFragment(sink, candidate, target);
         }
         // A truncated fragment would end the document in invalid JSON.
         if (sink.overflowed()) { refuseFragment(); return Refill::Failed; }
-        s.bodyLeft = sink.size();
+        if (sendRoom() == 0) return Refill::Pressure;
+        t->cursor = candidate;
+        s.bodyLeft = sink.size() - (t->ws ? kWsHeaderBytes : 0);
         s.owned = sink.detach();
         s.body = reinterpret_cast<const uint8_t*>(s.owned);
         if (t->ws) {
             // RFC 6455 section 5.4: the first frame carries the text opcode, the rest continue it, and the last one sets FIN.
             const uint8_t opcode = static_cast<uint8_t>((t->first ? 0x01 : 0x00) | (done ? 0x80 : 0x00));
-            s.head = t->hdr;
-            s.headLeft = writeWsFrameHeader(t->hdr, opcode, s.bodyLeft);
+            const size_t headerBytes = writeWsFrameHeader(t->hdr, opcode, s.bodyLeft);
+            char* frame = s.owned + kWsHeaderBytes - headerBytes;
+            std::memcpy(frame, t->hdr, headerBytes);
+            s.body = reinterpret_cast<const uint8_t*>(frame);
+            s.bodyLeft += headerBytes;
+            s.head = nullptr;
+            s.headLeft = 0;
             t->first = false;
         }
         t->last = done;
@@ -2369,16 +2784,57 @@ void HttpServerModule::drainSend(Send& s, platform::TcpConnection& conn, const v
     if (!s.busy) return;
     if (!conn.valid()) { endSendSlot(s); return; }
     const uint32_t now = platform::millis();
-    // Short of internal RAM a send waits its turn, which is not a stall.
-    if (!maySend(who)) { s.lastActivityMs = now; return; }
     // An answer's own connection closes once the answer is out; a WebSocket client's stays open for the next.
     const bool answer = &conn == &s.conn;
+    const bool borrowedSpan = s.source == Send::Source::None && !s.owned && !s.queued;
+    bool yielded = false;
+    bool moved = false;
+    // Reclaim consumed buffers before admission: retaining one can itself keep every sender below the heap floor.
+    const auto finishDrained = [&]() {
+        if (s.headLeft || s.bodyLeft) return false;
+        const bool freedFragment = s.owned != nullptr;
+        if (s.owned) { platform::free(s.owned); s.owned = nullptr; }
+        s.head = s.body = nullptr;
+        bool complete = s.closing || s.source == Send::Source::None;
+        if (s.source == Send::Source::File) complete |= static_cast<FileSource*>(s.block)->left == 0;
+        else if (s.source == Send::Source::Types) complete |= static_cast<TypesSource*>(s.block)->last;
+        else if (s.source == Send::Source::Tree) complete |= static_cast<TreeSource*>(s.block)->last;
+        else if (s.source == Send::Source::PresetIndex) complete |= static_cast<PresetIndexSource*>(s.block)->last;
+        if (!complete || s.queued) {
+            // Reuse the remaining quantum after freeing the fragment, unless another waiter owns the next turn.
+            if (freedFragment && !sendHasHeadroom()) {
+                endSend(who);
+                yielded = budget == 0 || platform::millis() - tickStart >= kTransferTickBudgetMs || !maySend(who);
+            }
+            return false;
+        }
+        const bool close = answer || s.closing;
+        if (borrowedSpan && moved && !sendHasHeadroom()) endSend(who);
+        endSendSlot(s);
+        if (close) conn.close();
+        return true;
+    };
+    if (finishDrained()) return;
+    if (yielded) return;
+    // Resource waits share the bounded stall window: a waiting lease or exhausted heap cannot retain a slot forever.
+    if (now - s.lastActivityMs > kTransferStallMs) { endSendSlot(s); conn.close(); return; }
+    // A late slot still cleans up above, but cannot take a lease when this tick has no time left.
+    if (platform::millis() - tickStart >= kTransferTickBudgetMs) return;
+    // A prepared HTTP answer of at most one transport chunk needs no large sender's lease turn.
+    const bool smallAnswer = answer && s.source == Send::Source::None && !s.queued && s.queuedLen == 0
+                          && s.headLeft <= kTransferBufBytes && s.bodyLeft <= kTransferBufBytes - s.headLeft;
+    if (!smallAnswer && !maySend(who)) return;
     while (budget > 0) {
+        if (platform::millis() - tickStart >= kTransferTickBudgetMs) break;
         if (!s.headLeft && !s.bodyLeft) {
-            // A refill writes a fragment or reads a chunk, the costly part, so it waits for the next tick once this one's time is spent.
-            if (platform::millis() - tickStart >= kTransferTickBudgetMs) { s.lastActivityMs = now; return; }
+            if (finishDrained()) return;
+            if (yielded) return;
+            // Do not allocate a new fragment while existing activity already consumes the reserve.
+            if (sendRoom() == 0) { endSend(who); return; }
             const Refill r = refill(s);
             if (r == Refill::More) continue;
+            // No cursor committed and the trial buffer is gone: retry after ACKs restore queue headroom.
+            if (r == Refill::Pressure) { endSend(who); return; }
             const bool close = answer || s.closing || r == Refill::Failed;
             endSendSlot(s);
             if (close) conn.close();
@@ -2395,38 +2851,35 @@ void HttpServerModule::drainSend(Send& s, platform::TcpConnection& conn, const v
         if (inHead) { s.head += n; s.headLeft -= static_cast<size_t>(n); }
         else { s.body += n; s.bodyLeft -= static_cast<size_t>(n); }
         budget -= static_cast<size_t>(n);
+        moved = true;
         s.lastActivityMs = now;
-        sent(who, now);
+        if (!smallAnswer) sent(who, now);
     }
-    // A liveness guard, not a size or time cap on the answer: only a peer that stopped reading trips it.
-    if (now - s.lastActivityMs > kTransferStallMs) { endSendSlot(s); conn.close(); }
+    finishDrained();
+    // A borrowed span keeps no generated heap fragment between turns, so its chunk can yield too.
+    if (borrowedSpan && moved && !sendHasHeadroom()) endSend(who);
 }
 
 void HttpServerModule::drainSends() {
     const uint32_t start = platform::millis();
     const size_t chunk = drainChunkBytes();
-    {
-        // Core 1 arms preview frames under this lease; try_lock, not a wait, since tick20ms must not block, so the preview drains next tick.
-        LockGuard lease{wsLock_};
-        if (lease) {
-            for (int i = 0; i < kMaxPreviewClients; i++) {
-                const bool was = previewClients_[i].valid();
-                // The frame is one send to the lease, shared by every preview client.
-                drainSend(previewSends_[i], previewClients_[i], &previewFrame_, chunk, start);
-                // Every close notifies the producer, or the dead slot's standing request steers on.
-                if (was && !previewClients_[i].valid() && clientSink_) clientSink_->onClientGone(i);
-            }
-            finishPreviewFrame();
-        }
-    }
-    // Control clients and answers take turns from a rotating start, so the tick's time budget favors no slot.
-    constexpr int kTurns = kMaxWsClients + kSendSlots;
+    // Every class shares the rotating start, so a preview cannot spend every tick before answers run.
+    constexpr int kTurns = kMaxPreviewClients + kMaxWsClients + kSendSlots;
     for (int k = 0; k < kTurns; k++) {
         const int i = (sendTurn_ + k) % kTurns;
-        if (i < kMaxWsClients) {
-            drainSend(controlSends_[i], wsClients_[i], &controlSends_[i], chunk, start);
+        if (i < kMaxPreviewClients) {
+            // Core 1 arms these spans under wsLock_; a busy producer skips this slot, never waits.
+            LockGuard lease{wsLock_};
+            if (!lease) continue;
+            const bool was = previewClients_[i].valid();
+            drainSend(previewSends_[i], previewClients_[i], &previewFrame_, chunk, start);
+            if (was && !previewClients_[i].valid() && clientSink_) clientSink_->onClientGone(i);
+            finishPreviewFrame();
+        } else if (i < kMaxPreviewClients + kMaxWsClients) {
+            const int client = i - kMaxPreviewClients;
+            drainSend(controlSends_[client], wsClients_[client], &controlSends_[client], chunk, start);
         } else {
-            Send& a = sends_[i - kMaxWsClients];
+            Send& a = sends_[i - kMaxPreviewClients - kMaxWsClients];
             drainSend(a, a.conn, &a, chunk, start);
         }
     }
@@ -2441,7 +2894,12 @@ void HttpServerModule::refuseFragment() {
 
 size_t HttpServerModule::fragmentBytes() const {
     const size_t chunk = drainChunkBytes();
-    return chunk < kFragmentCeilBytes ? chunk : kFragmentCeilBytes;
+    const size_t ceiling = chunk < kFragmentCeilBytes ? chunk : kFragmentCeilBytes;
+    const size_t room = sendRoom();
+    if (room == SIZE_MAX) return ceiling;
+    // Leave space for geometric growth and TCP's copy; an indivisible value still faces admission after serialization.
+    const size_t target = room / 4;
+    return std::min(ceiling, target > 0 ? target : size_t{1});
 }
 
 // Per-client chunk cap per tick from free contiguous memory, between a floor (progress) and a ceiling (tick occupancy), so a tight board takes small bites.
@@ -2450,10 +2908,11 @@ size_t HttpServerModule::drainChunkBytes() const {
     constexpr size_t kCeil  = 65536;    // cap tick occupancy regardless of how much RAM is free
     const size_t block = platform::maxAllocBlock();
     // 0 means unlimited (desktop): no ceiling, since writeSome stops at the socket buffer and TCP paces the drain.
-    if (block == 0) return static_cast<size_t>(1) << 30;
+    if (block == 0) return sendChunkLimit_ ? sendChunkLimit_ : static_cast<size_t>(1) << 30;
     size_t chunk = block / 8;           // a fraction of the largest contiguous block
     if (chunk < kFloor) chunk = kFloor;
     if (chunk > kCeil)  chunk = kCeil;
+    if (sendChunkLimit_ && chunk > sendChunkLimit_) chunk = sendChunkLimit_;
     return chunk;
 }
 

@@ -4,6 +4,46 @@
 #include "light/layouts/Layouts.h"
 #include "light/effects/ParticlesEffect.h"
 #include "light/layouts/GridLayout.h"
+#include "golden_frame.h"
+#include <algorithm>
+
+TEST_CASE("working memory: Particles releases an unusable pool and recovers") {
+    struct Restore { ~Restore() { mm::platform::setTestAllocRefusedFrom(0); } } restore;
+    mm::golden::ScopedTestClock clock(1000);
+    mm::Layouts layouts; mm::GridLayout grid; mm::Layer layer; mm::ParticlesEffect effect;
+    grid.width = 50; grid.height = 51; grid.depth = 1;
+    layouts.addChild(&grid); layer.setLayouts(&layouts); layer.setChannelsPerLight(4);
+    layer.prepare();
+    layer.addChild(&effect);
+    mm::platform::setTestAllocRefusedFrom(8000);
+    effect.prepare();
+    CHECK(effect.dynamicBytes() == 0);
+    CHECK(effect.severity() == mm::MoonModule::Severity::Error);
+    CHECK(effect.status() != nullptr);
+    mm::platform::setTestAllocRefusedFrom(0);
+    effect.prepare();
+    CHECK(effect.dynamicBytes() > 0);
+    CHECK(effect.status() == nullptr);
+    for (uint16_t i = 0; i < 30; i++) { mm::platform::setTestNowMs(1000 + i * 20u); layer.tick(); }
+    CHECK(std::any_of(layer.buffer().span().begin(), layer.buffer().span().end(),
+                      [](uint8_t value) { return value != 0; }));
+}
+
+TEST_CASE("working memory: enabling released Particles reseeds the pool") {
+    mm::golden::ScopedTestClock clock(1000);
+    mm::Layouts layouts; mm::GridLayout grid; mm::Layer layer; mm::ParticlesEffect effect;
+    grid.width = 16; grid.height = 16; grid.depth = 1;
+    layouts.addChild(&grid); layer.setLayouts(&layouts); layer.setChannelsPerLight(3);
+    layer.addChild(&effect); layer.applyState(); layer.tick();
+    effect.release(); effect.prepare();
+    mm::platform::setTestNowMs(1020); layer.tick();
+    size_t lit = 0;
+    const auto& buf = layer.buffer();
+    for (size_t i = 0; i + 2 < buf.bytes(); i += 3) {
+        if (buf.data()[i] || buf.data()[i + 1] || buf.data()[i + 2]) ++lit;
+    }
+    CHECK(lit > 1);
+}
 
 // The trail buffer sizes to width × height × 3 bytes (one RGB per cell, used to fade existing pixels).
 TEST_CASE("ParticlesEffect allocates trail buffer when enabled") {

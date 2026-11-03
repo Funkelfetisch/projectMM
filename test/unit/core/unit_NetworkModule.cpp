@@ -135,6 +135,54 @@ struct FrozenClock {
 }  // namespace
 
 // A known network that does not join in time gives way to the next in priority order, and only after the last does the device open its access point.
+TEST_CASE("BLE products can pause WiFi without forgetting networks or starting fallback retries") {
+    FrozenClock clock;
+    mm::platform::setTestWifiStaAvailable(true);
+    mm::platform::setTestMdnsAvailable(true);
+    {
+        WiFiNetwork w;
+        w.net.allowWifiToggle(true);
+        w.net.defineControls();
+        bool* enabled = nullptr;
+        for (uint8_t i = 0; i < w.net.controls().count(); ++i) {
+            auto& control = w.net.controls()[i];
+            if (std::strcmp(control.name, "wifiEnabled") == 0) enabled = static_cast<bool*>(control.ptr);
+        }
+        REQUIRE(enabled != nullptr);
+        w.wifi.remember("home", "saved-secret");
+        w.net.setup();
+        const uint8_t ip[4] = {192,168,1,30};
+        mm::platform::setTestWifiStaIPv4(ip);
+        w.net.tick1s();
+        REQUIRE(mm::platform::testMdnsInitCount() == 1);
+        *enabled = false;
+        w.net.tick1s();
+        CHECK_FALSE(mm::platform::testWifiStopHadLiveMdns());
+        mm::platform::setTestNowMs(121000);
+        w.net.tick1s();
+        const char* mode = "";
+        for (uint8_t i = 0; i < w.net.controls().count(); ++i) {
+            auto& control = w.net.controls()[i];
+            if (std::strcmp(control.name, "mode") == 0) mode = static_cast<const char*>(control.ptr);
+        }
+        CHECK(std::string(mode) == "WiFi off");
+        REQUIRE(w.wifi.knownCount() == 1);
+        CHECK(std::string(w.wifi.passwordAt(0)) == "saved-secret");
+        mm::platform::setTestWifiStaIPv4(nullptr);
+        *enabled = true;
+        w.net.tick1s();
+        CHECK(std::string(mm::platform::testLastStaSsid()) == "home");
+        mm::platform::setTestWifiStaIPv4(ip);
+        w.net.tick1s();
+        CHECK(std::string(mode) == "WiFi STA");
+        CHECK(mm::platform::testMdnsInitCount() >= 2);
+        w.net.release();
+    }
+    mm::platform::setTestWifiStaIPv4(nullptr);
+    mm::platform::setTestWifiStaAvailable(false);
+    mm::platform::setTestMdnsAvailable(false);
+}
+
 TEST_CASE("the station tries each known network in priority order before the access point") {
     FrozenClock clock;
     mm::platform::setTestWifiStaAvailable(true);
@@ -272,7 +320,7 @@ TEST_CASE("a failed join keeps the typed password for a retry") {
     s.net.tick1s();
     mm::JsonSink sink;
     avail->writeListRowDetail(sink, 0);
-    CHECK(std::string(sink.data(), sink.size()).find("\"LiMqNQ==\"") != std::string::npos);   // "typo", obfuscated as every password on the page
+    CHECK(std::string(sink.data(), sink.size()).find("\"type\":\"password\",\"value\":true") != std::string::npos);   // retry retains the credential internally, the page sees its configured flag
 }
 
 // A known network the card asked for that fails counts as tried, so the round goes on to the others and does not try it again at once.

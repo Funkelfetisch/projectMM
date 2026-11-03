@@ -7,6 +7,7 @@
 #include "core/util/JsonSink.h"
 #include "core/util/JsonUtil.h"
 #include "core/util/ModuleFactory.h"
+#include "core/util/PinList.h"
 #include "platform/platform.h"
 
 #include <cstdio>
@@ -70,10 +71,12 @@ const ControlDescriptor* controlNamed(MoonModule& m, const char* key) {
 }
 
 // A stored value, clamped to the control's bounds since a file an older build wrote may hold one past them; true when it changed the value.
-bool storeClamped(const ControlDescriptor& c, const char* valueJson) {
+bool storeClamped(const ControlDescriptor& c, const char* valueJson, bool* applied = nullptr) {
     JsonSink before, after;
     writeControlValue(before, c, /*saving=*/true);
-    if (applyControlValue(c, valueJson, "value", ApplyPolicy::Clamp) != ApplyResult::Ok) return false;
+    const bool ok = applyControlValue(c, valueJson, "value", ApplyPolicy::Clamp) == ApplyResult::Ok;
+    if (applied) *applied = ok;
+    if (!ok) return false;
     writeControlValue(after, c, /*saving=*/true);
     return std::strcmp(before.data(), after.data()) != 0;
 }
@@ -179,10 +182,34 @@ struct Applier {
 
     // What would fail at creation, found before anything changes: a type this build lacks, a role the parent refuses, a name the tree cannot hold.
     bool validate(MoonModule* m, const JsonNode* obj) {
+        if (m && replacesChildren(obj)) {
+            for (uint8_t i = 0; i < m->childCount(); ++i) {
+                MoonModule* child = m->child(i);
+                if (!child || !child->userEditable() || child->isWiredByCode() || json::member(doc, obj, child->name())) continue;
+                if (!child->subtreeRemovalAllowed()) {
+                    push(child->name());
+                    return fail("this module contains an active resource handover");
+                }
+            }
+        }
         for (const JsonNode* member = first(obj); member; member = next(member)) {
             if (reserved(member->key)) continue;
             if (member->type == JsonType::Object && !validateMember(m, member)) return false;
             if (member->type == JsonType::Null && !validateRemoval(m, member)) return false;
+            if (m && member->type != JsonType::Object && member->type != JsonType::Null &&
+                (!m->acceptsControlWrite(member->key) || (std::strcmp(member->key, "enabled") == 0 && !m->subtreeRemovalAllowed()))) {
+                push(member->key); return fail("control is read-only");
+            }
+            if (m && s.hasReservedPins() && member->type != JsonType::Object && member->type != JsonType::Null) {
+                const auto* c = controlNamed(*m, member->key);
+                if (c && (c->type == ControlType::Pin || (c->type == ControlType::Text && isPinListControl(c->name)))) {
+                    JsonSink sink;
+                    if (!wrapValue(sink, member)) { push(member->key); return fail("out of memory"); }
+                    if (s.pinControlConflicts(*c, sink.data(), ApplyPolicy::Strict, m->pinReservationOwner())) {
+                        push(member->key); return fail("pin is reserved");
+                    }
+                }
+            }
         }
         return true;
     }
@@ -190,7 +217,7 @@ struct Applier {
     // A `null` that names a module the user cannot remove fails here rather than halfway through the prune.
     bool validateRemoval(MoonModule* m, const JsonNode* member) {
         MoonModule* child = m ? childNamed(m, member->key) : nullptr;
-        if (!child || child->userEditable()) return true;
+        if (!child || (child->userEditable() && child->subtreeRemovalAllowed())) return true;
         push(member->key);
         return fail("this module cannot be removed");
     }
@@ -212,7 +239,7 @@ struct Applier {
         ModuleRole role;
         if (!registeredRole(type, role)) return fail("unknown type");
         if (parent && !parent->acceptsRole(role)) return fail("a module of this role cannot go here");
-        if (existing) return existing->userEditable() || fail("this module cannot be replaced");
+        if (existing) return (existing->userEditable() && existing->subtreeRemovalAllowed()) || fail("this module cannot be replaced");
         return validateNewName(member);
     }
 
@@ -282,14 +309,16 @@ struct Applier {
     }
 
     MoonModule* replace(MoonModule* parent, MoonModule* old, const char* type) {
-        if (!old->userEditable()) { fail("this module cannot be replaced"); return nullptr; }
+        if (!old->userEditable() || !old->subtreeRemovalAllowed()) { fail("this module cannot be replaced"); return nullptr; }
         MoonModule* fresh = ModuleFactory::create(type);
         if (!fresh) { fail("unknown type"); return nullptr; }
         if (!parent->acceptsRole(fresh->role())) { delete fresh; fail("a module of this role cannot go here"); return nullptr; }
+        parent->quiesceForMutation();
+        if (!old->prepareSubtreeRemoval()) { delete fresh; fail("this module contains an active resource handover"); return nullptr; }
         fresh->setName(old->name());   // the document addresses it by this name
         uint8_t index = 0;
         while (index < parent->childCount() && parent->child(index) != old) index++;
-        parent->replaceChildAt(index, fresh);
+        if (parent->replaceChildAt(index, fresh) != old) { delete fresh; fail("this module cannot be replaced"); return nullptr; }
         start(fresh);
         old->release();
         Scheduler::deleteTree(old);
@@ -299,8 +328,10 @@ struct Applier {
     }
 
     bool remove(MoonModule* parent, MoonModule* m) {
-        if (!m->userEditable()) return fail("this module cannot be removed");
-        parent->removeChild(m);
+        if (!m->userEditable() || !m->subtreeRemovalAllowed()) return fail("this module cannot be removed");
+        parent->quiesceForMutation();
+        if (!m->prepareSubtreeRemoval()) return fail("this module contains an active resource handover");
+        if (!parent->removeChild(m)) return fail("this module cannot be removed");
         m->release();
         Scheduler::deleteTree(m);
         finishStructure(parent);
@@ -386,15 +417,19 @@ struct Applier {
 
     // `changed` in and out: whether the first pass changed this value, which the second pass reacts to.
     bool storeValue(MoonModule* m, const JsonNode* member, bool final, bool& changed) {
+        if (!m->acceptsControlWrite(member->key) ||
+            (std::strcmp(member->key, "enabled") == 0 && !m->subtreeRemovalAllowed())) return fail("control is read-only");
         if (std::strcmp(member->key, "enabled") == 0) return storeEnabled(m, member, final);
         JsonSink sink;
         if (!wrapValue(sink, member)) return fail("out of memory");
         const ControlDescriptor* c = controlNamed(*m, member->key);
         if (!c) return storeUnknown(m, member->key, sink.data(), final);
+        if (s.pinControlConflicts(*c, sink.data(), ApplyPolicy::Clamp, m->pinReservationOwner())) return fail("pin is reserved");
         // A stored file sets only what the device itself saves: a live input an older build wrote stays as the device starts it.
         if (!isPersistable(*c)) return true;
         // At boot nothing reacts, so the value is set without comparing it to what it was.
         if (boot()) { applyControlValue(*c, sink.data(), "value", ApplyPolicy::Clamp); return true; }
+        if (!m->prepareControlWrite(member->key)) return fail("this control has an active resource handover");
         const bool live = c->live;
         changed = storeClamped(*c, sink.data()) || changed;
         if (final && changed) react(m, member->key, live);
@@ -404,6 +439,7 @@ struct Applier {
     bool storeEnabled(MoonModule* m, const JsonNode* member, bool final) {
         const bool on = member->intValue != 0;
         if (!final || on == m->enabledSetting()) return true;
+        if (!boot() && !on && !m->prepareSubtreeRemoval()) return fail("this module contains an active resource handover");
         m->setEnabled(on);
         if (!boot()) { m->markDirty(); structural = true; r.changes++; }
         return true;
@@ -780,7 +816,8 @@ bool flatToStateDocument(const char* text, MoonModule& top, JsonSink& out) {
     return !out.overflowed();
 }
 
-void applyDeferredControls(Scheduler& scheduler) {
+StateDocumentResult applyDeferredControls(Scheduler& scheduler) {
+    StateDocumentResult result;
     for (uint8_t i = 0; i < g_deferredCount; i++) {
         Deferred& d = g_deferred[i];
         bool ok = true;
@@ -789,16 +826,25 @@ void applyDeferredControls(Scheduler& scheduler) {
             MoonModule* m = scheduler.firstByName(d.module);
             const ControlDescriptor* c = m ? controlNamed(*m, d.key) : nullptr;
             ok = c != nullptr;
-            if (c && storeClamped(*c, d.valueJson)) scheduler.reactToControlChange(m, d.key);
+            if (c && storeClamped(*c, d.valueJson, &ok)) scheduler.reactToControlChange(m, d.key);
         } else {
             // A live document's write stays unsaved after the rebuild as it would have before it.
             ok = scheduler.setControl(d.module, d.key, d.valueJson, d.source == StateSource::Live) == Scheduler::SetControlResult::Ok;
         }
-        if (!ok) std::printf("state document: %s.%s did not apply after the rebuild\n", d.module, d.key);
+        if (ok) ++result.changes;
+        else {
+            if (result.ok) {
+                result.ok = false;
+                result.error = "deferred control did not apply";
+                std::snprintf(result.where, sizeof(result.where), "%s.%s", d.module, d.key);
+            }
+            std::printf("state document: %s.%s did not apply after the rebuild\n", d.module, d.key);
+        }
         platform::free(d.valueJson);
     }
     g_deferredCount = 0;
     releaseDeferredTable();
+    return result;
 }
 
 }  // namespace mm

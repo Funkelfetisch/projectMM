@@ -8,11 +8,52 @@
 #include "core/module/Scheduler.h"
 #include "core/util/JsonSink.h"
 #include "platform/platform.h"   // setTestGpioCapability — inject an unsafe pin for the severity cases
+#include "platform/GpioPreload.h"
 
 #include <cstring>
 #include <string>
 
 using namespace mm;
+
+TEST_CASE("GPIO preload does not enable output before a successful low latch") {
+    std::string calls;
+    auto preload = [&]() { calls += 'L'; return true; };
+    auto enable = [&]() { calls += 'E'; return true; };
+    CHECK(platform::preloadThenEnable(preload, enable));
+    CHECK(calls == "LE");
+    calls.clear();
+    CHECK_FALSE(platform::preloadThenEnable([&]() { calls += 'L'; return false; }, enable));
+    CHECK(calls == "L");
+    calls.clear();
+    CHECK_FALSE(platform::preloadThenEnable(preload, [&]() { calls += 'E'; return false; }));
+    CHECK(calls == "LE");
+}
+
+TEST_CASE("GPIO preload refuses reserved and input-only pins without changing their level") {
+    struct Reset { ~Reset() { platform::clearTestGpioCapability(); } } reset;
+    constexpr uint8_t pin = 16;
+    platform::setTestGpioLevel(pin, true);
+    platform::GpioCapability cap;
+    cap.reserved = true;
+    platform::setTestGpioCapability(pin, cap);
+    CHECK_FALSE(platform::gpioPreloadLowOutput(pin));
+    CHECK(platform::gpioRead(pin));
+    cap.reserved = false;
+    cap.outputCapable = false;
+    platform::setTestGpioCapability(pin, cap);
+    CHECK_FALSE(platform::gpioPreloadLowOutput(pin));
+    CHECK(platform::gpioRead(pin));
+    cap.outputCapable = true;
+    platform::setTestGpioCapability(pin, cap);
+    CHECK(platform::gpioPreloadLowOutput(pin));
+    CHECK_FALSE(platform::gpioRead(pin));
+    CHECK(platform::gpioPreloadOutput(pin, true));
+    CHECK(platform::gpioRead(pin));
+    cap.reserved = true;
+    platform::setTestGpioCapability(pin, cap);
+    CHECK_FALSE(platform::gpioPreloadOutput(pin, false));
+    CHECK(platform::gpioRead(pin));
+}
 
 namespace {
 

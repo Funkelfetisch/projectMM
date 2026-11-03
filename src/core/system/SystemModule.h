@@ -43,6 +43,15 @@ public:
     /// Adopt the scheduler, whose timings the vitals read.
     void setScheduler(Scheduler* s) { scheduler_ = s; }
 
+    /// Seed a product identity before persistence overlays the user's saved values.
+    void setDefaultDeviceName(const char* name) {
+        std::snprintf(deviceName_, sizeof(deviceName_), "%s", name);
+    }
+    /// Seed the profile's model name before loading persisted configuration.
+    void setDefaultDeviceModel(const char* model) {
+        std::snprintf(deviceModel_, sizeof(deviceModel_), "%s", model);
+    }
+
     /// Keep the diagnostics ticking, since hiding uptime and heap serves nobody.
     bool respectsEnabled() const MM_NONBLOCKING override { return false; }
 
@@ -114,6 +123,10 @@ public:
             std::snprintf(deviceModel_, sizeof(deviceModel_), "%s", platform::hostPlatform());
         }
         controls_.addText("deviceModel", deviceModel_, sizeof(deviceModel_), validateDeviceModel);
+        // Explicit measured product metadata, persisted through the same state document as deviceModel.
+        controls_.addControl("physicalDiameterCm", physicalDiameterCm_);
+        controls_.setNumberField(controls_.count() - 1);
+        controls_.setAdvanced(controls_.count() - 1);
 
         // Written from the constant each boot, and persisted only so the recovery image reads it.
         std::snprintf(firmwareVariant_, sizeof(firmwareVariant_), "%s", kFirmwareName);
@@ -165,6 +178,9 @@ public:
         controls_.addReadOnly("sdk", const_cast<char*>(platform::sdkVersion()));
         /// Why the device last restarted.
         controls_.addReadOnly("bootReason", const_cast<char*>(platform::resetReason()));
+        /// Retained exception and code addresses, correlated with the image fingerprint.
+        controls_.addReadOnly("lastPanic", const_cast<char*>(platform::lastPanicSummary()));
+        controls_.setDeveloper(controls_.count() - 1);
         // The UI honors this client-side, so nothing in the firmware reads it. A LEVEL rather than a switch, because a control names the audience it is for and one number decides which audience is reading.
         controls_.addSelect("mode", mode_, kModeOptions, 3);
         /// Delete every setting and preset and restart as freshly installed.
@@ -272,6 +288,8 @@ private:
     /// The board model, which selects the installer's catalog entry.
     /// @guide Tooling sets it, since a device cannot identify its own hardware.
     char deviceModel_[32] = {};
+    /// Installed sphere diameter in centimetres; zero means the owner has not supplied it.
+    uint8_t physicalDiameterCm_ = 0;
     /// The build variant, kept for the MoonBase recovery image to read.
     char     firmwareVariant_[24] = {};
 

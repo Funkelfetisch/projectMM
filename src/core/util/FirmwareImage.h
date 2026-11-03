@@ -44,6 +44,17 @@
 
 namespace mm::firmware {
 
+/// Check buffered and incoming bytes against a slot and an optional declared length without overflow.
+inline bool uploadFits(size_t written, size_t buffered, size_t incoming, size_t slotSize, size_t expected) {
+    if (written > slotSize || buffered > slotSize - written || incoming > slotSize - written - buffered) return false;
+    return !expected || (written <= expected && buffered <= expected - written && incoming <= expected - written - buffered);
+}
+
+/// A known-length transfer must contain exactly the announced image before it can commit.
+inline bool uploadComplete(size_t written, size_t buffered, size_t expected) {
+    return !expected || (written <= expected && buffered == expected - written);
+}
+
 /// First byte of every ESP32 image.
 constexpr uint8_t kImageMagic = 0xE9;
 /// Marks the app descriptor that follows the image and first segment headers.
@@ -54,6 +65,40 @@ constexpr size_t kDescOffset = 32;
 constexpr size_t kChipIdOffset = 12;
 /// Enough bytes to identify an image: through the descriptor's version and project name.
 constexpr size_t kIdentifyBytes = kDescOffset + 96;
+
+/// Optional custom descriptor immediately after ESP-IDF's 256-byte app descriptor.
+/// Untagged historical images remain readable; a tag is identity metadata, not a signature.
+constexpr size_t kVariantOffset = kDescOffset + 256;
+constexpr size_t kVariantBytes = 40;
+inline constexpr char kVariantMagic[8] = {'M','M','V','A','R','0','1','\0'};
+enum class VariantStatus : uint8_t { Missing, Valid, Malformed };
+struct VariantInfo { VariantStatus status = VariantStatus::Missing; char name[32] = {}; };
+
+inline VariantInfo identifyVariant(const uint8_t* data, size_t length) {
+    VariantInfo out;
+    if (!data || length < kVariantOffset + sizeof(kVariantMagic) ||
+        std::memcmp(data + kVariantOffset, kVariantMagic, sizeof(kVariantMagic))) return out;
+    out.status = VariantStatus::Malformed;
+    if (length < kVariantOffset + kVariantBytes) return out;
+    const char* name = reinterpret_cast<const char*>(data + kVariantOffset + sizeof(kVariantMagic));
+    size_t n = 0;
+    for (; n < sizeof(out.name) && name[n]; ++n) {
+        const char c = name[n];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return out;
+    }
+    if (!n || n == sizeof(out.name)) return out;
+    std::memcpy(out.name, name, n);
+    out.status = VariantStatus::Valid;
+    return out;
+}
+
+/// Product variants reject other tagged variants; untagged releases remain compatible.
+inline const char* variantRejection(const VariantInfo& variant, const char* expected) {
+    if (variant.status == VariantStatus::Malformed) return "malformed firmware variant";
+    if (variant.status == VariantStatus::Valid && expected && std::strcmp(variant.name, expected))
+        return "firmware variant mismatch";
+    return nullptr;
+}
 
 /// Every chip id `esp_chip_id_t` defines, so that no valid image is refused as being for another chip when the truth is that this table does not name it.
 enum class ChipId : uint16_t {
@@ -124,6 +169,11 @@ inline bool isAppImage(const char* name, size_t cap = 32) { return namedAmong(na
 
 /// Whether `name` is this project's recovery image.
 inline bool isMoonBaseImage(const char* name, size_t cap = 32) { return namedAmong(name, cap, kMoonBaseImageNames); }
+
+/// The application upload must match this chip before its first flash write.
+inline bool appImageChipMatches(const ImageInfo& info, ChipId chip) {
+    return info.valid && info.chip == chip;
+}
 
 /// The reason this is not a MoonBase image for `chip`, or null when it is.
 inline const char* moonBaseRejection(const ImageInfo& info, ChipId chip) {

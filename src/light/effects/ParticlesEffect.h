@@ -25,6 +25,24 @@ public:
     /// The pool's size, of which `count` are alive at a time.
     static constexpr uint8_t MAX_PARTICLES = 64;
 
+    /// A trail plane plus the particle pool, whose arrays retain their own contiguous blocks.
+    WorkingMemory workingMemory(Coord3D size, uint8_t channels) const override {
+        if (size.x <= 0 || size.y <= 0 || size.z <= 0 || channels == 0) return {};
+        constexpr size_t poolBytes = MAX_PARTICLES * (4u * sizeof(draw::pos_t) + sizeof(uint16_t) + sizeof(uint8_t));
+        const uint64_t cells = static_cast<uint64_t>(size.x) * size.y;
+        if (cells > (SIZE_MAX - poolBytes) / channels) return {SIZE_MAX, SIZE_MAX};
+        const size_t trail = static_cast<size_t>(cells) * channels;
+        const size_t largest = trail > MAX_PARTICLES * sizeof(draw::pos_t) ? trail : MAX_PARTICLES * sizeof(draw::pos_t);
+        return {trail + poolBytes, largest};
+    }
+
+    /// Release the pool view with its arrays so a later enable seeds valid particles.
+    void release() override {
+        MoonModule::release();
+        pool_ = particles::Pool{};
+        initialized_ = false;
+    }
+
     /// How many particles drift.
     uint8_t count = 32;
     /// The drift velocity.
@@ -44,6 +62,8 @@ public:
 
     /// Size the trail and the pool, and seed every particle once.
     void prepare() override {
+        clearStatus();
+        if (width() <= 0 || height() <= 0 || depth() <= 0) { release(); return; }
         // The z=0 plane only, since extrude fills a volume from it.
         trail_.resize(static_cast<size_t>(width()) * height() * channelsPerLight());
         // `trail_` is the degenerate-grid gate here: prepare() runs outside Layer::tick's own.
@@ -58,6 +78,11 @@ public:
             pool_.count = MAX_PARTICLES;
         } else {
             pool_ = particles::Pool{};   // a failed resize leaves valid() false, not a stale pool
+        }
+        if (!trail_ || !pool_.valid()) {
+            release();
+            setStatus("effect buffers unavailable", Severity::Error);
+            return;
         }
         if (trail_) initParticles();
         time_.reset();

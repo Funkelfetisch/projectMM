@@ -180,17 +180,18 @@ struct Correction {
         uint8_t r = src[0];
         uint8_t g = src[1];
         uint8_t b = src[2];
-        uint8_t w = 0;   // the white component; stays 0 when no white is synthesized
+        const uint8_t explicitWhite = srcChannels > 3 && !hasMotion ? src[3] : 0;
+        uint8_t coldWhite = explicitWhite;
+        uint8_t warmWhite = 0;
         // One gate for every synthesised emitter; None zeroes them, since the buffer is reused.
         if (whiteMode == WhiteMode::None) {
-            if (offWhite != kAbsent)     out[offWhite] = 0;
-            if (offWarmWhite != kAbsent) out[offWarmWhite] = 0;
             if (offYellow != kAbsent)    out[offYellow] = 0;
             if (offUV != kAbsent)        out[offUV] = 0;
         } else {
-            w = r < g ? (r < b ? r : b) : (g < b ? g : b);  // min(r,g,b): the white component
+            const uint8_t sharedWhite = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            warmWhite = sharedWhite;
+            coldWhite = explicitWhite ? explicitWhite : sharedWhite;
             // Computed off the PRE-subtraction values, which only rebalance the RGB emitters.
-            if (offWarmWhite != kAbsent) out[offWarmWhite] = lut[w];
             // yellow ≈ min(R,G) (the shared red+green component).
             if (offYellow != kAbsent)    out[offYellow] = lut[r < g ? r : g];
             // Driven from the blue with no red or green to pair with, so it stays dark on warm colors.
@@ -199,22 +200,23 @@ struct Correction {
                 out[offUV] = lut[b > rg ? static_cast<uint8_t>(b - rg) : 0];
             }
             // White last: it is the only emitter that rebalances RGB.
-            if (offWhite != kAbsent) {
-                if (whiteMode == WhiteMode::Accurate) { r -= w; g -= w; b -= w; }  // pull white out of RGB
-                out[offWhite] = lut[w];
+            if (offWhite != kAbsent && whiteMode == WhiteMode::Accurate && explicitWhite == 0) {
+                r -= sharedWhite; g -= sharedWhite; b -= sharedWhite;   // pull white out of RGB
             }
         }
+        if (offWhite != kAbsent) out[offWhite] = lut[coldWhite];
+        if (offWarmWhite != kAbsent) out[offWarmWhite] = whiteMode == WhiteMode::None ? 0 : lut[warmWhite];
         // The curve, applied ONCE: everything above this line is linear light.
         if (offRed != kAbsent)   out[offRed] = lut[r];
         if (offGreen != kAbsent) out[offGreen] = lut[g];
         if (offBlue != kAbsent)  out[offBlue] = lut[b];
-        if constexpr (sizeof(T) == 1) { if (hasFine) applyFine(r, g, b, w, out); }
+        if constexpr (sizeof(T) == 1) { if (hasFine) applyFine(r, g, b, coldWhite, warmWhite, out); }
     }
 
     /// Hot path, 16-bit profiles only: each color channel with a fine role as its high and low byte from the same table, and a fine dimmer wide open.
-    void applyFine(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t* out) const {
+    void applyFine(uint8_t r, uint8_t g, uint8_t b, uint8_t coldWhite, uint8_t warmWhite, uint8_t* out) const {
         if (offDimmerFine != kAbsent) out[offDimmerFine] = 255;   // wide open is 65535, not 65280
-        const uint8_t value[5] = {r, g, b, w, w};   // both whites carry the white component, 0 when none is synthesized
+        const uint8_t value[5] = {r, g, b, coldWhite, warmWhite};
         const uint8_t coarse[5] = {offRed, offGreen, offBlue, offWhite, offWarmWhite};
         const uint8_t fine[5] = {offRedFine, offGreenFine, offBlueFine, offWhiteFine, offWarmWhiteFine};
         for (uint8_t k = 0; k < 5; k++) {

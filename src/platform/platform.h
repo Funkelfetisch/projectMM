@@ -1,11 +1,16 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <new>      // std::nothrow_t, for InternalRamObject's allocation
 #include "platform_config.h"  // hasOta / hasPsram / …: flags this header's contract refers to
 #include "nonblocking.h"      // MM_NONBLOCKING, which every declaration below carries
+#include "platform/BleBattery.h"
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#endif
 
 /// The one interface every module reaches hardware through, so the same source drives an ESP32, a Teensy, a Raspberry Pi and a desktop.
 ///
@@ -68,6 +73,8 @@ void setTestBindFails(bool fail);
 void setTestJoinFails(bool fail);
 /// Report this much free internal RAM, as a board without PSRAM under load would; 0 restores the desktop's unreported figure.
 void setTestFreeInternalHeap(size_t bytes);
+/// Report a total free-heap budget to allocation guards; zero restores the unreported host value.
+void setTestFreeHeap(size_t bytes);
 /// Report addresses in [begin, end) as PSRAM, as a board with PSRAM places a buffer; null restores the desktop's none.
 void setTestPsramRange(const void* begin, const void* end);
 #endif
@@ -228,6 +235,8 @@ void clearTestGpioLiveState();
 void setTestMaxAllocBlock(size_t bytes);
 /// Refuse every allocation of at least `bytes`, 0 being none refused, so a test meets out-of-memory on a growing buffer. Desktop only.
 void setTestAllocRefusedFrom(size_t bytes);
+/// Report one desktop heap's remaining tracked payload capacity; zero disables it, and allocator overhead and other process memory stay outside the model.
+void setTestHeapCapacity(size_t bytes);
 /// Total heap capacity, internal plus PSRAM.
 size_t totalHeap();
 /// Total internal heap capacity.
@@ -267,6 +276,8 @@ const char* hostIp();
 
 /// Why the device last reset, which the UI reads to flag a crashed prior boot.
 const char* resetReason();
+/// Bounded numeric metadata from a prior panic, when retained by this target.
+const char* lastPanicSummary();
 
 /// How long a boot stays up before it counts as good, and its failed boots start again from one.
 constexpr uint32_t kBootStableMs = 60 * 1000;
@@ -320,8 +331,10 @@ bool fsWriteAtomic(const char* path, const char* data, size_t len);
 using FsWriteSrc = size_t(*)(char* buf, size_t cap, void* user, bool* abort);
 /// Called once per child of a listed directory; a directory reports size 0.
 using FsListCb = void(*)(const char* name, bool isDir, uint32_t sizeBytes, void* user);
-/// List one level of `dir`, calling `cb` per child.
-void fsList(const char* dir, FsListCb cb, void* user);
+/// Metadata includes file sizes; NamesOnly preserves directory classification and reports every size as zero.
+enum class FsListMode : uint8_t { Metadata, NamesOnly };
+/// List one level of `dir`, calling `cb` per child with the selected metadata detail.
+void fsList(const char* dir, FsListCb cb, void* user, FsListMode mode = FsListMode::Metadata);
 
 /// A read kept open across chunks, so a multi-megabyte download neither reopens nor reseeks per chunk.
 struct FsReadStream { void* impl = nullptr; };
@@ -690,6 +703,8 @@ void setTestClockStep(uint32_t ms);
 void setTestMdnsAvailable(bool available);
 /// How many times mdnsInit has started advertising since the seam was set.
 uint32_t testMdnsInitCount();
+/// Whether a simulated Wi-Fi stop occurred before the mDNS stack was released.
+bool testWifiStopHadLiveMdns();
 #endif
 
 /// Why the station's last join attempt failed, so the card can say "incorrect password".
@@ -806,14 +821,29 @@ bool http_fetch_to_ota(const char* url,
 
 /// An image written as its bytes arrive, which whoever receives it pushes a chunk at a time.
 struct OtaWrite { void* impl = nullptr; };
+/// Whether a platform update reservation is currently held, independent of status text.
+bool otaBusy();
+#ifndef ESP_PLATFORM
+/// Desktop test seam for the platform reservation status.
+void setTestOtaBusy(bool busy);
+#endif
 /// Which slot an image goes to: the application's, or MoonBase's, which only the running application can write.
 enum class OtaTarget : uint8_t { App, MoonBase };
+/// Writable next application slot capacity, or zero if no distinct target is known.
+size_t otaNextAppCapacity();
+#ifndef ESP_PLATFORM
+/// Override the desktop's unknown target capacity for RPC tests; zero resets it.
+void setTestOtaNextAppCapacity(size_t capacity);
+#endif
 /// Start an image of `contentLen` bytes (0 when unknown) for `target`, its progress in `statusBuf` and `bytesOut`; false with the reason there.
 bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut);
 /// Hand the image its next bytes; false once it is refused or the flash fails, the reason in its status and the image abandoned.
 bool otaWrite(OtaWrite& w, const uint8_t* data, size_t len);
 /// Finish the image: with `commit` check it whole and, for the application, point the boot at it; without, abandon it. True once committed.
 bool otaEnd(OtaWrite& w, bool commit);
+/// Abort an application upload; true confirms the platform accepted the abort,
+/// not that previously written flash bytes were erased. Releases an app writer.
+bool otaAbortApp(OtaWrite& w);
 
 /// Does this partition table carry MoonBase, the second boot image (a board cannot rewrite the partition it executes from)?
 bool otaHasMoonBase();
@@ -882,6 +912,69 @@ bool improvProvisioningInit(const ImprovDeviceInfo& info,
                             std::atomic<bool>* opReady = nullptr);
 /// Drain the serial listener, called every tick: the work itself where the listener has no task of its own, a no-op where a task runs it.
 void improvPoll() MM_NONBLOCKING;
+
+/// Capacity shared by the radio, active-owner snapshots and RPC session storage.
+#if defined(CONFIG_BT_NIMBLE_ENABLED) && CONFIG_BT_NIMBLE_ENABLED
+inline constexpr size_t kBleControlPeerCapacity = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
+#else
+inline constexpr size_t kBleControlPeerCapacity = 2;
+#endif
+static_assert(kBleControlPeerCapacity >= 1 && kBleControlPeerCapacity <= 8);
+/// One GATT control peripheral, independent of Wi-Fi association.
+struct BleControlHandle { void* impl = nullptr; };
+/// Host-lifetime repeat-pairing counters, with no peer addresses or key material.
+struct BlePairingState {
+    uint32_t requests = 0; ///< Repeat requests received by the native callback.
+    uint32_t deleted = 0; ///< Current-peer bond deletions acknowledged before retry.
+    uint32_t rejected = 0; ///< Requests rejected by policy, lookup or storage failure.
+    uint32_t repairWindowMs = 0; ///< Remaining time in an explicitly opened repair window.
+    uint32_t fullAllowed = 0; ///< Full-store prechecks admitted for the current known peer.
+    uint32_t fullRejected = 0; ///< Full-store prechecks refused before repeat-pairing policy.
+    uint32_t overflows = 0; ///< Actual store-write overflows refused without eviction.
+    uint32_t fullUnknown = 0; ///< Eligible full-store requests with no stored peer identity.
+};
+/// Volatile, aggregate link diagnostics; no peer identity or key material.
+struct BleLinkState {
+    uint32_t accepted = 0;
+    uint32_t failed = 0;
+    uint32_t disconnected = 0;
+    int32_t lastDisconnectReason = -1; ///< Native stack reason; -1 means no disconnect observed.
+    int32_t lastUpdateStatus = -1; ///< Native connection-update status; -1 means no update observed.
+    uint32_t missingPeerReads = 0; ///< State read reached the callback with no matching live peer.
+    uint32_t unsupportedAccess = 0; ///< Unexpected operation reached the control-characteristic callback.
+    uint8_t activeConnections = 0; ///< Current link count, without peer identities.
+};
+/// Whether this target has a compiled BLE peripheral.
+bool bleControlAvailable() MM_NONBLOCKING;
+/// Start the radio with the advertised name and public identity.
+bool bleControlStart(BleControlHandle& handle, const char* name, const char* identity);
+/// Start the same host with optional standard Battery Service instances, declared before discovery.
+bool bleControlStart(BleControlHandle& handle, const char* name, const char* identity, const BleBatteryConfig& batteries);
+/// Copy the random service-start epoch; tree preparation and central reconnection keep it unchanged.
+bool bleControlEpoch(const BleControlHandle& handle, std::array<uint8_t, 16>& epoch);
+/// Replace the BAS callback snapshots; unknown values are never encoded as an empty battery.
+bool bleControlPublishBattery(BleControlHandle& handle, const BleBatterySnapshot& batteries) MM_NONBLOCKING;
+/// Stop the host before releasing its callback storage; failure retains the handle for a retry.
+bool bleControlStop(BleControlHandle& handle);
+/// Transfer a failed-stop host to platform ownership when its service is destroyed.
+/// A later start may retry the stop; this does not claim that the radio is off.
+void bleControlAbandon(BleControlHandle& handle);
+/// Take one complete, newline-delimited request; zero when empty or contended leaves generation unchanged.
+size_t bleControlReceive(BleControlHandle& handle, char* out, size_t capacity, uint64_t& generation) MM_NONBLOCKING;
+/// Snapshot active connection generations; false means unavailable or contended, not an empty set.
+bool bleControlOwners(BleControlHandle& handle, uint64_t* out, size_t capacity, size_t& count) MM_NONBLOCKING;
+/// Replace the readable response; an eight-byte notification carries revision and uptime.
+bool bleControlPublish(BleControlHandle& handle, const char* response, uint32_t revision, uint64_t generation) MM_NONBLOCKING;
+/// Coalesced public hints; only the host task updates the scan-response payload.
+bool bleControlPublishAdvertisement(BleControlHandle& handle, const std::array<uint8_t, 13>& bytes) MM_NONBLOCKING;
+/// Whether the peripheral has an active central connection.
+bool bleControlConnected(const BleControlHandle& handle) MM_NONBLOCKING;
+/// Copy native pairing counters; false when this target has no running host.
+bool bleControlPairingState(const BleControlHandle& handle, BlePairingState& state) MM_NONBLOCKING;
+/// Snapshot link counters for the current radio lifetime, without peer addresses.
+bool bleControlLinkState(const BleControlHandle& handle, BleLinkState& state) MM_NONBLOCKING;
+/// Authorize one peer-bond replacement during the next three minutes; no keys are deleted here.
+bool bleControlAllowRepair(BleControlHandle& handle) MM_NONBLOCKING;
 
 /// One UDP socket: the wire every light protocol sends and receives on.
 class UdpSocket {
@@ -1080,8 +1173,23 @@ bool rmtWs2812SetBitTiming(RmtWs2812Handle& h, uint32_t sym0, uint32_t sym1);
 /// Block until this channel's transmit completes; false on timeout, the frame still clocking out.
 bool rmtWs2812Wait(RmtWs2812Handle& h, uint32_t timeoutMs);
 
+/// Host test seam: force RMT start or wait failures without touching hardware.
+void setTestRmtFailures(bool startFails, bool waitFails);
+/// Host test seam: fail the start on one pin; -1 restores normal behavior.
+void setTestRmtFailurePin(int pin);
+/// Host test seam: count accepted RMT transmissions.
+void resetTestRmtTransmitCount();
+uint32_t testRmtTransmitCount();
+
 /// Release the channel.
 void rmtWs2812Deinit(RmtWs2812Handle& h);
+
+/// Detach only after transmission drains. On failure retain the handle for
+/// retry; success does not prove the external DIN voltage.
+bool rmtWs2812DetachChecked(RmtWs2812Handle& h);
+
+/// Host test seam: refuse a checked detach without releasing the handle.
+void setTestRmtDetachFailure(bool fail);
 
 /// Capture up to `maxSymbols` pulse durations on `gpio`, for the loopback self-test alone.
 size_t rmtWs2812RxCapture(uint8_t gpio, uint32_t resolutionHz,
@@ -1433,6 +1541,16 @@ size_t i2cScan(uint8_t* out, size_t maxOut);
 /// Make a scan of the open bus find these addresses, as the chips on a board would answer.
 void setTestI2cDevices(const uint8_t* addrs, size_t n);
 
+/// An owned I²C bus and one addressed device, used outside the render tick.
+struct I2cDeviceHandle { void* bus = nullptr; void* device = nullptr; };
+bool i2cDeviceInit(I2cDeviceHandle& handle, uint8_t busIndex, uint16_t sda,
+                   uint16_t scl, uint8_t address, uint32_t frequencyHz);
+bool i2cDeviceWrite(I2cDeviceHandle& handle, const uint8_t* bytes, size_t count,
+                    uint32_t timeoutMs);
+bool i2cDeviceRead(I2cDeviceHandle& handle, uint8_t* bytes, size_t count,
+                   uint32_t timeoutMs);
+void i2cDeviceDeinit(I2cDeviceHandle& handle);
+
 // --- GPIO as a role: read a switch or drive a line, the module owning debouncing ---------------
 
 /// The internal pull to enable on an input; a mechanical switch needs one, a driven pin does not.
@@ -1447,18 +1565,24 @@ bool gpioRead(uint8_t gpio);
 /// Drive one GPIO as a push-pull output, configuring it on first use; false where it has no driver.
 bool gpioWrite(uint8_t gpio, bool high);
 
+/// Set the output latch before enabling output. The caller must first detach
+/// any peripheral from this pin; this does not prove the external wire level.
+bool gpioPreloadOutput(uint8_t gpio, bool high);
+/// Low-level convenience for an explicitly owned, detached output.
+bool gpioPreloadLowOutput(uint8_t gpio);
+
 /// Make gpioRead answer `level` for one pin.
 void setTestGpioLevel(uint8_t gpio, bool level);
 /// Drop every injected level.
 void clearTestGpioLevel();
 
-/// Read one ADC pin as a raw count; false where the chip has no ADC there or the read failed.
+/// Read one ADC pin as a raw count; false on an unsupported pin, contention or read failure, leaving the output unchanged.
 bool adcRead(uint8_t gpio, uint16_t& raw);
 
 /// The full-scale count `adcRead` reports here, so a caller scales without knowing the chip.
 uint16_t adcMaxCount();
 
-/// Read one ADC pin as millivolts; false where `adcRead` would fail, or the chip carries no calibration.
+/// Read one ADC pin as millivolts; false where `adcRead` would fail, or calibration is unavailable, leaving the output unchanged.
 bool adcReadMv(uint8_t gpio, uint16_t& mv);
 
 /// Make adcReadMv answer `mv` for one pin.

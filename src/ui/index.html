@@ -4,13 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MoonLight</title>
-    <link rel="icon" type="image/png" href="/momo.png">
+    <link id="favicon" rel="icon" href="data:,">
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="helio-style.css">
 </head>
 <body data-theme="dark">
     <header id="status-bar">
         <button type="button" id="nav-toggle" class="header-btn" aria-label="Toggle navigation" title="Toggle navigation">☰</button>
-        <img id="brand-logo" src="/momo.png" alt="MoonLight">
+        <img id="brand-logo" alt="MoonLight" hidden>
         <span class="brand">MoonLight</span>
         <span id="device-name"></span>
         <span id="sys-stats"></span>
@@ -66,9 +67,6 @@
             <button type="button" id="preview-show" class="preview-show" aria-label="Show preview" title="Show preview" hidden>◳ preview</button>
         </div>
     </div>
-    <!-- Prism, vendored: it paints the script editor. Loaded before app.js and not as a module,
-         because it publishes a global the editor reads. -->
-    <script src="prism.js"></script>
-    <script type="module" src="app.js"></script>
+    <script type="module" src="helio-bootstrap.js"></script>
 </body>
 </html>

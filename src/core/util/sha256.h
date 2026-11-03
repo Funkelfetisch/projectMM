@@ -15,14 +15,11 @@
 ///
 /// ## What it is not
 ///
-/// The one use today is the MoonStats installation id.
-/// This is no general-purpose crypto layer: no HMAC, no streaming over a socket, no constant-time comparison.
-/// Nothing here needs them, and an unused primitive is a maintenance cost with no user.
+/// This is no general-purpose crypto layer: no HMAC, authentication or constant-time comparison.
 ///
-/// ## Why one shot and why truncation is safe
+/// ## Incremental hashing and truncation
 ///
-/// `sha256` takes a whole buffer instead of the usual init, update and final trio.
-/// Every caller hashes a short buffer already in memory, so the streaming form would be three functions nobody calls with more than one update.
+/// Firmware images may be larger than available RAM; the incremental form keeps one partial block.
 ///
 /// `sha256Hex` truncates, which is the standard way to derive a shorter identifier (NIST SP 800-107 section 5.1).
 /// At the default of 16 bytes it leaves 128 bits, far past any collision concern for a population of LED controllers.
@@ -34,6 +31,21 @@ namespace mm {
 
 /// Digest length in bytes.
 inline constexpr size_t kSha256DigestSize = 32;
+
+/// Incremental SHA-256; digest does not consume the running state.
+class Sha256 {
+public:
+    /// Reject a null nonempty chunk or a message too large for the FIPS bit-length field.
+    bool update(const void* data, size_t len);
+    /// Write the digest to a 32-byte buffer; subsequent updates remain possible.
+    void digest(uint8_t out[kSha256DigestSize]) const;
+private:
+    uint32_t state_[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                          0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    uint8_t tail_[64] = {};
+    uint64_t bytes_ = 0;
+    size_t held_ = 0;
+};
 
 /// Hash `len` bytes at `data` into `out`, which must hold 32 bytes.
 void sha256(const void* data, size_t len, uint8_t out[kSha256DigestSize]);

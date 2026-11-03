@@ -136,6 +136,7 @@ bool stageFill(Image& img) {
 }  // namespace
 
 // One board, one image: the writer is the static above, so a second begin restarts it.
+bool otaBusy() { return false; }
 bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut) {
     if (!statusBuf || statusBufLen == 0 || !bytesOut) return false;
     // One image and no recovery image beside it.
@@ -183,6 +184,8 @@ bool otaEnd(OtaWrite& w, bool commit) {
     return true;
 }
 
+bool otaAbortApp(OtaWrite& w) { otaEnd(w, false); return false; }
+
 // GitHub serves release assets over HTTPS only, which this board cannot speak.
 bool http_fetch_to_ota(const char*, char* statusBuf, size_t statusBufLen, uint32_t* bytesReadOut, uint32_t* bytesTotalOut, const char*) {
     if (statusBuf && statusBufLen) std::snprintf(statusBuf, statusBufLen, "error: no TLS on this board, upload the .bin instead");
@@ -196,6 +199,7 @@ bool otaFetchMoonBaseUrl(const char*, char* statusBuf, size_t statusBufLen, uint
     return http_fetch_to_ota(nullptr, statusBuf, statusBufLen, bytesReadOut, bytesTotalOut, nullptr);
 }
 bool moonbaseStageInstallUrl(const char*) { return false; }
+size_t otaNextAppCapacity() { return 0; }
 bool otaHasMoonBase() { return false; }
 bool otaBootMoonBase() { return false; }
 bool otaRunningMoonBase() { return false; }

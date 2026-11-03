@@ -2,12 +2,21 @@
 
 #include "doctest.h"
 #include "core/util/noise.h"
+#include "light/effects/WledFastNoise.h"
 
 #include <cmath>   // std::abs on doubles: GCC does not get it transitively
 
 #include <set>
 
 using namespace mm;
+
+TEST_CASE("wearable FastLED 2D noise retains archived reference values") {
+    CHECK(WledFastNoise::sample(0, 19334) == 64);
+    CHECK(WledFastNoise::sample(1, 19334) == 64);
+    CHECK(WledFastNoise::sample(255, 19334) == 126);
+    CHECK(WledFastNoise::sample(256, 19334) == 126);
+    CHECK(WledFastNoise::sample(31108, 19334) == 255);
+}
 
 // Determinism: the same coordinate always gives the same value (a pure function of position), so a field is reproducible frame to frame and across the 2D/3D entry points at z = 0.
 TEST_CASE("noise: inoise8 is deterministic and the lower-D calls agree at zero on the extra axes") {

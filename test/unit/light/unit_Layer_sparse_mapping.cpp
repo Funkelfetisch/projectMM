@@ -4,11 +4,22 @@
 #include "light/layers/Layer.h"
 #include "light/layouts/Layouts.h"
 #include "light/layouts/GridLayout.h"
+#include "light/layouts/PixelMapLayout.h"
 #include "light/layouts/GridBlacksLayout.h"
+#include "light/layouts/RingLayout.h"
 #include "light/layouts/SphereLayout.h"
+#include "light/drivers/DriverBase.h"
+#include "light/drivers/Drivers.h"
+#include "light/layers/BlendMap.h"
 #include "light/effects/RainbowEffect.h"
 #include "light/modifiers/MultiplyModifier.h"
 #include "light/modifiers/RegionModifier.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 // The driver/output buffer must hold ONLY the real lights, never the dense bounding box. A sphere defines a 9x9x9 (=729) render grid but only 210 shell lights; the MappingLUT extracts those 210 into the driver buffer (what ArtNet and the preview consume). These tests pin:
 //  - sparse layout (sphere) builds a LUT whose destinations are driver indices
@@ -32,6 +43,74 @@ struct LayerRig {
         layer.applyState();
     }
 };
+
+struct MappingAllocationPressure {
+    ~MappingAllocationPressure() {
+        mm::platform::setTestHeapCapacity(0);
+        mm::platform::setTestFreeHeap(0);
+        mm::platform::setTestFreeInternalHeap(0);
+        mm::platform::setTestAllocRefusedFrom(0);
+        mm::platform::setTestMaxAllocBlock(0);
+    }
+};
+
+class SparseFrameDriver : public mm::DriverBase {
+public:
+    void setSourceBuffer(mm::Buffer* buffer) override { source = buffer; }
+    void tick() MM_NONBLOCKING override {
+        frame.fill(229);
+        frameBytes = source ? source->bytes() : 0;
+        if (source && source->data())
+            std::memcpy(frame.data(), source->data(), std::min(frame.size(), frameBytes));
+    }
+    mm::Buffer* source = nullptr;
+    std::array<uint8_t, 888> frame{};
+    size_t frameBytes = 0;
+};
+
+std::array<uint8_t, 4> mappingPattern(mm::nrOfLightsType cell) {
+    return {static_cast<uint8_t>(cell), static_cast<uint8_t>(cell >> 8), 173, 61};
+}
+
+void checkMappedOutput(mm::Layer& layer, mm::Buffer& output, const std::vector<int32_t>& sourceCells) {
+    REQUIRE(layer.buffer().data() != nullptr);
+    REQUIRE(layer.lut().hasLUT());
+    REQUIRE(layer.buffer().channelsPerLight() == 4);
+    REQUIRE(output.count() == sourceCells.size());
+    for (mm::nrOfLightsType cell = 0; cell < layer.buffer().count(); ++cell) {
+        const auto value = mappingPattern(cell);
+        std::copy(value.begin(), value.end(), layer.buffer().data() + static_cast<size_t>(cell) * 4);
+    }
+    std::fill(output.span().begin(), output.span().end(), uint8_t{229});
+    mm::blendMap(layer.buffer(), output, layer.lut(), 4);
+    for (size_t physical = 0; physical < sourceCells.size(); ++physical) {
+        const auto expected = sourceCells[physical] < 0 ? std::array<uint8_t, 4>{}
+            : mappingPattern(static_cast<mm::nrOfLightsType>(sourceCells[physical]));
+        for (size_t channel = 0; channel < expected.size(); ++channel) {
+            CAPTURE(physical);
+            CAPTURE(channel);
+            CAPTURE(sourceCells[physical]);
+            CHECK(output.data()[physical * 4 + channel] == expected[channel]);
+        }
+    }
+}
+
+std::vector<int32_t> ringSourceCells(const mm::Layouts& layouts, const mm::Layer& layer) {
+    struct Coordinates {
+        std::vector<int32_t> sources;
+        const mm::Layer& layer;
+    } coordinates{std::vector<int32_t>(layouts.totalLightCount(), -1), layer};
+    layouts.placeLights(mm::CoordSink{[](void* context, mm::nrOfLightsType physical,
+                                        mm::lengthType x, mm::lengthType y, mm::lengthType z) {
+        auto& result = *static_cast<Coordinates*>(context);
+        const auto& raster = result.layer;
+        const int32_t sx = static_cast<int32_t>(x) * raster.width() / raster.physicalWidth();
+        const int32_t sy = static_cast<int32_t>(y) * raster.height() / raster.physicalHeight();
+        const int32_t sz = static_cast<int32_t>(z) * raster.depth() / raster.physicalDepth();
+        result.sources[physical] = (sz * raster.height() + sy) * raster.width() + sx;
+    }, nullptr, &coordinates});
+    return coordinates.sources;
+}
 
 } // namespace
 
@@ -278,4 +357,237 @@ TEST_CASE("Layer: an all-black GridBlacks builds an empty LUT without crashing")
     for (mm::nrOfLightsType li = 0; li < lut.logicalCount(); li++)
         lut.forEachDestination(li, [&](mm::nrOfLightsType) { total++; });
     CHECK(total == 0);                              // no cell reaches a light — the whole grid is dark
+}
+
+TEST_CASE("Layer: sparse allocation pressure reduces the raster while retaining every ring destination") {
+    MappingAllocationPressure pressure;
+    mm::RingLayout ring;
+    ring.nrOfLEDs = 222;
+    ring.radius = 24;
+    LayerRig rig(&ring, 4);
+    mm::Buffer output;
+    REQUIRE(output.allocate(222, 4));
+    const auto fullCount = rig.layer.buffer().count();
+    REQUIRE(fullCount > 222);
+    checkMappedOutput(rig.layer, output, ringSourceCells(rig.group, rig.layer));
+
+    // The full CSR offsets refuse; a smaller raster and all 222 destinations still fit.
+    ring.setEnabled(false);
+    rig.layer.applyState();
+    ring.setEnabled(true);
+    mm::platform::setTestAllocRefusedFrom((static_cast<size_t>(fullCount) / 2 + 1) * sizeof(mm::nrOfLightsType));
+    rig.layer.applyState();
+    REQUIRE(rig.layer.buffer().count() > 0);
+    CHECK(rig.layer.buffer().count() < fullCount);
+    CHECK(rig.layer.lut().hasLUT());
+    CHECK(rig.layer.lut().destinationCount() == 222);
+    checkMappedOutput(rig.layer, output, ringSourceCells(rig.group, rig.layer));
+
+    mm::platform::setTestAllocRefusedFrom(0);
+    rig.layer.applyState();
+    CHECK(rig.layer.buffer().count() == fullCount);
+    CHECK(rig.layer.lut().destinationCount() == 222);
+    checkMappedOutput(rig.layer, output, ringSourceCells(rig.group, rig.layer));
+}
+
+TEST_CASE("Layer: crop-top 2D map renders to each actual output position") {
+    mm::PixelMapLayout layout;
+    std::strcpy(layout.points, "1,8;12,8;10,3;16,2;4,0;5,8;13,4;16,8;8,4");
+    LayerRig rig(&layout, 4);
+    REQUIRE(rig.layer.width() == 17); REQUIRE(rig.layer.height() == 9);
+    REQUIRE(rig.layer.physicalLightCount() == 9);
+    mm::Buffer output; REQUIRE(output.allocate(9, 4));
+    checkMappedOutput(rig.layer, output, {137, 148, 61, 50, 4, 141, 81, 152, 76});
+
+    // Two output slots at one point each receive that point's value.
+    std::strcpy(layout.points, "1,8;1,8;8,4");
+    rig.layer.applyState();
+    REQUIRE(output.allocate(3, 4));
+    checkMappedOutput(rig.layer, output, {73, 73, 44});
+}
+
+TEST_CASE("Layer: reduced mapping retains a crop and dark gaps on a serpentine layout") {
+    MappingAllocationPressure pressure;
+    mm::GridBlacksLayout grid;
+    grid.width = 64;
+    grid.height = 32;
+    grid.depth = 1;
+    grid.serpentine = true;
+    grid.blackStart = 24;
+    grid.blackCount = 8;
+    mm::Layouts layouts;
+    layouts.addChild(&grid);
+    mm::Layer layer;
+    layer.setLayouts(&layouts);
+    layer.setChannelsPerLight(4);
+    mm::RegionModifier crop;
+    crop.startX = 25;
+    crop.endX = 75;
+    layer.addChild(&crop);
+    layer.defineControls();
+    layer.applyState();
+    REQUIRE(layer.width() == 32);
+    REQUIRE(layer.height() == 32);
+    const auto fullCount = layer.buffer().count();
+    mm::Buffer output;
+    REQUIRE(output.allocate(2048, 4));
+
+    grid.setEnabled(false);
+    layer.applyState();
+    grid.setEnabled(true);
+    mm::platform::setTestAllocRefusedFrom((static_cast<size_t>(fullCount) + 1) * sizeof(mm::nrOfLightsType));
+    layer.applyState();
+    REQUIRE(layer.buffer().count() > 0);
+    CHECK(layer.buffer().count() < fullCount);
+    CHECK(layer.lut().hasLUT());
+    CHECK(layer.lut().destinationCount() == 24 * 32);
+    std::vector<int32_t> expected(2048, -1);
+    for (int32_t row = 0; row < 32; ++row) {
+        for (int32_t column = 16; column < 48; ++column) {
+            if (column >= 24 && column < 32) continue;
+            const int32_t physical = row * 64 + ((row & 1) ? 63 - column : column);
+            const int32_t x = (column - 16) * layer.width() / 32;
+            const int32_t y = row * layer.height() / 32;
+            expected[physical] = y * layer.width() + x;
+        }
+    }
+    checkMappedOutput(layer, output, expected);
+}
+
+TEST_CASE("Layer: complete sparse mapping exhaustion releases stale source data and recovers") {
+    MappingAllocationPressure pressure;
+    mm::RingLayout ring;
+    ring.nrOfLEDs = 222;
+    ring.radius = 24;
+    LayerRig rig(&ring, 4);
+    mm::Buffer output;
+    REQUIRE(output.allocate(222, 4));
+    const auto fullCount = rig.layer.buffer().count();
+    checkMappedOutput(rig.layer, output, ringSourceCells(rig.group, rig.layer));
+
+    ring.radius = 25;
+    mm::platform::setTestAllocRefusedFrom(1);
+    rig.layer.applyState();
+    CHECK(rig.layer.buffer().data() == nullptr);
+    CHECK(rig.layer.buffer().count() == 0);
+    CHECK(rig.layer.lut().destinationCount() == 0);
+    CHECK(rig.layer.lut().logicalCount() == 0);
+    CHECK(rig.layer.dynamicBytes() == 0);
+    CHECK(rig.layer.severity() == mm::MoonModule::Severity::Error);
+
+    mm::platform::setTestAllocRefusedFrom(0);
+    ring.radius = 24;
+    rig.layer.applyState();
+    CHECK(rig.layer.buffer().count() == fullCount);
+    checkMappedOutput(rig.layer, output, ringSourceCells(rig.group, rig.layer));
+}
+
+TEST_CASE("Layer: exhausted mapping sends a full black physical frame through Drivers and then recovers") {
+    MappingAllocationPressure pressure;
+    mm::RingLayout ring;
+    ring.nrOfLEDs = 222;
+    ring.radius = 24;
+    LayerRig rig(&ring, 4);
+    mm::Drivers drivers;
+    drivers.multicore = false;
+    drivers.on = true;
+    drivers.brightness = 255;
+    drivers.setLayer(&rig.layer);
+    SparseFrameDriver sink;
+    drivers.addChild(&sink);
+    struct Cleanup {
+        mm::Drivers& drivers;
+        SparseFrameDriver& sink;
+        ~Cleanup() { drivers.release(); drivers.removeChild(&sink); drivers.setLayer(nullptr); }
+    } cleanup{drivers, sink};
+    drivers.defineControls();
+    drivers.setup();
+    drivers.prepare();
+    mm::Buffer expected;
+    REQUIRE(expected.allocate(222, 4));
+    checkMappedOutput(rig.layer, expected, ringSourceCells(rig.group, rig.layer));
+    drivers.tick();
+    REQUIRE(sink.frameBytes == 888);
+    CHECK(std::equal(sink.frame.begin(), sink.frame.end(), expected.data()));
+    REQUIRE(sink.source != nullptr);
+    CHECK(sink.source != &rig.layer.buffer());
+
+    ring.radius = 25;
+    mm::platform::setTestAllocRefusedFrom(1);
+    rig.layer.applyState();
+    REQUIRE(rig.layer.buffer().data() == nullptr);
+    REQUIRE(rig.layer.buffer().count() == 0);
+    mm::platform::setTestAllocRefusedFrom(0);
+    drivers.onTreePrepared();
+    drivers.prepare();
+    drivers.tick();
+    REQUIRE(sink.source != nullptr);
+    REQUIRE(sink.source->data() != nullptr);
+    CHECK(sink.source != &rig.layer.buffer());
+    CHECK(sink.frameBytes == 888);
+    CHECK(std::all_of(sink.frame.begin(), sink.frame.end(), [](uint8_t value) { return value == 0; }));
+
+    ring.radius = 24;
+    rig.layer.applyState();
+    drivers.onTreePrepared();
+    drivers.prepare();
+    checkMappedOutput(rig.layer, expected, ringSourceCells(rig.group, rig.layer));
+    drivers.tick();
+    CHECK(sink.frameBytes == 888);
+    CHECK(std::equal(sink.frame.begin(), sink.frame.end(), expected.data()));
+}
+
+TEST_CASE("Layer: a reduced admitted ring remaps changed geometry without allocating below reserve") {
+    MappingAllocationPressure pressure;
+    mm::RingLayout ring;
+    ring.nrOfLEDs = 222;
+    ring.radius = 24;
+    mm::Layouts layouts;
+    layouts.addChild(&ring);
+    mm::Layer layer;
+    layer.setLayouts(&layouts);
+    layer.setChannelsPerLight(4);
+    layer.defineControls();
+    mm::Buffer output;
+    REQUIRE(output.allocate(222, 4));
+    mm::platform::setTestMaxAllocBlock(1024 * 1024);
+    mm::platform::setTestHeapCapacity(mm::platform::allocatedBytes() + mm::platform::HEAP_RESERVE + 6000);
+    layer.applyState();
+    REQUIRE(layer.buffer().data() != nullptr);
+    REQUIRE(layer.buffer().count() > 0);
+    REQUIRE(layer.buffer().count() < static_cast<size_t>(layer.physicalWidth()) * static_cast<size_t>(layer.physicalHeight()));
+    REQUIRE(layer.lut().logicalCount() == layer.buffer().count());
+    const auto originalSources = ringSourceCells(layouts, layer);
+    checkMappedOutput(layer, output, originalSources);
+    const auto* const admitted = layer.buffer().data();
+    const auto admittedCount = layer.buffer().count();
+    const auto admittedBytes = layer.dynamicBytes();
+    const auto physicalWidth = layer.physicalWidth();
+    const auto physicalHeight = layer.physicalHeight();
+    const size_t allocated = mm::platform::allocatedBytes();
+    const uint32_t blocks = mm::platform::allocatedCount();
+
+    mm::platform::setTestHeapCapacity(0);
+    mm::platform::setTestFreeHeap(mm::platform::HEAP_RESERVE - 1);
+    mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE - 1);
+    mm::platform::setTestAllocRefusedFrom(1);
+    layer.applyState();
+    CHECK(layer.buffer().data() == admitted);
+    CHECK(layer.buffer().count() == admittedCount);
+    checkMappedOutput(layer, output, originalSources);
+
+    ring.angleFirst = 180;
+    layer.applyState();
+    REQUIRE(layer.physicalWidth() == physicalWidth);
+    REQUIRE(layer.physicalHeight() == physicalHeight);
+    CHECK(layer.buffer().data() == admitted);
+    CHECK(layer.buffer().count() == admittedCount);
+    CHECK(layer.dynamicBytes() == admittedBytes);
+    CHECK(layer.lut().logicalCount() == admittedCount);
+    CHECK(layer.lut().destinationCount() == 222);
+    const auto changedSources = ringSourceCells(layouts, layer);
+    CHECK(changedSources != originalSources);
+    checkMappedOutput(layer, output, changedSources);
+    CHECK(mm::platform::allocatedBytes() == allocated);
+    CHECK(mm::platform::allocatedCount() == blocks);
 }

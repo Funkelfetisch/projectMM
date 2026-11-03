@@ -1,10 +1,20 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <cstdlib>  // std::strtol
 #include "core/module/Control.h"  // MM_MAX_GPIO — the build-injected per-chip GPIO ceiling
 
 namespace mm {
+
+/// Driver-style text lists use names ending in "pins", regardless of case.
+inline bool isPinListControl(const char* name) {
+    if (!name) return false;
+    size_t n = 0; while (name[n]) ++n;
+    auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; };
+    return n >= 4 && lower(name[n-4]) == 'p' && lower(name[n-3]) == 'i' &&
+           lower(name[n-2]) == 'n' && lower(name[n-1]) == 's';
+}
 
 /// One text control such as `18,17,16` turned into the pins a driver claims.
 ///

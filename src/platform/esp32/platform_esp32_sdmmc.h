@@ -21,7 +21,7 @@ int64_t sdCardSize(const char* apiPath);
 /// Write a whole file atomically onto the card, through a temporary and a rename.
 bool sdCardWriteAtomic(const char* apiPath, const char* data, size_t len);
 /// List one level of a card directory, calling `cb` per child.
-void sdCardList(const char* apiDir, FsListCb cb, void* user);
+void sdCardList(const char* apiDir, FsListCb cb, void* user, FsListMode mode);
 
 /// Open `apiPath` for streamed reads from the card; false when it does not exist or is a directory.
 bool sdCardReadStreamOpen(void*& handle, const char* apiPath);

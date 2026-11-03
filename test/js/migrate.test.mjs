@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { applyMigrations, CONTROL_RENAMES } from "../../src/ui/migrate.js";
+import { applyMigrations, CONTROL_RENAMES, restoreBundle } from "../../src/ui/migrate.js";
 
 test("a user preset that shares a renamed filename is the user's, not migrated", () => {
     const { files, report } = applyMigrations({ "/.config/presets/Layers.json": '{"x":1}' });
@@ -117,6 +117,42 @@ test("renamed config files land under their new names, reported", () => {
     assert.equal(rootOf(files, "/.config/Layouts.json").enabled, false);   // values survive the rename
     assert.ok(report.some(r => r.kind === "renamed" && r.detail.includes("Effects.json")));
 });
+
+const conflictingLayerFiles = [
+    ["/.config/Layers.json", JSON.stringify({ enabled: true, "0.type": "Layer", "0.opacity": 71 })],
+    ["/.config/Effects.json", JSON.stringify({ Effects: { $patch: "replace", enabled: true,
+        Saved: { type: "Layer", opacity: 193 } } })],
+];
+
+for (const oldFirst of [true, false]) {
+    const order = oldFirst ? "legacy first" : "modern first";
+    test(`config filename collision rejects the legacy flat and modern document pair (${order})`, () => {
+        const entries = oldFirst ? [...conflictingLayerFiles] : [...conflictingLayerFiles].reverse();
+        const input = Object.freeze(Object.fromEntries(entries));
+        assert.throws(() => applyMigrations(input), error => {
+            assert.match(error.message, /both restore to \/\.config\/Effects\.json/);
+            assert.ok(error.message.includes("/.config/Layers.json"));
+            assert.match(error.message, /review the conflicting files before restoring/);
+            return true;
+        });
+        assert.deepEqual(Object.entries(input), entries);
+    });
+
+    test(`restore refuses a filename collision before any mutating request (${order})`, async () => {
+        const entries = oldFirst ? [...conflictingLayerFiles] : [...conflictingLayerFiles].reverse();
+        const files = Object.freeze(Object.fromEntries(entries));
+        const bundle = Object.freeze({ format: "MoonLight-config-backup", version: 1, files });
+        const calls = [];
+        const fetch = async (path, options = {}) => {
+            calls.push({ path, method: options.method || "GET" });
+            return { ok: true, status: 200, json: async () => ({ modules: [] }) };
+        };
+        await assert.rejects(restoreBundle(bundle, fetch), /both restore to \/\.config\/Effects\.json/);
+        assert.deepEqual(calls.filter(call => call.method !== "GET"), []);
+        assert.ok(calls.every(call => call.path === "/api/state"));
+        assert.deepEqual(Object.entries(bundle.files), entries);
+    });
+}
 
 test("renamed module types map in place, including nested children", () => {
     const cfg = { enabled: true, "0.type": "Layers", "0.0.type": "ParlioLedDriver", "0.0.enabled": true };

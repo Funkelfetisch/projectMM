@@ -17,7 +17,8 @@ public:
     /// How many axes this layout places lights on.
     Dim dimensions() const override { return Dim::D2; }
     /// How many lights go around the ring.
-    uint8_t  nrOfLEDs   = 24;
+    uint16_t nrOfLEDs   = 24;
+    uint16_t radius = 0;  ///< explicit radius, or zero for spacing derived from the light count
     /// The angle the first light sits at, in degrees.
     uint16_t angleFirst = 0;
     /// The arc spanned in degrees, less than a full turn a partial ring.
@@ -33,7 +34,8 @@ public:
 
     /// The controls a user sets on the card.
     void defineControls() override {
-        controls_.addControl("nrOfLEDs",    nrOfLEDs,   1, 255);
+        controls_.addControl("nrOfLEDs",    nrOfLEDs,   1, 1000);
+        controls_.addControl("radius", radius, 0, 512);
         controls_.addControl("angleFirst", angleFirst, 0, 359);
         controls_.addControl("rotation",   rotation,   0, 360);
         controls_.addControl("clockwise",    clockwise);
@@ -57,7 +59,7 @@ public:
     }
 
     /// The radius that spaces n lights one unit apart around a circle, n / 2π.
-    static float radius(uint8_t n) { return static_cast<float>(n) / kTwoPi; }
+    static float getRadius(uint16_t n) { return static_cast<float>(n) / kTwoPi; }
 
 private:
     static constexpr float kPi = std::numbers::pi_v<float>;
@@ -67,7 +69,7 @@ private:
     void walk(LightEmitter& e) const {
         // A zero count, reachable by writing the control directly, emits nothing and divides by nothing.
         if (nrOfLEDs == 0) return;
-        const float r = radius(nrOfLEDs);
+        const float r = radius ? static_cast<float>(radius) : getRadius(nrOfLEDs);
         // About 1.1 radii out on both axes by default, so the whole ring lands in the positive quadrant.
         const lengthType cx = centerX ? centerX : static_cast<lengthType>(1.1f * r);
         const lengthType cy = centerY ? centerY : static_cast<lengthType>(1.1f * r);

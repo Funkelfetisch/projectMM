@@ -12,6 +12,7 @@
 #include "platform/platform.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <cstring>  // std::memcpy in extrude()
 
 namespace mm {
@@ -29,7 +30,7 @@ namespace mm {
 ///
 /// ## The status line
 ///
-/// The status shows the logical box the effects render into. A mirror modifier folds a 128 by 128 layout into a 64 by 64 box. A warning replaces it when the layer does not fit in memory.
+/// The status shows the logical box the effects render into. A mirror modifier folds a 128 by 128 layout into a 64 by 64 box. A memory warning includes the reduced rendering dimensions.
 ///
 /// @technical
 ///
@@ -89,9 +90,14 @@ public:
     /// Set channels per light: 3 for RGB, 4 for RGBW, more for a fixture profile; zero is rejected so every effect can assume cpl >= 1.
     void setChannelsPerLight(uint8_t cpl) { if (cpl > 0) channelsPerLight_ = cpl; }
 
-    /// Set where this layer's fixtures keep their motion channels; every offset is absent by default, so setPan() is a no-op on a plain LED strip.
-    void setFixtureChannels(const FixtureChannels& fc) { fixture_ = fc; }
-    /// Where this layer's fixtures keep their motion channels.
+    /// Keep a product's control-plane working space free when admitting render allocations.
+    void setWorkingMemoryReserve(size_t bytes) {
+        workingMemoryReserve_ = bytes < platform::HEAP_RESERVE ? platform::HEAP_RESERVE : bytes;
+    }
+
+    /// Set the color count and motion slots; return whether the layer needs a wider buffer on its next prepare.
+    bool setFixtureChannels(const FixtureChannels& fc) { fixture_ = fc; return requiredChannels() > channelsPerLight_; }
+    /// The color count and motion slots this layer's fixtures need.
     const FixtureChannels& fixtureChannels() const { return fixture_; }
 
     /// Cold path: size the box from the layouts, build the mapping, and clear the buffer.
@@ -99,6 +105,7 @@ public:
         // Restart discards the elapsed gap, so the first tick after a re-prepare cannot jump a trail.
         fadeTime_.reset();
         fadeCarry_ = 0;
+        lastEnabledEffectSignature_ = 0;
         // No layouts wired reads the same as every layout disabled: the layer ends up empty.
         const nrOfLightsType physicalCount = layouts_ ? layouts_->totalLightCount() : 0;
 
@@ -109,8 +116,7 @@ public:
             lut_.free();
             buffer_.free();
             setDynamicBytes(0);
-            // Clear the status string AND the flag: a stale flag reports a LUT already freed.
-            lutSkipped_ = false;
+            preparedEffectSignature_ = 0;
             clearStatus();
             return;   // applyState() recurses to the effects next
         }
@@ -132,6 +138,7 @@ public:
         // One clear on the cold path, so a freshly added effect starts black rather than inheriting.
         buffer_.clear();
         ensureLiveScratch();   // size the live-pass snapshot here, on the cold path
+        preparedEffectSignature_ = enabledEffectSignature();
 
         // Only when rebuildLUT left the status clear: a degrade path's warning must win over this.
         if (status() == nullptr) {
@@ -149,6 +156,14 @@ public:
     void tick() MM_NONBLOCKING override {
         // Gated per child here because the layer iterates its own children, not through the Scheduler.
         elapsed_ = platform::millis();
+        const uint32_t effectSignature = enabledEffectSignature();
+        if (effectSignature != lastEnabledEffectSignature_ || effectSignature == 0) {
+            buffer_.clear();
+            bufferGen_++;
+            fadeBy_ = 0;
+            fadeCarry_ = 0;
+            lastEnabledEffectSignature_ = effectSignature;
+        }
         // Advance on every frame: a frozen clock spends a whole idle gap at once and wipes the trail.
         const uint32_t frameScale = fadeTime_.advance(elapsed_);
         if (fadeBy_ > 0) {
@@ -347,12 +362,9 @@ public:
         }, [](void*, nrOfLightsType, lengthType, lengthType, lengthType) {}, &ctx});
     }
 
-    /// Whether a mapping was wanted but could not be built, so the layer degraded to identity.
-    bool lutSkipped() const { return lutSkipped_; }
-
     /// Fold the box through the static modifiers and build the mapping, on the cold path, once the physical dimensions are set.
     void rebuildLUT() {
-        lutSkipped_ = false;
+        const Coord3D admitted{width_, height_, depth_};
         clearStatus();  // re-evaluated below if a degrade path is taken
 
         // Each modifier stashes its output size, so the per-light fold reads the box at its stage.
@@ -374,30 +386,46 @@ public:
 
         const Coord3D phys{physicalWidth_, physicalHeight_, physicalDepth_};
         const nrOfLightsType boxCount    = cellCount(phys);
-        const nrOfLightsType logicalCount = cellCount(logical);
         const nrOfLightsType driverCount = physicalLightCount();   // == Layouts::totalLightCount()
         const bool dense = (driverCount == boxCount);
         // A gap fills a cell but must not receive its color, so the identity map is wrong here.
         const bool anyGap = layouts_ && layouts_->hasBlackPixels();
 
-        // The frame-rate floor for the common case: box cell i is driver light i. Keep it first.
-        if (staticCount_ == 0 && dense && !anyGap && isNaturalOrder()) {
-            lut_.setIdentity(boxCount);
-            allocateBuffer(boxCount);
+        // Strip-native scenes address the sparse layout's physical indices directly.
+        if (!dense && staticCount_ == 0 && effectsUsePhysicalLightOrder()) {
+            width_ = driverCount;
+            height_ = driverCount ? 1 : 0;
+            depth_ = driverCount ? 1 : 0;
+            reclaimUnadmittedWorkingSet(driverCount);
+            lut_.setIdentity(driverCount);
+            allocateMappedBuffer(driverCount, {width_, height_, depth_}, driverCount, true);
             return;
         }
 
-        // Each physical light contributes at most one destination, so driverCount is the ceiling.
-        if (!buildFoldedLUT(logical, logicalCount, driverCount)) {
-            // Degrade to identity rather than crashing, at the cost of lighting a gapped layout.
-            lutSkipped_ = true;
-            setStatus("modifier mapping skipped — not enough memory", Severity::Warning);
-            width_ = physicalWidth_; height_ = physicalHeight_; depth_ = physicalDepth_;
+        // The frame-rate floor for the common case: box cell i is driver light i. Keep it first.
+        if (staticCount_ == 0 && dense && !anyGap && isNaturalOrder()) {
+            reclaimUnadmittedWorkingSet(boxCount);
             lut_.setIdentity(boxCount);
-            allocateBuffer(boxCount);
+            allocateMappedBuffer(boxCount, phys, driverCount);
             return;
         }
-        allocateBuffer(logicalCount);
+
+        reclaimUnadmittedWorkingSet(cellCount(logical));
+        // Retain an admitted raster when growth cannot fit. The coordinates are
+        // still rebuilt, so angle, crop and modifier changes apply to reused storage.
+        const auto request = memoryRequest(static_cast<size_t>(cellCount(logical)) * channelsPerLight_);
+        const size_t tableBytes = MappingLUT::estimateBytes(cellCount(logical), driverCount);
+        const size_t growth = tableBytes > lut_.memoryUsed() ? tableBytes - lut_.memoryUsed() : 0;
+        if (buffer_.data() && lut_.hasLUT() && admitted.x > 0 && admitted.y > 0 && admitted.z > 0 &&
+            (growth > static_cast<size_t>(-1) - request.bytes ||
+             !canAllocate(request.bytes + growth, request.largestBlock))) {
+            width_ = admitted.x < logical.x ? admitted.x : logical.x;
+            height_ = admitted.y < logical.y ? admitted.y : logical.y;
+            depth_ = admitted.z < logical.z ? admitted.z : logical.z;
+            if (Coord3D{width_, height_, depth_} != logical) reducedStatus();
+        }
+        if (!ensureFoldedLUT(logical, driverCount)) return;
+        allocateMappedBuffer(cellCount({width_, height_, depth_}), logical, driverCount);
     }
 
     /// A box cell that is not a real light has no driver index.
@@ -420,48 +448,48 @@ public:
 
     /// Build the folded mapping in place as a compressed sparse row: count each cell's lights, turn the counts into runs, then place each light in its cell's run.
     bool buildFoldedLUT(const Coord3D& logical,
-                        nrOfLightsType logicalCount, nrOfLightsType driverCount) {
+                        nrOfLightsType logicalCount, nrOfLightsType driverCount, bool physicalOrder = false) {
         if (logicalCount == 0 || driverCount == 0) { lut_.setIdentity(0); return true; }
-        if (!lut_.beginBuild(logicalCount)) return false;
 
-        // One callback does both passes through the placeLights ctx, so it captures nothing.
-        struct FoldCtx {
-            Layer* self;   // for the dynamic child list (the modifier chain)
-            Coord3D logical; nrOfLightsType logicalCount;  // final box, for the flatten + guard
-            bool place;    // the second pass, which places what the first counted
-        } fctx{this, logical, logicalCount, /*place=*/false};
+        return lut_.build(logicalCount, driverCount, [&](auto emit) {
+            struct FoldCtx {
+                Layer* self;
+                Coord3D logical;
+                nrOfLightsType logicalCount;
+                bool physicalOrder;
+                decltype(emit)* visitor;
+            } fctx{this, logical, logicalCount, physicalOrder, &emit};
 
-        auto onCoord = [](void* c, nrOfLightsType driverIdx, lengthType x, lengthType y, lengthType z) {
-            auto* f = static_cast<FoldCtx*>(c);
-            Coord3D pos{x, y, z};
-            Layer* self = f->self;
-            for (uint8_t i = 0; i < self->childCount(); i++) {
-                if (self->child(i)->role() != ModuleRole::Modifier || !self->child(i)->enabled()) continue;
-                auto* m = static_cast<ModifierBase*>(self->child(i));
-                if (m->hasModifyLive()) continue;                 // dynamic: not in the static fold
-                if (!m->modifyLogical(pos)) return;               // rejected: no logical source
-            }
-            if (pos.x < 0 || pos.x >= f->logical.x || pos.y < 0 || pos.y >= f->logical.y ||
-                pos.z < 0 || pos.z >= f->logical.z) return;                          // defensive
-            const nrOfLightsType li =
-                static_cast<nrOfLightsType>(pos.z) * static_cast<nrOfLightsType>(f->logical.x) * static_cast<nrOfLightsType>(f->logical.y) +
-                static_cast<nrOfLightsType>(pos.y) * static_cast<nrOfLightsType>(f->logical.x) +
-                static_cast<nrOfLightsType>(pos.x);
-            if (li >= f->logicalCount) return;                                       // defensive
-            if (f->place) f->self->lut_.place(li, driverIdx);
-            else f->self->lut_.count(li);
-        };
+            auto onCoord = [](void* c, nrOfLightsType driverIdx, lengthType x, lengthType y, lengthType z) {
+                auto* f = static_cast<FoldCtx*>(c);
+                Coord3D pos = f->physicalOrder ? Coord3D{static_cast<lengthType>(driverIdx), 0, 0} : Coord3D{x, y, z};
+                Layer* self = f->self;
+                for (uint8_t i = 0; i < self->childCount(); i++) {
+                    if (self->child(i)->role() != ModuleRole::Modifier || !self->child(i)->enabled()) continue;
+                    auto* m = static_cast<ModifierBase*>(self->child(i));
+                    if (m->hasModifyLive()) continue;                 // dynamic: not in the static fold
+                    if (!m->modifyLogical(pos)) return;               // rejected: no logical source
+                }
+                if (pos.x < 0 || pos.x >= f->logical.x || pos.y < 0 || pos.y >= f->logical.y ||
+                    pos.z < 0 || pos.z >= f->logical.z) return;                          // defensive
+                // Resample the logical box into the allocated raster, preserving every physical destination.
+                pos.x = static_cast<lengthType>((static_cast<int32_t>(pos.x) * self->width_) / f->logical.x);
+                pos.y = static_cast<lengthType>((static_cast<int32_t>(pos.y) * self->height_) / f->logical.y);
+                pos.z = static_cast<lengthType>((static_cast<int32_t>(pos.z) * self->depth_) / f->logical.z);
+                const nrOfLightsType li =
+                    static_cast<nrOfLightsType>(pos.z) * static_cast<nrOfLightsType>(self->width_) * static_cast<nrOfLightsType>(self->height_) +
+                    static_cast<nrOfLightsType>(pos.y) * static_cast<nrOfLightsType>(self->width_) +
+                    static_cast<nrOfLightsType>(pos.x);
+                if (li >= f->logicalCount) return;                                       // defensive
+                (*f->visitor)(li, driverIdx);
+            };
 
-        // A gap is dropped from the LUT and stays black: a wire slot present, with no source.
-        static constexpr CoordCallback kDropGap =
-            [](void*, nrOfLightsType, lengthType, lengthType, lengthType) {};
+            // A gap is dropped from the LUT and stays black: a wire slot present, with no source.
+            static constexpr CoordCallback kDropGap =
+                [](void*, nrOfLightsType, lengthType, lengthType, lengthType) {};
 
-        layouts_->placeLights(CoordSink{onCoord, kDropGap, &fctx});
-        if (!lut_.startRuns()) return false;
-        fctx.place = true;
-        layouts_->placeLights(CoordSink{onCoord, kDropGap, &fctx});
-        lut_.endBuild();
-        return true;
+            layouts_->placeLights(CoordSink{onCoord, kDropGap, &fctx});
+        }, workingMemoryReserve_);
     }
 
     /// How many cells a box holds (the flat light count); 0 on any 0-extent axis.
@@ -470,7 +498,18 @@ public:
                static_cast<nrOfLightsType>(box.z);
     }
 
-    /// Hold a folded box inside its legal bounds, so a modifier cannot size it away: a zero-width box would blank the layer.
+    /// Whether every enabled effect addresses the strip's physical light order.
+    bool effectsUsePhysicalLightOrder() const {
+        bool found = false;
+        for (uint8_t i = 0; i < childCount(); i++) {
+            if (child(i)->role() != ModuleRole::Effect || !child(i)->enabled()) continue;
+            found = true;
+            if (!static_cast<EffectBase*>(child(i))->usesPhysicalLightOrder()) return false;
+        }
+        return found;
+    }
+
+    /// Keep a folded logical box nonempty on every occupied physical axis.
     void clampLogical(Coord3D& logical) const {
         if (physicalWidth_  > 0 && logical.x < 1) logical.x = 1;
         if (physicalHeight_ > 0 && logical.y < 1) logical.y = 1;
@@ -481,12 +520,27 @@ public:
     }
 
 private:
+    /// Hash the ordered enabled effect set so scene switches clear inherited trails.
+    uint32_t enabledEffectSignature() const {
+        uint32_t signature = 2166136261u;
+        bool any = false;
+        for (uint8_t i = 0; i < childCount(); i++) {
+            const MoonModule* effect = child(i);
+            if (effect->role() != ModuleRole::Effect || !effect->enabled()) continue;
+            any = true;
+            signature = (signature ^ (static_cast<uint32_t>(i) + 1u)) * 16777619u;
+            signature = (signature ^ static_cast<uint32_t>(reinterpret_cast<uintptr_t>(effect) >> 4)) * 16777619u;
+            for (const char* type = effect->typeName(); type && *type; ++type)
+                signature = (signature ^ static_cast<uint8_t>(*type)) * 16777619u;
+        }
+        return any ? (signature ? signature : 1u) : 0;
+    }
+
     Layouts* layouts_ = nullptr;
     Buffer buffer_;
     MappingLUT lut_;
     uint8_t channelsPerLight_ = 3;
     FixtureChannels fixture_;
-    bool lutSkipped_ = false;
     lengthType physicalWidth_ = 0;
     lengthType physicalHeight_ = 0;
     lengthType physicalDepth_ = 0;
@@ -498,43 +552,129 @@ private:
     uint32_t fadeCarry_ = 0;               // sub-unit fade remainder, so a high frame rate does not over-fade
     particles::FrameTime fadeTime_{60};    // elapsed-to-scale, the shared conversion
     uint32_t bufferGen_ = 0;   // bumped by every write to buffer_; see bufferGen()
-    char statusBuf_[20] = {};  // "999×999×999" fits; owned (setStatus borrows the pointer)
+    uint32_t lastEnabledEffectSignature_ = 0;
+    uint32_t preparedEffectSignature_ = 0;
+    char statusBuf_[48] = {};  // dimensions and memory warning; setStatus borrows this storage
+    size_t workingMemoryReserve_ = platform::HEAP_RESERVE;
     bool     hasLive_ = false;          // any enabled modifier animates per frame (gates the live pass)
     uint8_t  staticCount_ = 0;          // enabled modifiers folded into the mapping at build time
     uint8_t* liveScratch_ = nullptr;    // snapshot for the live pass; allocated only when hasLive_
     size_t   liveScratchBytes_ = 0;
 
     /// Whether the heap can afford an allocation: true when unlimited or the budget suffices.
-    static bool canAllocate(size_t bytesNeeded) {
+    bool canAllocate(size_t bytesNeeded, size_t largestBlock) const {
         size_t availableHeap = platform::freeHeap();
         if (availableHeap == 0) return true; // desktop: unlimited
         size_t internalHeap = platform::freeInternalHeap();
-        if (internalHeap > 0 && internalHeap <= platform::HEAP_RESERVE) return false;
-        size_t budget = availableHeap > platform::HEAP_RESERVE ? availableHeap - platform::HEAP_RESERVE : 0;
-        return budget >= bytesNeeded && platform::maxAllocBlock() >= bytesNeeded;
+        if (internalHeap > 0 && internalHeap <= workingMemoryReserve_) return false;
+        size_t budget = availableHeap > workingMemoryReserve_ ? availableHeap - workingMemoryReserve_ : 0;
+        return budget >= bytesNeeded && platform::maxAllocBlock() >= largestBlock;
     }
 
-    /// The channel count this layer's fixtures need, or 0 when nothing in the rig moves.
+    /// Additional working memory only: the layer and effects reuse their existing allocations.
+    EffectBase::WorkingMemory memoryRequest(size_t bufferBytes) const {
+        EffectBase::WorkingMemory request{};
+        if (bufferBytes > buffer_.bytes()) request = {bufferBytes - buffer_.bytes(), bufferBytes};
+        for (uint8_t i = 0; i < childCount(); i++) {
+            const auto* node = child(i);
+            if (!node->enabled() || node->role() != ModuleRole::Effect) continue;
+            const auto needed = static_cast<const EffectBase*>(node)->workingMemory({width_, height_, depth_}, channelsPerLight_);
+            if (needed.bytes <= node->dynamicBytes()) continue;
+            const size_t extra = needed.bytes - node->dynamicBytes();
+            if (extra > SIZE_MAX - request.bytes) return {SIZE_MAX, SIZE_MAX};
+            request.bytes += extra;
+            if (needed.largestBlock > request.largestBlock) request.largestBlock = needed.largestBlock;
+        }
+        return request;
+    }
+
+    /// The channel count this layer's fixtures need, including RGB or RGBW before any motion slots.
     uint8_t requiredChannels() const {
         const FixtureChannels& f = fixture_;
-        uint8_t top = 0;
+        uint8_t top = f.colorChannels;
         for (uint8_t o : {f.pan, f.tilt, f.zoom, f.rotate, f.gobo})
             if (o != FixtureChannels::kAbsent && o + 1 > top) top = static_cast<uint8_t>(o + 1);
         return top;
     }
 
-    void allocateBuffer(nrOfLightsType count) {
+    /// Halve the rendering raster while keeping every occupied axis nonempty.
+    bool reduceRaster() {
+        if (width_ <= 1 && height_ <= 1 && depth_ <= 1) return false;
+        width_ = width_ > 1 ? width_ / 2 : 1;
+        height_ = height_ > 1 ? height_ / 2 : 1;
+        depth_ = depth_ > 1 ? depth_ / 2 : 1;
+        return true;
+    }
+
+    /// Retain geometric destinations at a smaller resolution when the full table cannot fit.
+    bool ensureFoldedLUT(const Coord3D& logical, nrOfLightsType driverCount, bool physicalOrder = false) {
+        while (!buildFoldedLUT(logical, cellCount({width_, height_, depth_}), driverCount, physicalOrder)) {
+            if (!reduceRaster()) {
+                buffer_.free();
+                lut_.setEmpty();
+                width_ = height_ = depth_ = 0;
+                setDynamicBytes(0);
+                setStatus("mapping allocation failed — not enough memory", Severity::Error);
+                return false;
+            }
+            reducedStatus();
+        }
+        return true;
+    }
+
+    /// Rebuild the physical mapping when the allocator reduces the rendering resolution.
+    void allocateMappedBuffer(nrOfLightsType count, const Coord3D& logical,
+                              nrOfLightsType driverCount, bool physicalOrder = false) {
+        for (;;) {
+            const Coord3D before{width_, height_, depth_};
+            allocateBuffer(count);
+            if (!buffer_.data()) {
+                lut_.setEmpty();
+                width_ = height_ = depth_ = 0;
+                setDynamicBytes(0);
+                return;
+            }
+            if (before == Coord3D{width_, height_, depth_}) return;
+            if (!ensureFoldedLUT(logical, driverCount, physicalOrder)) return;
+            count = cellCount({width_, height_, depth_});
+        }
+    }
+
+    void reclaimUnadmittedWorkingSet(nrOfLightsType count) {
         // Widened before the allocation: changing the width afterwards resizes it under its holder.
         if (const uint8_t need = requiredChannels(); need > channelsPerLight_) channelsPerLight_ = need;
 
+        // The state-document API prepares a new effect before its parent. Reclaim an unadmitted working set before choosing its raster.
+        if (enabledEffectSignature() != preparedEffectSignature_) {
+            const auto request = memoryRequest(static_cast<size_t>(count) * channelsPerLight_);
+            if (!canAllocate(request.bytes, request.largestBlock)) {
+                bool reclaimed = false;
+                for (uint8_t i = 0; i < childCount(); i++) {
+                    auto* node = child(i);
+                    if (!node->enabled() || node->role() != ModuleRole::Effect || !node->dynamicBytes()) continue;
+                    const auto working = static_cast<EffectBase*>(node)->workingMemory({width_, height_, depth_}, channelsPerLight_);
+                    if (!working.bytes) continue;
+                    node->release();
+                    reclaimed = true;
+                }
+                if (reclaimed) {
+                    buffer_.free();
+                    setDynamicBytes(lut_.memoryUsed());
+                }
+            }
+        }
+    }
+
+    void allocateBuffer(nrOfLightsType count) {
         // Try to allocate buffer, halve dimensions if needed
         bool reduced = false;
         while (count > 0) {
             size_t needed = static_cast<size_t>(count) * channelsPerLight_;
-            if (buffer_.holds(count, channelsPerLight_) || canAllocate(needed)) {
+            const auto request = memoryRequest(needed);
+            if (request.bytes == 0 || canAllocate(request.bytes, request.largestBlock)) {
                 if (buffer_.allocate(count, channelsPerLight_)) {
                     setDynamicBytes(buffer_.bytes() + lut_.memoryUsed());
-                    if (reduced) setStatus("buffer reduced — not enough memory", Severity::Warning);
+                    if (reduced) reducedStatus();
                     return;
                 }
                 // allocate refused despite the canAllocate check, so degrade
@@ -551,14 +691,25 @@ private:
                         static_cast<int>(width_), static_cast<int>(height_), static_cast<int>(depth_));
             if (width_ <= 8 && height_ <= 8) break; // minimum
         }
-        if (!buffer_.allocate(count, channelsPerLight_)) {
+        const auto minimumRequest = memoryRequest(static_cast<size_t>(count) * channelsPerLight_);
+        if ((minimumRequest.bytes != 0 && !canAllocate(minimumRequest.bytes, minimumRequest.largestBlock)) ||
+            !buffer_.allocate(count, channelsPerLight_)) {
+            buffer_.free();
             std::printf("  DEGRADE  buffer_.allocate failed at minimum size %u\n",
                         static_cast<unsigned>(count));
             setStatus("buffer allocation failed — not enough memory", Severity::Error);
         } else if (reduced) {
-            setStatus("buffer reduced — not enough memory", Severity::Warning);
+            reducedStatus();
         }
         setDynamicBytes(buffer_.bytes() + lut_.memoryUsed());
+    }
+
+    /// Keep the actual raster visible when memory admission reduces it.
+    void reducedStatus() {
+        std::snprintf(statusBuf_, sizeof(statusBuf_), "%u×%u×%u (memory reduced)",
+                      static_cast<unsigned>(width_), static_cast<unsigned>(height_),
+                      static_cast<unsigned>(depth_));
+        setStatus(statusBuf_, Severity::Warning);
     }
 };
 

@@ -37,7 +37,8 @@ inline uint32_t g_otaBytesTotal     = 0;        ///< the image size, zero until 
 
 /// Whether an install is running, which both flash paths gate their refusal on.
 inline bool otaInFlight() {
-    return std::strcmp(g_otaStatus, "starting")    == 0 ||
+    return platform::otaBusy() ||
+           std::strcmp(g_otaStatus, "starting")    == 0 ||
            std::strcmp(g_otaStatus, "downloading") == 0 ||
            // A prefix, since this one carries its byte counts so the UI can draw a bar.
            std::strncmp(g_otaStatus, "flashing", 8) == 0 ||

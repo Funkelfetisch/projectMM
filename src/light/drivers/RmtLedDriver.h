@@ -48,7 +48,7 @@ public:
     uint16_t periodNs = 1250;
 
     /// The presets `timing` picks from, in the table's order; `kTimingCustom` is the one option that reads the three fields.
-    enum Timing : uint8_t { kTiming800k, kTiming400k, kTiming800kFast, kTimingCustom, kTimingCount };
+    enum Timing : uint8_t { kTiming800k, kTiming400k, kTiming800kFast, kTimingCustom, kTimingSk6812Rgbw, kTimingCount };
 
     /// The presets in the order the select lists them: 800kHz 350/700/1250 ns for most strips; 400kHz 500/1200/2500 for 12V WS2811 in low-speed mode. Then 800kHz WS2811 fast 250/600/1250, and custom from the three fields.
     static constexpr const char* kTimingOptions[] = {
@@ -56,7 +56,11 @@ public:
         "400kHz WS2811",
         "800kHz WS2811 fast",
         "custom",
+        "800kHz SK6812 RGBW",
     };
+
+    /// Seed the profile's wire timing before loading persisted configuration.
+    void setDefaultTiming(Timing value) { timing = value; }
 
     /// TX to RX self-test: send a known pattern, verify the capture.
     bool     loopbackTest = false;
@@ -114,6 +118,11 @@ public:
 
     /// React to a control change off the render loop, in the API handler context, re-running the loopback while its mode is on; a blocking self-test is fine there.
     void onControlChanged(const char* name) override {
+        invalidateFrameConfirmation();
+        if (powerDetached_) {
+            setStatus("RMT power handover in progress", Severity::Warning);
+            return;
+        }
         const bool isTestControl = std::strcmp(name, "loopbackTest") == 0;
         const bool isPinControl  = std::strcmp(name, "pins") == 0
                                 || std::strcmp(name, "loopbackTxPin") == 0
@@ -138,6 +147,17 @@ public:
     void setup() override { parseConfig(); }
     /// Release the RMT channels, free the frame buffer, and clear the shared error state.
     void release() override {
+        // A power owner must first latch black, hold DIN low and switch its
+        // rail off. A direct release must not bypass that checked handover.
+        if (powerOwner_) {
+            setStatus("RMT power owner still active", Severity::Error);
+            return;
+        }
+        // A failed checked handover retains both the channel and its buffer.
+        if (powerDetached_ && !detachForPower()) {
+            setStatus("RMT power handover incomplete", Severity::Error);
+            return;
+        }
         deinitAll();
         freeFrame();
         DriverBase::release();   // frees the correction scratch, clears failBuf_ + configErr_
@@ -145,6 +165,10 @@ public:
 
     /// Re-parse, resize the frame buffer and re-init the channels, off the hot path.
     void prepare() override {
+        // Only the owning power sequence may reattach a powered output.
+        // A generic tree rebuild must not tear down an active rail's data pin.
+        if (powerOwner_ && !powerAttachInProgress_) return;
+        if (powerDetached_) return;
         // Drain first: a prepare can land mid-frame while the peripheral still reads the buffer.
         if (txInFlight_) {
             for (uint8_t attempt = 0; attempt < 4 && txInFlight_; attempt++)
@@ -162,14 +186,34 @@ public:
 
     /// Re-derive the per-pin offsets when the fixture profile changes the output channel count.
     void onCorrectionChanged() override {
+        invalidateFrameConfirmation();
+        if (powerDetachIncomplete_) return;
         if (!effectivelyEnabled()) return;
-        if (outChannelsChanged()) parseConfig();
+        const bool channelsChanged = outChannelsChanged();
+        if (powerOwner_ && !powerDetached_) {
+            if (channelsChanged || frameUnusable_) powerSourceInvalidated_ = true;
+            return;
+        }
+        if (channelsChanged) parseConfig();
         else if (!frameUnusable_) return;   // otherwise a retry of a frame that failed to allocate, which no transfer reads
         resizeFrame();
     }
 
     /// Point the driver at the source frame buffer, re-parsing and resizing to match.
     void setSourceBuffer(Buffer* buf) override {
+        if (powerOwner_ && !powerDetached_ && !powerSourceInvalidated_ && buf && buf == sourceBuffer_ &&
+            buf->data() == powerSourceData_ && buf->count() == powerSourceCount_) return;
+        invalidateFrameConfirmation();
+        if (powerDetachIncomplete_) {
+            if (powerOwner_) { sourceBuffer_ = buf; powerSourceInvalidated_ = true; }
+            return;
+        }
+        if (powerOwner_ && !powerDetached_) {
+            if (buf != sourceBuffer_ || !buf || buf->data() != powerSourceData_ || buf->count() != powerSourceCount_)
+                powerSourceInvalidated_ = true;
+            sourceBuffer_ = buf; // never retain a pointer to a replaced source
+            return;
+        }
         sourceBuffer_ = buf;
         parseConfig();      // counts derive from the buffer's light count
         if (effectivelyEnabled()) resizeFrame();
@@ -178,16 +222,27 @@ public:
     /// Fuse the correction and the encode in one pass, then start every pin before waiting.
     void tick() MM_NONBLOCKING override {
         if constexpr (platform::rmtTxChannels == 0) return;  // inert off RMT chips
-        if (!inited_ || !sourceBuffer_ || !sourceBuffer_->data()) return;
+        if (powerSourceInvalidated_ || !inited_ || !sourceBuffer_ || !sourceBuffer_->data()) return;
 
         // A frame still on the wire OWNS the buffer: re-encoding now corrupts what it clocks out.
         if (txInFlight_) {
             txInFlight_ = !waitForPins();     // still busy: leave frame_ alone for another tick
             if (txInFlight_) return;
         }
+        // Keep the output held after the one requested black frame, even if it failed.
+        // A power lifecycle must explicitly retry or release the gate.
+        if (blackFrameRequested_ && blackFrameAttempted_) return;
 
         const nrOfLightsType n = txLightCount_ < winLen_ ? txLightCount_ : winLen_;
         const uint8_t outCh = correction_.outChannels;
+        // Power sequencing may require a complete physical strip, not merely
+        // the prefix available in a shortened source window.
+        if (blackFrameRequested_ && ((blackExpectedLights_ && n != blackExpectedLights_)
+                                   || (blackExpectedChannels_ && outCh != blackExpectedChannels_))) {
+            blackFrameAttempted_ = true;
+            lastFrameLatched_ = false;
+            return;
+        }
         // Skip rather than overrun when the buffer is stale, the guard ArtNet uses.
         if (n == 0 || outCh == 0 || pinCount_ == 0
             || !frame_ || frameCap_ < frameBytesFor(n, outCh)) return;   // buffer not ready
@@ -196,12 +251,20 @@ public:
         const uint8_t* src = sourceBuffer_->data();
         const uint8_t srcCh = sourceBuffer_->channelsPerLight();
         // The bit expansion happens on the way out, so this buffer is outCh bytes per light.
-        for (nrOfLightsType i = 0; i < n; i++) {
-            correction_.apply(src + (winStart_ + i) * srcCh, frame_ + static_cast<size_t>(i) * outCh, srcCh);
+        if (blackFrameRequested_) {
+            std::memset(frame_, 0, static_cast<size_t>(n) * outCh);
+        } else {
+            for (nrOfLightsType i = 0; i < n; i++) {
+                correction_.apply(src + (winStart_ + i) * srcCh, frame_ + static_cast<size_t>(i) * outCh, srcCh);
+            }
         }
         // Start every pin before waiting on any, so the tick costs the longest strand not the sum.
         const size_t bytesPerLight = static_cast<size_t>(outCh);
         bool started[kMaxPins] = {};
+        frameAttempted_ = false;
+        frameStartFailed_ = false;
+        lastFrameLatched_ = false;
+        if (blackFrameRequested_) blackFrameAttempted_ = true;
         for (uint8_t i = 0; i < pinCount_; i++) {
             const nrOfLightsType pinStart = static_cast<nrOfLightsType>(pinOffsets_[i] / bytesPerLight);
             if (pinStart >= n) break;  // contiguous: this pin and all later ones are past the encoded lights
@@ -210,10 +273,11 @@ public:
             if (pinLights == 0) continue;
             started[i] = platform::rmtWs2812Transmit(rmt_[i], frame_ + pinOffsets_[i],
                                         static_cast<size_t>(pinLights) * bytesPerLight);
+            frameAttempted_ = true;
+            if (!started[i]) frameStartFailed_ = true;
         }
         for (uint8_t i = 0; i < pinCount_; i++) started_[i] = started[i];
         txInFlight_ = !waitForPins();
-        if (cfg_.reset_us) platform::delayUs(cfg_.reset_us);
     }
 
     /// Wait on every pin that started, and report whether they all finished.
@@ -224,7 +288,139 @@ public:
             if (platform::rmtWs2812Wait(rmt_[i], 1000 /* ms */)) started_[i] = false;
             else allDone = false;
         }
+        if (allDone && frameAttempted_) {
+            // A timeout leaves the frame and latch pending. Only after the final
+            // started channel drains can the reset-low interval complete it.
+            if (cfg_.reset_us) platform::delayUs(cfg_.reset_us);
+            lastFrameLatched_ = !frameStartFailed_;
+            frameAttempted_ = false;
+        }
         return allDone;
+    }
+
+    /// Whether the most recently attempted frame started on every used pin,
+    /// completed, and observed the configured reset-low interval.
+    bool lastFrameLatched() const { return lastFrameLatched_; }
+    /// Whether an accepted transfer still owns the frame buffer.
+    bool frameInFlight() const { return txInFlight_; }
+
+    /// Check the resolved output before a board power owner uses it. The owner
+    /// must still serialize configuration changes and tick for its lifetime.
+    bool hasPowerPin(uint16_t pin) const { return pinCount_ == 1 && pinList_[0] == pin; }
+    bool hasPowerWiring(uint16_t pin, nrOfLightsType lights, uint8_t channels) const {
+        return !powerSourceInvalidated_ && !configErr_ && hasPowerPin(pin)
+            && pinCounts_[0] == lights && txLightCount_ == lights && winLen_ >= lights
+            && correction_.outChannels == channels && sourceBuffer_ && sourceBuffer_->data();
+    }
+    bool matchesPowerOutput(uint16_t pin, nrOfLightsType lights, uint8_t channels) const {
+        if (!hasPowerWiring(pin, lights, channels)) return false;
+        uint16_t parsedPins[kMaxPins] = {};
+        nrOfLightsType parsedCounts[kMaxPins] = {};
+        uint8_t parsedPinCount = 0;
+        nrOfLightsType start = 0, length = 0;
+        const char* warning = nullptr;
+        if (parsePinList(pins, parsedPins, maxPinsForTarget(), parsedPinCount)) return false;
+        windowSlice(sourceBuffer_->count(), start, length);
+        if (assignCounts(ledsPerPin, parsedPinCount, length, parsedCounts,
+                         kMaxWs2812LedsPerPin, &warning) || warning) return false;
+        return parsedPinCount == 1 && parsedPins[0] == pin && parsedCounts[0] == lights
+            && start == winStart_ && length == winLen_;
+    }
+
+    /// Stop this driver for a power handover. The caller must serialize this
+    /// operation with tick and request a black hold before calling it.
+    bool detachForPower() {
+        if (!blackFrameRequested_) return false;
+        powerDetached_ = true;
+        powerDetachIncomplete_ = true;
+        inited_ = false; // no new transfers while a checked detach is incomplete
+        if (txInFlight_) {
+            if (!waitForPins()) return false;
+            txInFlight_ = false;
+        }
+        blackFrameAttempted_ = true;
+        invalidateFrameConfirmation();
+        for (uint8_t i = 0; i < kMaxPins; ++i) {
+            if (!platform::rmtWs2812DetachChecked(rmt_[i])) return false;
+            started_[i] = false;
+        }
+        frameAttempted_ = false;
+        frameStartFailed_ = false;
+        powerDetachIncomplete_ = false;
+        powerSourceInvalidated_ = false;
+        powerSourceData_ = nullptr; powerSourceCount_ = 0;
+        return true;
+    }
+    /// Attach after the rail is stable; the black hold remains until a new
+    /// black frame is sent and confirmed. No GPIO level is asserted here.
+    bool attachForPower() {
+        if (!powerDetached_ || powerDetachIncomplete_ || !blackFrameRequested_) return false;
+        for (const auto& handle : rmt_) if (handle.impl) return false;
+        powerDetached_ = false;
+        powerAttachInProgress_ = true;
+        prepare();
+        powerAttachInProgress_ = false;
+        if (!inited_ || frameUnusable_ || !frame_ || !sourceBuffer_ || !sourceBuffer_->data()) {
+            powerDetached_ = true;
+            detachForPower();
+            return false;
+        }
+        powerSourceData_ = sourceBuffer_->data(); powerSourceCount_ = sourceBuffer_->count();
+        requestBlackFrame(blackExpectedLights_, blackExpectedChannels_);
+        return true;
+    }
+
+    /// A power controller reserves this driver before changing DIN or its rail.
+    /// The token is compared only; the owner must outlive the reservation.
+    bool claimPowerOwner(const void* owner) {
+        if (!owner || (powerOwner_ && powerOwner_ != owner)) return false;
+        powerOwner_ = owner; return true;
+    }
+    bool powerOwnedBy(const void* owner) const { return owner && powerOwner_ == owner; }
+    /// Complete a checked handover after the owner has independently held DIN
+    /// low and switched the rail off. Does not itself verify GPIO or power.
+    bool finishPowerHandover(const void* owner) {
+        if (!powerOwnedBy(owner) || !powerDetached_ || powerDetachIncomplete_ || txInFlight_) return false;
+        for (const auto& handle : rmt_) if (handle.impl) return false;
+        powerDetached_ = false;
+        blackFrameRequested_ = false;
+        blackFrameAttempted_ = false;
+        return true;
+    }
+    /// The owner calls this only after its rail-off and DIN-hold sequence succeeds.
+    bool releasePowerOwner(const void* owner) {
+        if (!owner || powerOwner_ != owner) return false;
+        powerOwner_ = nullptr; return true;
+    }
+    bool userEditable() const override { return !powerOwner_ && !powerDetached_ && !blackFrameRequested_; }
+    bool blocksAncestorRemoval() const override { return powerOwner_ || powerDetached_ || blackFrameRequested_; }
+    bool acceptsControlWrite(const char*) const override { return !powerOwner_ && !powerDetached_ && !blackFrameRequested_; }
+
+    /// Hold normal output and send one black frame on the next tick. Retry is explicit.
+    enum class BlackFrameStatus : uint8_t { Idle, Pending, Latched, Failed };
+    void requestBlackFrame(nrOfLightsType expectedLights = 0, uint8_t expectedChannels = 0) {
+        invalidateFrameConfirmation();
+        blackExpectedLights_ = expectedLights;
+        blackExpectedChannels_ = expectedChannels;
+        blackFrameRequested_ = true;
+        blackFrameAttempted_ = false;
+    }
+    bool blackFrameLatched() const {
+        return blackFrameRequested_ && blackFrameAttempted_ && lastFrameLatched_;
+    }
+    /// A failed or invalidated attempt remains held until an explicit retry.
+    BlackFrameStatus blackFrameStatus() const {
+        if (!blackFrameRequested_) return BlackFrameStatus::Idle;
+        if (!blackFrameAttempted_ || txInFlight_) return BlackFrameStatus::Pending;
+        return lastFrameLatched_ ? BlackFrameStatus::Latched : BlackFrameStatus::Failed;
+    }
+    /// Resume visible frames only after the held black frame completed.
+    bool releaseBlackFrame() {
+        if (!blackFrameRequested_) return true;
+        if (txInFlight_ || !blackFrameLatched()) return false;
+        blackFrameRequested_ = false;
+        blackFrameAttempted_ = false;
+        return true;
     }
 
     /// Test-only accessors, which pin the buffer lifecycle and the multi-pin slice arithmetic.
@@ -261,6 +457,20 @@ private:
     bool started_[kMaxPins] = {};              ///< which pins have a transmit still to be waited on
     bool frameUnusable_ = false;               ///< frame buffer missing, or in PSRAM where the refill cannot read
     bool txInFlight_ = false;                  ///< a frame is still clocking out of frame_
+    bool frameAttempted_ = false;
+    bool frameStartFailed_ = false;
+    bool lastFrameLatched_ = false;
+    bool blackFrameRequested_ = false;
+    bool blackFrameAttempted_ = false;
+    nrOfLightsType blackExpectedLights_ = 0;
+    uint8_t blackExpectedChannels_ = 0;
+    const void* powerOwner_ = nullptr;
+    bool powerAttachInProgress_ = false;
+    bool powerSourceInvalidated_ = false;
+    const uint8_t* powerSourceData_ = nullptr;
+    nrOfLightsType powerSourceCount_ = 0;
+    bool powerDetached_ = false;
+    bool powerDetachIncomplete_ = false;
     uint8_t* frame_ = nullptr;                 ///< owned; the wire bytes for the whole frame, outChannels per light
     size_t frameCap_ = 0;                      ///< bytes allocated
 
@@ -306,6 +516,8 @@ private:
                 cfg_.period_ns = periodNs > cfg_.t1h_ns ? periodNs
                                                         : static_cast<uint16_t>(cfg_.t1h_ns + 50);
                 break;
+            case kTimingSk6812Rgbw:
+                cfg_.t0h_ns = 300; cfg_.t1h_ns = 600; cfg_.period_ns = 1250; break;
             // The default: satisfies WS2812, WS2812B and SK6812 at once.
             default: cfg_.t0h_ns = 350; cfg_.t1h_ns = 700; cfg_.period_ns = 1250; break;
         }
@@ -396,6 +608,10 @@ private:
 
     /// Run the loopback self-test: the status slot holds a pointer, not a copy, so only the FAIL case needs a buffer.
     void runLoopbackSelfTest() {
+        if (powerDetached_) {
+            setStatus("RMT power handover in progress", Severity::Warning);
+            return;
+        }
         if constexpr (platform::rmtTxChannels == 0) {
             clearFailBuf();
             setStatus("loopback: not supported on this platform", Severity::Warning);
@@ -464,6 +680,7 @@ private:
 
     /// Init every channel or none: one clear error beats some strands dark and some lit.
     void reinit() {
+        if (powerDetached_) return;
         if constexpr (platform::rmtTxChannels == 0) return;
         deinitAll();
         if (pinCount_ == 0) return;   // parse error: already in the status slot
@@ -492,12 +709,23 @@ private:
     }
 
     /// Release the channels only, not the buffer: reinit calls this, so freeing the buffer here would strand tick().
+    void invalidateFrameConfirmation() {
+        lastFrameLatched_ = false;
+        // A frame started under earlier wiring or correction cannot confirm the new configuration.
+        if (frameAttempted_) frameStartFailed_ = true;
+    }
+
     void deinitAll() {
         if constexpr (platform::rmtTxChannels == 0) return;
         for (uint8_t i = 0; i < kMaxPins; i++) {
             if (rmt_[i].impl) platform::rmtWs2812Deinit(rmt_[i]);
+            started_[i] = false;
         }
         inited_ = false;
+        txInFlight_ = false;
+        frameAttempted_ = false;
+        frameStartFailed_ = false;
+        lastFrameLatched_ = false;
     }
 };
 

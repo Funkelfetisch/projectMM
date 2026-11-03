@@ -1,0 +1,67 @@
+{
+  "product": "HELIO mini 80",
+  "ownerMapping": "8cm HELIO PCB + Fusion360 design, confirmed 2026-10-25",
+  "module": "ESP32-S3-MINI-1-N8",
+  "flashMiB": 8,
+  "psram": false,
+  "ledCount": 52,
+  "ledPart": "SK6812MINIRGBW-WS-P6-A-000",
+  "ledDataGpio": 47,
+  "ledEnableGpio": 17,
+  "microphone": {
+    "sck": 40,
+    "ws": 38,
+    "sd": 39
+  },
+  "ambientLight": {
+    "scl": 11,
+    "sda": 26,
+    "address": 35
+  },
+  "qualification": "native-design-source; no firmware or physical acceptance",
+  "nativePins": [
+    {
+      "pad": "21",
+      "gpio": "IO17",
+      "net": "MCU_LED_ENABLE"
+    },
+    {
+      "pad": "27",
+      "gpio": "IO47",
+      "net": "MCU_LED_DATA"
+    },
+    {
+      "pad": "34",
+      "gpio": "IO38",
+      "net": "I2S_WS"
+    }
+  ],
+  "sources": {
+    "modulePinDefinitions": "https://documentation.espressif.com/esp32-s3-mini-1_mini-1u_datasheet_en.html",
+    "moduleConstraint": "Datasheet v1.7 pins 21/27/34/35/36 = IO17/47/38/39/40; IO26 is unavailable on N4R2 PSRAM variants. This profile is N8 without PSRAM only.",
+    "design": "/home/veit/git/helio-pcb/variants/helio-mini-80/DESIGN.md",
+    "netlist": {
+      "path": "/home/veit/git/helio-pcb/variants/helio-mini-80/evidence/fromF-copy-v184-netlist-after.json",
+      "sha256": "79306b9358a80c54f2755c2565dae59738b90ca32ea16eaa99ee4b97e5f2c84b"
+    },
+    "pcbV289": {
+      "path": "/home/veit/git/helio-pcb/variants/helio-mini-80/evidence/fromF-copy-v289-after-export-native-check.json",
+      "sha256": "c23d94b198b7d4f716ea7df9c1e071ba23f9f9370679502535aa5c2f52065e16"
+    },
+    "fusion": {
+      "path": "/home/veit/git/helio-pcb/audit-work/autodesk-fusion-20261001/8cm.f3d",
+      "exists": true,
+      "sha256": "6ee76c8eaddd1f62ee2ee6ab86b5b516b1e788ab5e92ea3c827e6369bf4b1296"
+    }
+  },
+  "unqualified": {
+    "pixelOrder": null,
+    "railSettleMaximumMs": null,
+    "batteryCutoffPolicy": null
+  },
+  "activation": "blocked pending startup/shutdown/battery implementation and bench qualification",
+  "staleDocuments": [
+    "docs/mini-domes/mini80: C3/16-pixel concept",
+    "variants/helio-mini-80/LED-POWER-SEQUENCE.md: GPIO10/7 pre-S3 mapping"
+  ]
+}

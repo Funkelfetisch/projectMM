@@ -2427,3 +2427,16 @@ body.assign-mode .control-encoder input { cursor: pointer; }
 
 /* The record button glows while it records, so the three seconds are visible. */
 .preview-bar-btn.recording { color: var(--red); }
+
+/* HELIO exposes its fixed factory scene catalog without changing the generic module editor. */
+.helio-scenes { max-width: 980px; margin: 0 auto; padding: 20px; }
+.helio-scenes h1 { margin: 0 0 6px; }
+.helio-scenes-status { color: var(--fg-muted); min-height: 1.5em; }
+.helio-playlists { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.helio-playlists button, .helio-scene-card { background: var(--card-bg-1); border: 1px solid var(--border); border-radius: 8px; color: inherit; cursor: pointer; font: inherit; }
+.helio-playlists button { padding: 8px 12px; }
+.helio-scene-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.helio-scene-card { display: grid; gap: 5px; min-height: 82px; padding: 13px; text-align: left; }
+.helio-scene-card span { color: var(--fg-muted); font-size: 0.85em; }
+.helio-playlists button:hover, .helio-scene-card:hover { border-color: var(--accent); }
+.helio-scene-card.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }

@@ -181,3 +181,38 @@ TEST_CASE("TasksModule: the render task's detail nests the modules + the ∑/tic
     CHECK(det1.find("Alpha") == std::string::npos);
     CHECK(det1.find("\"modules\":[]") != std::string::npos);
 }
+
+TEST_CASE("TasksModule: samples the task state after outstanding output completes") {
+    Scheduler scheduler;
+    TasksModule tasks;
+    scheduler.addModule(&tasks);
+    scheduler.setup();
+
+    static const platform::TaskInfo sending[] = {
+        {"mmEncode", platform::TaskState::Running, 1, 2, 512, platform::kTaskCpuUnmeasured},
+    };
+    static const platform::TaskInfo idle[] = {
+        {"mmEncode", platform::TaskState::Blocked, 1, 2, 4096, platform::kTaskCpuUnmeasured},
+    };
+    struct Cleanup {
+        ~Cleanup() {
+            MoonModule::setTaskSnapshotHook(nullptr);
+            platform::setTestTaskSnapshot(nullptr, 0, "");
+        }
+    } cleanup;
+    platform::setTestTaskSnapshot(sending, 1, "main");
+    MoonModule::setTaskSnapshotHook([] {
+        platform::setTestTaskSnapshot(idle, 1, "main");
+    });
+
+    tasks.tick1s();
+    const ListSource* rows = tasksSource(tasks);
+    REQUIRE(rows != nullptr);
+    REQUIRE(rows->listRowCount() == 1);
+    JsonSink row;
+    rows->writeListRow(row, 0);
+    const std::string text(row.data());
+    CHECK(text.find("mmEncode") != std::string::npos);
+    CHECK(text.find("\"stack\":4096") != std::string::npos);
+    CHECK(text.find("\"stack\":512") == std::string::npos);
+}

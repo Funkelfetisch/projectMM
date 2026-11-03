@@ -43,6 +43,7 @@ void HttpServerModule::serveState(platform::TcpConnection& conn) {
         sendResponse(conn, 507, "application/json", "{\"error\":\"out of memory\"}");
         return;
     }
+    if (!primeHttpTree(*slot, conn)) return;
     const char* header =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
@@ -81,6 +82,8 @@ bool HttpServerModule::Subscription::parse(const char* body) {
     if (!arr) return false;
     *this = Subscription{};
     received = true;
+    const auto* detail = json::member(*doc, doc->rootNode(), "detail");
+    valuesOnly = detail && detail->type == json::JsonType::String && std::strcmp(detail->str, "values") == 0;
     const int n = json::arraySize(*doc, arr);
     for (int i = 0; i < n; i++) {
         const json::JsonNode* el = json::element(*doc, arr, i);
@@ -92,7 +95,7 @@ bool HttpServerModule::Subscription::parse(const char* body) {
 }
 
 bool HttpServerModule::Subscription::operator==(const Subscription& o) const {
-    if (received != o.received || all != o.all || count != o.count) return false;
+    if (received != o.received || all != o.all || valuesOnly != o.valuesOnly || count != o.count) return false;
     for (uint8_t i = 0; i < count; i++)
         if (names[i] != o.names[i]) return false;
     return true;
@@ -176,7 +179,7 @@ bool HttpServerModule::visitOwnLeaves(MoonModule* mod, Fn&& fn, uint16_t& next, 
                 auto& c = ctrls[static_cast<uint8_t>(next - kHeaderLeaves)];
                 std::snprintf(path, sizeof(path), "%s/%s", mod->name(), c.name);
                 leaf([&](JsonSink& s) {
-                    if (c.type == ControlType::Password) writeObfuscatedPassword(s, static_cast<const char*>(c.ptr));   // as the full state shows it
+                    if (c.type == ControlType::Password) writePasswordConfigured(s, static_cast<const char*>(c.ptr));   // as the full state shows it
                     else writeControlValue(s, c);
                 });
             }
@@ -424,6 +427,11 @@ bool HttpServerModule::writeTreeFragment(JsonSink& sink, TreeCursor& c, size_t t
     while (target == 0 || sink.size() < target) {
         if (MoonModule* mod = moduleAt(c)) stepInto(sink, c, mod);
         else if (stepPast(sink, c)) return true;
+        // A single root has no trailing wrapper: its closing bytes also finish the cursor, even at the fragment limit.
+        if (c.single && c.depth == 1 && c.idx[0] > 0 && c.phase == TreeCursor::kHeader) {
+            c.done = true;
+            return true;
+        }
     }
     return false;
 }
@@ -446,6 +454,7 @@ bool HttpServerModule::stepPast(JsonSink& sink, TreeCursor& c) {
     }
     if (!c.single) {
         sink.append("]");
+        if (c.sub && c.sub->valuesOnly) sink.append(",\"detail\":\"values\"");
         // The id of the request the streamed state answers, so the page knows its view arrived rather than an earlier one.
         if (c.answers) sink.appendf(",\"resync\":%lu", static_cast<unsigned long>(c.answers));
         sink.append("}");
@@ -475,10 +484,14 @@ void HttpServerModule::stepInto(JsonSink& sink, TreeCursor& c, MoonModule* mod) 
         }
         if (here) {
             const ControlDescriptor& d = mod->controls()[c.ctrl];
+            const bool valuesOnly = c.sub && c.sub->valuesOnly;
             // A fragment-sized document cuts a large list or option set at a row or an option, so no fragment needs a large block.
-            if (c.pieces && writtenInPieces(d)) { writeControlPieceOf(sink, c, d); return; }
+            if (c.pieces && (valuesOnly ? d.type == ControlType::List && d.ptr : writtenInPieces(d))) {
+                writeControlPieceOf(sink, c, d);
+                return;
+            }
             if (c.ctrl > 0) sink.append(",");
-            writeControl(sink, d);
+            writeControl(sink, d, !valuesOnly);
             c.ctrl++;
             return;
         }
@@ -506,18 +519,18 @@ void HttpServerModule::writeStatus(JsonSink& sink, MoonModule* mod) {
     sink.appendf(",\"severity\":\"%s\"", sevStr[static_cast<int>(mod->severity())]);
 }
 
-void HttpServerModule::writeControl(JsonSink& sink, const ControlDescriptor& c) {
+void HttpServerModule::writeControl(JsonSink& sink, const ControlDescriptor& c, bool metadata) {
     // Common wrapper for every control; per-type VALUE + EXTRAS live in Control.cpp, but Password is handled here since its API form is XOR-obfuscated + base64 and writeControlValue stays sink-neutral.
     sink.appendf("{\"name\":\"%s\",\"type\":\"%s\",\"value\":",
                  c.name, controlTypeName(c.type));
     if (c.type == ControlType::Password) {
         // Not readable at a glance in `curl /api/state`, and the UI's hold-to-peek reverses it.
-        writeObfuscatedPassword(sink, static_cast<char*>(c.ptr));
+        writePasswordConfigured(sink, static_cast<char*>(c.ptr));
     } else {
         writeControlValue(sink, c);
     }
-    writeControlMetadata(sink, c);
-    writeControlTail(sink, c);
+    if (metadata) writeControlMetadata(sink, c);
+    writeControlTail(sink, c, metadata);
 }
 
 void HttpServerModule::writeControlPieceOf(JsonSink& sink, TreeCursor& c, const ControlDescriptor& d) {
@@ -528,8 +541,19 @@ void HttpServerModule::writeControlPieceOf(JsonSink& sink, TreeCursor& c, const 
         c.at = {};
         return;
     }
-    if (writeControlPiece(sink, d, c.at)) return;
-    writeControlTail(sink, d);
+    const bool valuesOnly = c.sub && c.sub->valuesOnly;
+    if (valuesOnly) {
+        // The shared list value consists of summary rows; option sets and row details belong to the full schema.
+        const auto& rows = *static_cast<const ListSource*>(d.ptr);
+        if (c.at.part == 0) { sink.append("["); c.at = {1, 0}; return; }
+        if (c.at.item < rows.listRowCount()) {
+            if (c.at.item) sink.append(",");
+            rows.writeListRow(sink, static_cast<uint8_t>(c.at.item++));
+            return;
+        }
+        sink.append("]");
+    } else if (writeControlPiece(sink, d, c.at)) return;
+    writeControlTail(sink, d, !valuesOnly);
     c.ctrlName = nullptr;
     c.ctrl++;
 }
@@ -579,9 +603,13 @@ void HttpServerModule::closeOpenControl(JsonSink& sink, TreeCursor& c) {
     c.ctrl++;
 }
 
-void HttpServerModule::writeControlTail(JsonSink& sink, const ControlDescriptor& c) {
+void HttpServerModule::writeControlTail(JsonSink& sink, const ControlDescriptor& c, bool metadata) {
     // Emit optional flags only when set (common case is false; omit to save bytes).
     if (c.readonly) sink.append(",\"readonly\":true");
+    if (!metadata) {
+        sink.append(c.hidden ? ",\"hidden\":true}" : "}");
+        return;
+    }
     if (c.minMode) sink.appendf(",\"minMode\":%u", static_cast<unsigned>(c.minMode));   // the mode the UI needs before it shows this
     if (c.numberField) sink.append(",\"numberField\":true");   // render a plain number input, not a slider
     if (c.hex) sink.append(",\"hex\":true");   // that number input reads and writes hexadecimal
@@ -670,6 +698,13 @@ bool HttpServerModule::anyClientResync() const MM_NONBLOCKING {
 bool HttpServerModule::anyStreamActive() const {
     for (const auto& cs : controlSends_)
         if (cs.source == Send::Source::Tree) return true;
+    // Background patches hold whole frames: under pressure they wait for generated HTTP answers rather than consume the RAM those answers need to drain.
+    if (!sendHasHeadroom()) {
+        for (const auto& answer : sends_)
+            if (answer.busy && (answer.source == Send::Source::Tree
+                            || answer.source == Send::Source::Types
+                            || answer.source == Send::Source::PresetIndex)) return true;
+    }
     return false;
 }
 

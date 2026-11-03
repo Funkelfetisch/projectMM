@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const load = async file => import('data:text/javascript;base64,' + Buffer.from(readFileSync(new URL(file, import.meta.url), 'utf8')).toString('base64'));
+const {drawJacketPreview} = await load('../../src/ui/nebulite-jacket-preview.js');
+const {productProjectionPoints} = await load('../../src/ui/nebulite-setup.js');
+
+test('jacket artwork consumes 30 ordered outputs and excludes the PWM slot', () => {
+    const samples=[], images=[], colours=[];
+    const ctx={fillStyle:'',globalCompositeOperation:'source-over',fillRect(){},save(){},restore(){},translate(){},scale(){},
+        createRadialGradient(){return {addColorStop(_offset, value){colours.push(value);}}},
+        drawImage(image){images.push(image);}};
+    const canvas={width:300,height:300,dataset:{},getContext:()=>ctx,setAttribute(){}};
+    const art={texture:{complete:true,naturalWidth:400},garment:{complete:true,naturalWidth:400}};
+    const projection=productProjectionPoints({name:'NEBULITE Jacket S3',state:{Layouts:{},Drivers:{}}});
+    const drawn=drawJacketPreview(canvas, 0, x=>{samples.push(Math.floor(x*31));return [20,40,60];},projection,art);
+    assert.equal(drawn,true);assert.deepEqual(samples,Array.from({length:30},(_,i)=>i));
+    assert.equal(images.length,3);assert.equal(colours.length,60);
+    assert.equal(canvas.dataset.previewRenderer,'jacket-30-simulation');
+    assert.equal(drawJacketPreview(canvas,0,()=>[],{points:[]},art),false);
+});

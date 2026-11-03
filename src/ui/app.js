@@ -10,6 +10,12 @@ import { isNewer, parse } from "./semver.js";
 import { collectFiles, restoreBundle } from "./migrate.js";
 import { moduleHelp, controlHelp, walkLinks, ROLE_EMOJI, DIM_EMOJI, SCRIPTED_EMOJI, COMPILED_EMOJI, EMOJI_LABEL,
          emojiTagsFor, emojiChipRow, chipsMatch } from "./help.js";
+import {
+    HELIO_FACTORY_SCENES,
+    HELIO_SCENE_PLAYLISTS,
+    helioPlaylistUsesAudio,
+    helioSceneUsesAudio,
+} from "./helio-scenes.js";
 
 // Sections (top to bottom):
 //   1. State + storage
@@ -50,6 +56,9 @@ let wsReconnectTimer = null;     // the pending reconnect setTimeout: tracked so
 let wsPaused = false;            // gated by document.visibilityState
 let wsUnloading = false;         // true once the page starts unloading (refresh/navigate): suppresses the
                                  // reconnect on the closing socket so the departing page doesn't error-log
+const HELIO_SCENES_VIEW = "__helio_scenes";
+let helioPlaylistTimer = null;
+let helioPlaylistRun = null;
 
 const dragTimers = {};           // per-control debounce timers (clearTimeout handles)
 const dragTs = {};               // per-control last-touched timestamp (ms): a short post-interaction cooldown
@@ -180,6 +189,12 @@ function connectWs() {
             // (see HttpServerModule's WLED shim). Those aren't our module-state shape: ignore anything
             // without a `modules` array, or it would clobber `state` and blank the module view.
             if (!Array.isArray(data.modules)) return;
+            // WebSocket resyncs carry values only. The streaming HTTP snapshot owns the schema,
+            // which keeps a metadata-heavy device tree out of one contiguous firmware allocation.
+            if (data.compact) {
+                if (state && Array.isArray(state.modules)) refetchState();
+                return;
+            }
             state = data;
             if (helpPending) loadHelp();
             relayMoonCloudOutbox();
@@ -221,7 +236,7 @@ function connectWs() {
 }
 
 // The modules the page reads outside the root it shows, by type: the status bar and mode, the update badge, the cloud relay, the preview's frame rate and the MIDI bridge.
-const ALWAYS_SUBSCRIBED = ["SystemModule", "FirmwareUpdateModule", "MoonCloudModule", "PreviewDriver", "MidiService"];
+const ALWAYS_SUBSCRIBED = ["SystemModule", "FirmwareUpdateModule", "MoonCloudModule", "PreviewDriver", "MidiService", "AudioService"];
 
 /// Tell the device which root the interface shows, so it sends that root in full and an outline of the rest.
 ///
@@ -620,7 +635,7 @@ async function sendControl(moduleName, controlName, value) {
         ? allModules().find(m => m.name === moduleName) : null;
     if (mod) {
         const ctrl = Array.isArray(mod.controls) && mod.controls.find(c => c.name === controlName);
-        if (ctrl) ctrl.value = value;
+        if (ctrl) ctrl.value = ctrl.type === "password" ? Boolean(value) : value;
         // Siblings on the same target move with it. The device already does this (followTargets runs
         // on every surface write), but the browser would not see it until the next 1 Hz push, so a
         // second fader bound to the same control lagged a second behind the one being dragged.
@@ -948,6 +963,19 @@ function renderNav() {
     // root's card subtree is rendered (one root visible at a time).
     const list = document.createElement("div");
     list.className = "nav-list";
+    if (isHelioDevice()) {
+        const scenes = document.createElement("button");
+        scenes.type = "button";
+        scenes.className = "nav-item";
+        scenes.textContent = "Scenes";
+        scenes.dataset.module = HELIO_SCENES_VIEW;
+        if (selectedModule === HELIO_SCENES_VIEW) scenes.classList.add("active");
+        scenes.addEventListener("click", () => selectModule(HELIO_SCENES_VIEW));
+        list.appendChild(scenes);
+        const rule = document.createElement("hr");
+        rule.className = "nav-sep";
+        list.appendChild(rule);
+    }
     navGroups(state.modules).forEach((group, gi) => {
         // A rule BETWEEN groups, never before the first or after the last. `<hr>` rather than a
         // styled div: it is the element that means "thematic break", so a screen reader announces
@@ -1011,6 +1039,7 @@ function buildNavFooter() {
 }
 
 function selectModule(name) {
+    if (name !== HELIO_SCENES_VIEW) stopHelioPlaylist();
     // Surface demo sweep (REMOVABLE): leaving a surface re-arms it, so re-opening demos again while
     // a re-render of the SAME surface (a pad click) does not.
     if (name !== selectedModule) surfaceDemoShownFor = null;
@@ -1094,6 +1123,11 @@ function renderCards() {
     if (!main || !state) return;
     renderedMode_ = uiMode();   // what these cards are being built for
 
+    if (selectedModule === HELIO_SCENES_VIEW && isHelioDevice()) {
+        renderHelioScenes(main);
+        return;
+    }
+
     // One root visible at a time: render only the selected root's subtree.
     // Falls back to the first root if the selection is missing or stale.
     let root = selectedModule ? findModule(selectedModule) : null;
@@ -1110,6 +1144,128 @@ function renderCards() {
     // `main` is the root of the rendered subtree, so it holds the encoder strips, the pad grid and
     // the fader strips wherever they sit in the card nesting.
     if (root && main.querySelector(".list-pads-fixed")) startSurfaceDemo(main, root.name);
+}
+
+function isHelioDevice() {
+    return deviceFirmwareInfo()?.firmware === "helio1";
+}
+
+function helioEffects() {
+    const layer = allModules().find(module => module.type === "Layer");
+    return Array.isArray(layer?.children) ? layer.children.filter(module => /Effect$/.test(module.type || "")) : [];
+}
+
+function helioAudioReady() {
+    const audio = allModules().find(module => module.type === "AudioService");
+    const pin = name => Number((audio?.controls || []).find(control => control.name === name)?.value);
+    return Boolean(audio) && audio.enabled !== false && pin("sckPin") >= 0 && pin("wsPin") >= 0 && pin("sdPin") >= 0;
+}
+
+function helioControlValue(effect, name) {
+    return (effect?.controls || []).find(control => control.name === name)?.value;
+}
+
+async function activateHelioScene(scene, status) {
+    if (!scene) return;
+    if (helioSceneUsesAudio(scene) && !helioAudioReady()) {
+        status.textContent = "Audio muss zuerst in Services eingerichtet werden.";
+        return;
+    }
+    status.textContent = "Aktiviere …";
+    let target = helioEffects().find(effect => effect.type === scene.type);
+    if (!target) {
+        const slot = helioEffects()[0];
+        const layer = allModules().find(module => module.type === "Layer");
+        if (slot) await replaceModule(slot.name, scene.type);
+        else if (layer) await addModule(scene.type, layer.name);
+        await refetchState();
+        target = helioEffects().find(effect => effect.type === scene.type);
+    }
+    if (!target) {
+        status.textContent = "Szene konnte nicht erstellt werden.";
+        return;
+    }
+    for (const effect of helioEffects()) {
+        if (effect.name !== target.name && effect.enabled !== false) await sendControl(effect.name, "enabled", false);
+    }
+    for (const [name, value] of Object.entries(scene.controls || {})) {
+        if (helioControlValue(target, name) !== undefined) await sendControl(target.name, name, value);
+    }
+    if (target.enabled === false) await sendControl(target.name, "enabled", true);
+    await refetchState();
+    const active = helioEffects().find(effect => effect.type === scene.type && effect.enabled !== false);
+    status.textContent = active ? scene.label : "Szene konnte nicht aktiviert werden.";
+    renderCards();
+}
+
+function stopHelioPlaylist() {
+    if (helioPlaylistTimer) clearTimeout(helioPlaylistTimer);
+    helioPlaylistTimer = null;
+    helioPlaylistRun = null;
+}
+
+function startHelioPlaylist(playlist, status) {
+    if (!playlist || helioPlaylistUsesAudio(playlist) && !helioAudioReady()) {
+        status.textContent = "Audio muss zuerst in Services eingerichtet werden.";
+        return;
+    }
+    stopHelioPlaylist();
+    helioPlaylistRun = { playlist, index: 0 };
+    const step = async () => {
+        const run = helioPlaylistRun;
+        if (!run) return;
+        const scene = HELIO_FACTORY_SCENES[run.playlist.order[run.index++ % run.playlist.order.length]];
+        await activateHelioScene(scene, status);
+        if (helioPlaylistRun !== run) return;
+        helioPlaylistTimer = setTimeout(step, Math.max(3, Number(run.playlist.duration) || 10) * 1000);
+    };
+    step();
+}
+
+function renderHelioScenes(host) {
+    const page = document.createElement("section");
+    page.className = "helio-scenes";
+    const heading = document.createElement("h1");
+    heading.textContent = "HELIO Scenes";
+    const status = document.createElement("p");
+    status.className = "helio-scenes-status";
+    status.textContent = "Wähle eine Animation.";
+    page.append(heading, status);
+
+    const playlists = document.createElement("div");
+    playlists.className = "helio-playlists";
+    for (const playlist of HELIO_SCENE_PLAYLISTS) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = playlist.label;
+        button.addEventListener("click", () => startHelioPlaylist(playlist, status));
+        playlists.appendChild(button);
+    }
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.textContent = "Playlist stoppen";
+    stop.addEventListener("click", () => { stopHelioPlaylist(); status.textContent = "Playlist gestoppt."; });
+    playlists.appendChild(stop);
+    page.appendChild(playlists);
+
+    const grid = document.createElement("div");
+    grid.className = "helio-scene-grid";
+    const activeType = helioEffects().find(effect => effect.enabled !== false)?.type;
+    for (const scene of HELIO_FACTORY_SCENES) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "helio-scene-card";
+        button.classList.toggle("active", scene.type === activeType);
+        const title = document.createElement("strong");
+        title.textContent = scene.label;
+        const detail = document.createElement("span");
+        detail.textContent = scene.audio ? `${scene.meta} · Audio` : scene.meta;
+        button.append(title, detail);
+        button.addEventListener("click", () => { stopHelioPlaylist(); activateHelioScene(scene, status); });
+        grid.appendChild(button);
+    }
+    page.appendChild(grid);
+    host.appendChild(page);
 }
 
 // ============================================================================
@@ -3383,10 +3539,11 @@ function createControl(moduleName, moduleType, ctrl, writeTo = (name, value) => 
         }
         case "filepath": return buildFilePathControl(row, label, key, moduleName, ctrl);
         case "password": {
-            // ctrl.value arrives obfuscated (writeObfuscatedPassword); decoded, the input holds the stored password, masked until hold-to-peek.
+            // Existing credentials stay on the device; reveal applies only to a newly typed replacement.
             const input = document.createElement("input");
             input.type = "password";
-            input.value = decodePassword(ctrl.value);
+            input.value = "";
+            input.placeholder = ctrl.value ? "Saved - enter to replace" : "Enter password";
             input.dataset.mid = moduleName;
             input.dataset.key = ctrl.name;
             input.addEventListener("input", () => {
@@ -4813,22 +4970,6 @@ function cancelSend(key) {
     delete pendingSends[key];
 }
 
-// A password, a control's or a list field's, arrives XOR-obfuscated and base64-encoded (writeObfuscatedPassword in Control.cpp), and this reverses it.
-// The key is a fixed shared constant, not a secret: obfuscation against reading it at a glance in /api/state, not encryption.
-const PW_XOR_KEY = 0x5A;
-function decodePassword(encoded) {
-    if (!encoded) return "";
-    try {
-        const bytes = atob(encoded);
-        let out = "";
-        for (let i = 0; i < bytes.length; i++) {
-            out += String.fromCharCode(bytes.charCodeAt(i) ^ PW_XOR_KEY);
-        }
-        return out;
-    } catch {
-        return "";
-    }
-}
 
 function fmtTime(sec) {
     sec = Math.max(0, Math.floor(Number(sec) || 0));
@@ -5214,8 +5355,7 @@ function updateModuleControls(mod) {
             case "password": {
                 // The peek button flips the input to type="text", so match either.
                 const input = queryByName(`input[data-mid="${cssEscape(mid)}"][data-key="${k}"]`, "data-mid", mid);
-                const decoded = decodePassword(ctrl.value);
-                if (input && input.value !== decoded) input.value = decoded;
+                if (input) input.placeholder = ctrl.value ? "Saved - enter to replace" : "Enter password";
                 break;
             }
             case "select": {
@@ -8418,7 +8558,8 @@ async function openFileEditor(relPath, expectedSize, moduleName) {
 // 9. Boot
 // ---------------------------------------------------------------------------
 
-document.addEventListener("DOMContentLoaded", init);
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+else init();
 
 
 /// The palette editor: a gradient strip whose stops are dragged, added and removed, plus the

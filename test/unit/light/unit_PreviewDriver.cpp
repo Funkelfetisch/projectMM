@@ -9,6 +9,8 @@
 #include "light/layouts/Layouts.h"
 #include "light/layouts/GridLayout.h"
 #include "light/layouts/SphereLayout.h"
+#include "light/layouts/RingLayout.h"
+#include "light/layouts/PixelMapLayout.h"
 
 #include <vector>
 #include <cstring>
@@ -241,6 +243,74 @@ TEST_CASE("PreviewDriver keeps its index cache filled when a sparse layout shrin
     rig.layer.applyState();
     rig.drivers.applyState();
     CHECK(rig.preview->keptCountForTest() == 210);   // the 210 shell lights of radius 4, cached
+}
+
+TEST_CASE("PreviewDriver blends RGBW into a warm browser color without changing source") {
+    mm::GridLayout g;
+    g.width = 1; g.height = 1; g.depth = 1;
+    PreviewRig rig(&g, 4);
+    rig.preview->setPreviewWhitePoint(255, 176, 110);
+    uint8_t* px = rig.layer.buffer().data();
+    REQUIRE(px != nullptr);
+    px[0] = 200; px[1] = 20; px[2] = 5; px[3] = 150;
+    rig.produce();
+    REQUIRE(rig.cap.lastFrame.size() == 12);
+    CHECK(rig.cap.lastFrame[9] == 255);
+    CHECK(rig.cap.lastFrame[10] == 124);
+    CHECK(rig.cap.lastFrame[11] == 70);
+    CHECK(px[3] == 150);
+}
+
+TEST_CASE("PreviewDriver keeps physical strip colors aligned with sparse ring coordinates") {
+    struct StripEffect : mm::EffectBase {
+        bool usesPhysicalLightOrder() const override { return true; }
+    } effect;
+    mm::RingLayout ring;
+    ring.nrOfLEDs = 24;
+    PreviewRig rig(&ring, 4);
+    rig.layer.addChild(&effect);
+    rig.layer.applyState();
+    rig.drivers.applyState();
+    REQUIRE(rig.layer.buffer().count() == 24);
+    uint8_t* data = rig.layer.buffer().data();
+    std::memset(data, 0, 24 * 4);
+    data[3 * 4] = 123;
+    rig.produce();
+    CHECK(rig.cap.coordCount() == 24);
+    CHECK(rig.cap.frameCount() == 24);
+    REQUIRE(rig.cap.lastFrame.size() == 9u + 24u * 3u);
+    CHECK(rig.cap.lastFrame[9 + 3 * 3] == 123);
+}
+
+TEST_CASE("PreviewDriver retains edited wearable point order including duplicate positions") {
+    struct StripEffect : mm::EffectBase {
+        bool usesPhysicalLightOrder() const override { return true; }
+    } effect;
+    mm::PixelMapLayout map;
+    std::strcpy(map.points, "5,14;7,14;7,14;0,5;20,5");
+    PreviewRig rig(&map);
+    rig.layer.addChild(&effect);
+    rig.layer.applyState();
+    rig.drivers.applyState();
+    REQUIRE(rig.layer.buffer().count() == 5);
+    auto* data = rig.layer.buffer().data();
+    for (int i = 0; i < 5; ++i) {
+        data[i * 3] = static_cast<uint8_t>(10 + i);
+        data[i * 3 + 1] = static_cast<uint8_t>(20 + i);
+        data[i * 3 + 2] = static_cast<uint8_t>(30 + i);
+    }
+    rig.produce();
+    REQUIRE(rig.cap.coordCount() == 5);
+    REQUIRE(rig.cap.frameCount() == 5);
+    REQUIRE(rig.cap.lastCoord.size() == 11u + 5u * 3u);
+    REQUIRE(rig.cap.lastFrame.size() == 9u + 5u * 3u);
+    const uint8_t positions[] = {5,14,0, 7,14,0, 7,14,0, 0,5,0, 20,5,0};
+    for (int i = 0; i < 15; ++i) CHECK(rig.cap.lastCoord[11 + i] == positions[i]);
+    for (int i = 0; i < 5; ++i) {
+        CHECK(rig.cap.lastFrame[9 + i * 3] == 10 + i);
+        CHECK(rig.cap.lastFrame[10 + i * 3] == 20 + i);
+        CHECK(rig.cap.lastFrame[11 + i * 3] == 30 + i);
+    }
 }
 
 // A large layout is SPATIALLY downsampled on a regular per-axis lattice, and the COLOR frame carries that stride while the coordinate table stays whole, so the browser maps each color onto its block.

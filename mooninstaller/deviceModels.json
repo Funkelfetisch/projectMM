@@ -2036,5 +2036,217 @@
         }
       }
     }
+  },
+  {
+    "name": "NEBULITE Croptop ESP32",
+    "chip": "ESP32",
+    "firmwares": ["nebulite-esp32"],
+    "description": "Experimental archived WLED crop-top configuration; verify GPIO26, LED wiring, power and recovery on the actual controller before use. Battery and charging wiring are not configured.",
+    "supported": ["LEDs"],
+    "planned": ["Battery", "Charging"],
+    "state": {
+      "System": {"deviceModel": "NEBULITE Croptop ESP32"},
+      "Drivers": {
+        "$patch": "replace",
+        "RGB1": {"type": "RmtLedDriver", "pins": "26", "fixture": "RGB", "start": 0, "curve": "linear", "whiteMode": "None", "ledsPerPin": "8"}
+      },
+      "Layouts": {"$patch": "replace", "ProductStrip": {"type": "GridLayout", "width": 8, "height": 1, "depth": 1}}
+    }
+  },
+  {
+    "name": "NEBULITE Croptop S3",
+    "chip": "ESP32-S3",
+    "firmwares": [
+      "nebulite-s3"
+    ],
+    "description": "Source-derived bench profile; battery protection, buttons, output and update recovery require physical qualification.",
+    "supported": [
+      "LEDs",
+      "WiFi",
+      "Audio"
+    ],
+    "planned": [
+      "Battery",
+      "Buttons"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "NEBULITE Croptop S3"
+      },
+      "Drivers": {
+        "$patch": "replace",
+        "RGB1": {
+          "type": "RmtLedDriver",
+          "pins": "36",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "8"
+        },
+        "Accent": {
+          "type": "PwmLightDriver",
+          "pins": "46",
+          "fixture": "White",
+          "start": 8,
+          "count": 1,
+          "curve": "linear",
+          "whiteMode": "None",
+          "bits": 12
+        }
+      },
+      "Layouts": {
+        "$patch": "replace",
+        "ProductStrip": {
+          "type": "GridLayout",
+          "width": 9,
+          "height": 1,
+          "depth": 1
+        }
+      },
+      "Services": {
+        "Audio": {
+          "type": "AudioService",
+          "mode": "local audio",
+          "sdPin": 39,
+          "wsPin": 38,
+          "sckPin": 40,
+          "mclkPin": -1
+        },
+        "BLE": {
+          "type": "BleControlService"
+        }
+      }
+    }
+  },
+  {
+    "name": "NEBULITE Jacket S3",
+    "displayName": "NEBULITE Jacket / Vest S3",
+    "chip": "ESP32-S3",
+    "firmwares": [
+      "nebulite-s3"
+    ],
+    "description": "Source-derived bench profile; battery protection, buttons, output and update recovery require physical qualification.",
+    "supported": [
+      "LEDs",
+      "WiFi",
+      "Audio"
+    ],
+    "planned": [
+      "Battery",
+      "Buttons"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "NEBULITE Jacket S3"
+      },
+      "Drivers": {
+        "$patch": "replace",
+        "RGB1": {
+          "type": "RmtLedDriver",
+          "pins": "36",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "ledsPerPin": "30"
+        },
+        "Accent": {
+          "type": "PwmLightDriver",
+          "pins": "46",
+          "fixture": "White",
+          "start": 30,
+          "bits": 12,
+          "count": 1,
+          "curve": "linear",
+          "whiteMode": "None"
+        },
+        "RGB3": {
+          "type": "RmtLedDriver",
+          "pins": "35",
+          "fixture": "RGB",
+          "start": 31,
+          "curve": "linear",
+          "ledsPerPin": "30"
+        },
+        "RGB4": {
+          "type": "RmtLedDriver",
+          "pins": "48",
+          "fixture": "RGB",
+          "start": 61,
+          "curve": "linear",
+          "ledsPerPin": "30"
+        }
+      },
+      "Layouts": {
+        "$patch": "replace",
+        "ProductStrip": {
+          "type": "GridLayout",
+          "width": 91,
+          "height": 1,
+          "depth": 1
+        }
+      },
+      "Services": {
+        "Audio": {
+          "type": "AudioService",
+          "mode": "local audio",
+          "sdPin": 39,
+          "wsPin": 38,
+          "sckPin": 40,
+          "mclkPin": -1
+        },
+        "BLE": {
+          "type": "BleControlService"
+        }
+      }
+    }
+  },
+  {
+    "name": "HELIO 1",
+    "chip": "ESP32-S3",
+    "firmwares": [
+      "helio1"
+    ],
+    "description": "Original 222-pixel 12 V sphere, GPIO35 RGBW; later lane PCBs use separate profiles.",
+    "supported": [
+      "LEDs",
+      "WiFi",
+      "Audio",
+      "I2C"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "HELIO 1"
+      },
+      "Drivers": {
+        "RmtLed": {
+          "type": "RmtLedDriver",
+          "pins": "35",
+          "ledsPerPin": "222",
+          "fixture": "RGBW",
+          "whiteMode": "Accurate",
+          "curve": "linear"
+        }
+      },
+      "Layouts": {
+        "HELIO Circle": {
+          "type": "RingLayout",
+          "nrOfLEDs": 222,
+          "radius": 24
+        }
+      },
+      "Services": {
+        "Ambient Light": {
+          "type": "Bh1750Service",
+          "bus": 1,
+          "sda": 26,
+          "scl": 11,
+          "address": 35
+        },
+        "BLE": {
+          "type": "BleControlService"
+        }
+      }
+    }
   }
 ]

@@ -254,6 +254,31 @@ FIRMWARES: dict[str, dict] = {
         # real way to try this before buying an S31.
         "panel_cards": True,
     },
+    "nebulite-esp32": {
+        "chip": "esp32",
+        "fragments": ["sdkconfig.defaults", "sdkconfig.defaults.moonbase-4mb", "sdkconfig.defaults.nebulite-esp32"],
+        "moonbase": True,
+        "eth_only": False,
+        "description": "NEBULITE classic ESP32 experimental build, 4 MB flash, WiFi and BLE; no verified board profile.",
+        "ships": False,
+        "installable": False,
+    },
+    "nebulite-s3": {
+        "chip": "esp32s3",
+        "fragments": ["sdkconfig.defaults", "sdkconfig.defaults.helio1"],
+        "eth_only": False,
+        "description": "NEBULITE S3 bench candidate, 8 MB flash, no PSRAM, BLE and WiFi.",
+        "ships": False,
+        "installable": False,
+    },
+    "helio1": {
+        "chip": "esp32s3",
+        "fragments": ["sdkconfig.defaults", "sdkconfig.defaults.helio1"],
+        "eth_only": False,
+        "description": "HELIO 1 — ESP32-S3, 8 MB flash, no PSRAM, WiFi and RGBW RMT output.",
+        "ships": False,
+        "installable": False,
+    },
     "esp32s3-zero": {
         "chip": "esp32s3",
         "fragments": ["sdkconfig.defaults", "sdkconfig.defaults.esp32s3-quad",
@@ -893,6 +918,17 @@ def main():
         if args.migrate_pause:
             build_migrate(cmd, env, chip, build_dir, args.migrate_pause)
 
+    sys.stdout.flush()  # Keep these warnings after the buffered build summary in redirected logs.
+    if FIRMWARES[firmware].get("moonbase"):
+        print("\nWARNING: ESP-IDF's generic flash instructions above put the application "
+              "in the MoonBase factory partition; do not use idf.py flash or this build's "
+              "flash_args. MoonBase and the application have separate slots. "
+              "See docs/reference/build-system.md and the MoonBase-aware flash tooling.",
+              file=sys.stderr)
+    if not FIRMWARES[firmware].get("installable", True):
+        print(f"WARNING: {firmware} is an experimental, non-installable build; "
+              "successful compilation does not qualify it for installation.", file=sys.stderr)
+
 
 # ---- MoonBase flash layout, shared by every consumer of the build output ----
 # flash_esp32.py (serial flash), generate_manifest.py (web installer), preview_installer.py
@@ -934,6 +970,55 @@ def partition_offsets(csv_path: Path) -> dict:
     return out
 
 
+def _moonbase_partition_layout(csv_path: Path) -> dict:
+    """Exact relevant partitions; refuse missing, ambiguous or invalid entries."""
+    import csv as _csv
+    wanted = {("app", "factory"), ("app", "ota_0"), ("data", "ota")}
+    found = {}
+    for row in _csv.reader(csv_path.read_text(encoding="utf-8").splitlines()):
+        if not row or row[0].strip().startswith("#") or len(row) < 5:
+            continue
+        key = (row[1].strip(), row[2].strip())
+        if key not in wanted:
+            continue
+        if key in found:
+            raise ValueError(f"duplicate MoonBase partition {key}")
+        try:
+            offset, size = int(row[3].strip(), 0), int(row[4].strip(), 0)
+        except ValueError as exc:
+            raise ValueError(f"invalid MoonBase partition {key}") from exc
+        if offset < 0 or size <= 0:
+            raise ValueError(f"invalid MoonBase partition {key}")
+        found[key] = (offset, size)
+    if set(found) != wanted:
+        raise ValueError("incomplete MoonBase partition table")
+    ranges = sorted((offset, offset + size) for offset, size in found.values())
+    if any(a[1] > b[0] for a, b in zip(ranges, ranges[1:])):
+        raise ValueError("overlapping MoonBase partitions")
+    return found
+
+
+def _check_built_moonbase_table(path: Path, expected: dict) -> None:
+    """Compare generated IDF partition bytes with the CSV before choosing offsets."""
+    import struct
+    data = path.read_bytes()
+    if not data or len(data) % 32:
+        raise ValueError("invalid built partition table")
+    names = {(0, 0): ("app", "factory"), (0, 16): ("app", "ota_0"), (1, 0): ("data", "ota")}
+    found = {}
+    for offset in range(0, len(data), 32):
+        magic, kind, subtype, start, size, _, _ = struct.unpack_from("<HBBII16sI", data, offset)
+        if magic != 0x50aa:
+            break  # End marker or optional MD5 trailer.
+        key = names.get((kind, subtype))
+        if key:
+            if key in found:
+                raise ValueError(f"duplicate built MoonBase partition {key}")
+            found[key] = (start, size)
+    if found != expected:
+        raise ValueError("built partition table differs from the selected MoonBase layout; rebuild")
+
+
 def otadata_slot0_bytes() -> bytes:
     """An otadata image with slot 0 (ota_0) selected, so a fresh full flash boots the app with
     MoonBase standing by (blank otadata boots the factory slot: MoonBase). Two 4 KB copies; the
@@ -953,16 +1038,33 @@ def moonbase_flash_files(firmware: str, build_dir: Path) -> list[tuple[str, Path
     the app remapped to ota_0, the blank otadata replaced by the slot-0 image (written into the
     build dir), and MoonBase added at the factory slot."""
     import json as _json
-    offs = partition_offsets(moonbase_table_csv(firmware))
+    layout = _moonbase_partition_layout(moonbase_table_csv(firmware))
+    offs = {subtype: hex(offset) for (_, subtype), (offset, _) in layout.items()}
     chip = FIRMWARES[firmware]["chip"]
     moonbase_bin = build_dir.parent / f"moonbase-{chip}" / MOONBASE_BIN
     if not all(k in offs for k in ("factory", "ota_0", "ota")) or not moonbase_bin.exists():
         raise FileNotFoundError(
             f"MoonBase layout needs factory/ota_0/otadata offsets and a built image "
             f"(run build_esp32.py first; missing: {moonbase_bin})")
-    otadata = build_dir / "ota_data_slot0.bin"
-    otadata.write_bytes(otadata_slot0_bytes())
     fa = _json.loads((build_dir / "flasher_args.json").read_text(encoding="utf-8"))
+    partition = fa.get("partition-table", {}).get("file")
+    if not isinstance(partition, str):
+        raise ValueError("flasher metadata lacks the built partition table")
+    _check_built_moonbase_table(build_dir / partition, layout)
+    app_entries = [rel for rel in fa.get("flash_files", {}).values() if Path(rel).name == APP_BIN]
+    ota_entries = [rel for rel in fa.get("flash_files", {}).values() if Path(rel).name == "ota_data_initial.bin"]
+    if len(app_entries) != 1 or len(ota_entries) != 1:
+        raise ValueError("flasher metadata must contain exactly one app and otadata image")
+    app = build_dir / app_entries[0]
+    for label, path, limit in (("app", app, layout[("app", "ota_0")][1]),
+                               ("MoonBase", moonbase_bin, layout[("app", "factory")][1])):
+        if not path.is_file():
+            raise FileNotFoundError(f"missing {label} image: {path}")
+        if not 0 < path.stat().st_size <= limit:
+            raise ValueError(f"{label} image does not fit its partition")
+    if len(otadata_slot0_bytes()) != layout[("data", "ota")][1]:
+        raise ValueError("unexpected otadata partition size")
+    otadata = build_dir / "ota_data_slot0.bin"
     writes: list[tuple[str, Path]] = []
     for off, rel in fa["flash_files"].items():
         name = Path(rel).name
@@ -973,6 +1075,32 @@ def moonbase_flash_files(firmware: str, build_dir: Path) -> list[tuple[str, Path
         else:
             writes.append((off, build_dir / rel))
     writes.append((offs["factory"], moonbase_bin))
+    # Check the whole plan, including any bootloader/partition-table entries,
+    # before writing even the locally generated otadata image. This prevents a
+    # malformed or stale flasher map from silently overwriting either slot.
+    spans = []
+    for off, path in writes:
+        try:
+            start = int(str(off), 0)
+        except ValueError as exc:
+            raise ValueError(f"invalid flash offset: {off}") from exc
+        if path == otadata:
+            length = len(otadata_slot0_bytes())
+        else:
+            if not path.is_file():
+                raise FileNotFoundError(f"missing flash image: {path}")
+            length = path.stat().st_size
+        if start < 0 or not length or start + length > 0x100000000:
+            raise ValueError(f"invalid flash range: {path}")
+        if path not in (app, moonbase_bin, otadata):
+            if any(start < reserved + size and reserved < start + length
+                   for reserved, size in layout.values()):
+                raise ValueError(f"flash image overlaps a reserved partition: {path}")
+        spans.append((start, start + length))
+    spans.sort()
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        raise ValueError("flash images overlap")
+    otadata.write_bytes(otadata_slot0_bytes())
     return writes
 
 

@@ -4,12 +4,34 @@
 
 #include "core/module/Control.h"    // applyControlValue + ApplyResult in setControl
 #include "core/util/JsonUtil.h"   // mm::json::parseBool for the "enabled" pseudo-control
+#include "core/util/PinList.h"
 #include "platform/platform.h"
 
 #include <cstdio>   // std::snprintf in freeName
 #include <cstring>  // std::strcmp in firstInTree
 
 namespace mm {
+
+bool Scheduler::pinControlConflicts(const ControlDescriptor& control, const char* valueJson, ApplyPolicy policy, const void* owner) const {
+    if (!pinReservations_.any()) return false;
+    const bool list = control.type == ControlType::Text && isPinListControl(control.name);
+    if (control.type != ControlType::Pin && !list) return false;
+    ControlDescriptor probe = control;
+    if (control.type == ControlType::Pin) {
+        int8_t pin = -1; probe.ptr = &pin;
+        if (applyControlValue(probe, valueJson, "value", policy) != ApplyResult::Ok) return false;
+        return pin >= 0 && pinReservations_.reservedByOther(owner, static_cast<uint8_t>(pin));
+    }
+    char text[1024] = {};
+    if (probe.max <= 0 || static_cast<size_t>(probe.max) > sizeof(text)) return true;
+    probe.ptr = text;
+    if (applyControlValue(probe, valueJson, "value", policy) != ApplyResult::Ok) return false;
+    if (!text[0]) return false;
+    uint16_t pins[64] = {}; uint8_t count = 0;
+    if (parsePinList(text, pins, 64, count)) return true;
+    for (uint8_t i = 0; i < count; ++i) if (pinReservations_.reservedByOther(owner, pins[i])) return true;
+    return false;
+}
 
 void Scheduler::addModule(MoonModule* mod) {
     if (!mod || moduleCount_ >= modules_.size()) return;
@@ -18,6 +40,11 @@ void Scheduler::addModule(MoonModule* mod) {
 
 void Scheduler::setup() {
     instance_ = this;   // the one live Scheduler, reachable via Scheduler::instance()
+    preparationRevision_ = 0;
+    failedPreparationRevision_ = 0;
+    preparationResult_ = {};
+    prepareRequested_.store(false, std::memory_order_relaxed);
+    for (auto& scope : preparePending_) scope.store(nullptr, std::memory_order_relaxed);
     startTime_ = platform::millis();
 
     // Phase 1: bind each module's controls from scratch, so the persistence hook can apply file values to (name → variable pointer) descriptors.
@@ -46,7 +73,9 @@ void Scheduler::setup() {
     }
 
     // Phase 5: a MoonLive script's declared controls exist only once phase 4 has compiled it, so the values the load held for them land now.
-    applyDeferredControls(*this);
+    preparationResult_ = applyDeferredControls(*this);
+    if (!preparationResult_.ok) ++failedPreparationRevision_;
+    ++preparationRevision_;
 
     lastLoop20ms_ = platform::millis();
     lastLoop1s_ = platform::millis();
@@ -108,7 +137,22 @@ void Scheduler::tick() MM_NONBLOCKING {
     }
 }
 
-void Scheduler::release() {
+void Scheduler::shutdownStep(uint32_t now) {
+    for (uint8_t i = moduleCount_; i > 0; --i)
+        if (modules_[i - 1]) modules_[i - 1]->shutdownStep(now);
+}
+
+bool Scheduler::release() {
+    // Inspect the whole tree before touching any sibling. An owner must finish
+    // its own checked handover before the caller retries shutdown.
+    for (uint8_t i = 0; i < moduleCount_; ++i)
+        if (modules_[i] && !modules_[i]->subtreeRemovalAllowed()) return false;
+    // A worker can discover an unsuccessful hardware handover only while
+    // quiescing. Check again before releasing or deleting any module.
+    for (uint8_t i = moduleCount_; i > 0; --i)
+        if (modules_[i - 1]) modules_[i - 1]->quiesceSubtreeForRemoval();
+    for (uint8_t i = 0; i < moduleCount_; ++i)
+        if (modules_[i] && !modules_[i]->subtreeRemovalAllowed()) return false;
     // Two passes: release every module first so a release can still observe its siblings, then delete the trees.
     for (uint8_t i = moduleCount_; i > 0; i--) {
         modules_[i - 1]->release();
@@ -131,6 +175,12 @@ void Scheduler::release() {
             entry.done(entry.tag, refused);
         }
     }
+    prepareRequested_.store(false, std::memory_order_relaxed);
+    for (auto& scope : preparePending_) scope.store(nullptr, std::memory_order_relaxed);
+    preparationResult_ = {};
+    preparationRevision_ = 0;
+    failedPreparationRevision_ = 0;
+    return true;
 }
 
 uint32_t Scheduler::elapsed() const {
@@ -146,6 +196,13 @@ void Scheduler::preparePending() {
         if (MoonModule* m = slot.exchange(nullptr, std::memory_order_relaxed)) scopes[scopeCount++] = m;
     if (prepareRequested_.exchange(false, std::memory_order_relaxed)) prepareTree();   // the tree covers every scope
     else if (scopeCount) prepareSubtrees(scopes, scopeCount);
+}
+
+bool Scheduler::preparationPending() const MM_NONBLOCKING {
+    if (prepareRequested_.load(std::memory_order_relaxed)) return true;
+    for (const auto& scope : preparePending_)
+        if (scope.load(std::memory_order_relaxed)) return true;
+    return false;
 }
 
 bool Scheduler::applyLive(char* text, LiveDone done, uintptr_t tag) {
@@ -172,13 +229,16 @@ void Scheduler::applyPendingLive() {
 void Scheduler::prepareTree() {
     // This walk is the one a pending request asked for; a request made during it still stands.
     prepareRequested_.store(false, std::memory_order_relaxed);
+    for (auto& scope : preparePending_) scope.store(nullptr, std::memory_order_relaxed);
     for (uint8_t i = 0; i < moduleCount_; i++) {
         modules_[i]->applyState();
     }
     // Controls a state document named before their script compiled; this prepare compiled it.
-    applyDeferredControls(*this);
+    preparationResult_ = applyDeferredControls(*this);
+    if (!preparationResult_.ok) ++failedPreparationRevision_;
     // Last, so a module reading across the tree sees every script's controls.
     for (uint8_t i = 0; i < moduleCount_; i++) modules_[i]->onTreePrepared();
+    ++preparationRevision_;
 }
 
 namespace {
@@ -192,14 +252,23 @@ bool holds(const MoonModule* root, const MoonModule* m) {
 }  // namespace
 
 void Scheduler::prepareSubtrees(MoonModule* const* scopes, uint8_t count) {
+    if (!count) return;
     for (uint8_t s = 0; s < count; s++) {
         bool present = false;
         for (uint8_t i = 0; i < moduleCount_ && !present; i++) present = modules_[i] && holds(modules_[i], scopes[s]);
         if (!present) { prepareTree(); return; }   // gone since the request: the tree it changed is rebuilt whole
     }
+    for (auto& slot : preparePending_) {
+        for (uint8_t s = 0; s < count; s++) {
+            MoonModule* expected = scopes[s];
+            slot.compare_exchange_strong(expected, nullptr, std::memory_order_relaxed);
+        }
+    }
     for (uint8_t s = 0; s < count; s++) scopes[s]->applyState();
-    applyDeferredControls(*this);
+    preparationResult_ = applyDeferredControls(*this);
+    if (!preparationResult_.ok) ++failedPreparationRevision_;
     for (uint8_t i = 0; i < moduleCount_; i++) modules_[i]->onTreePrepared();
+    ++preparationRevision_;
 }
 
 namespace {
@@ -263,6 +332,9 @@ Scheduler::SetControlResult Scheduler::setControl(const char* moduleName,
                                                  const char* valueJson, bool live) {
     MoonModule* target = firstByName(moduleName);
     if (!target) return SetControlResult::ModuleNotFound;
+    if (!target->acceptsControlWrite(controlName) ||
+        (std::strcmp(controlName, "enabled") == 0 && !target->subtreeRemovalAllowed()))
+        return SetControlResult::ReadOnly;
     // Restored however this returns, so only the writes this one makes inherit it.
     struct LiveScope {
         bool& flag; bool was;
@@ -272,7 +344,9 @@ Scheduler::SetControlResult Scheduler::setControl(const char* moduleName,
 
     // Module-level "enabled" pseudo-control, toggles the flag, then a full rebuild so the disabled subtree stops/starts ticking.
     if (std::strcmp(controlName, "enabled") == 0) {
-        target->setEnabled(mm::json::parseBool(valueJson, "value"));
+        const bool enabled = mm::json::parseBool(valueJson, "value");
+        if (!enabled && target->enabledSetting() && !target->prepareSubtreeRemoval()) return SetControlResult::ReadOnly;
+        target->setEnabled(enabled);
         if (!liveWrite_) {   // a service flipping a look is driving it, as for any other control
             target->markDirty();
             if (noteDirtyHook_) noteDirtyHook_();
@@ -287,6 +361,9 @@ Scheduler::SetControlResult Scheduler::setControl(const char* moduleName,
     for (uint8_t i = 0; i < ctrls.count(); i++) {
         auto& c = ctrls[i];
         if (std::strcmp(c.name, controlName) != 0) continue;
+
+        if (pinControlConflicts(c, valueJson, ApplyPolicy::Strict, target->pinReservationOwner())) return SetControlResult::ReadOnly;
+        if (!target->prepareControlWrite(controlName)) return SetControlResult::ReadOnly;
 
         // Per-type parse, validate and apply live in Control.cpp; a non-Ok result leaves the storage untouched.
         switch (applyControlValue(c, valueJson, "value")) {

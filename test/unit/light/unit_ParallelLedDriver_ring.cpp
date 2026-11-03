@@ -7,6 +7,7 @@
 
 #include <algorithm>   // std::count (pin-count in wireShift)
 #include <cstring>
+#include <functional>
 #include <vector>
 
 // The DOMAIN half of the MoonI80 streaming ring (the platform GDMA half is bench-verified on the S3, desktop stubs return false, so busIsRing() is false on host and tick() never routes here).
@@ -71,9 +72,26 @@ public:
     uint8_t* busBuffer(uint8_t i) override { return (i == 0 && !buf_.empty()) ? buf_.data() : nullptr; }
     size_t busCapacity() const override { return cap_; }
     bool busTransmit(uint8_t, size_t) override { return true; }
-    bool busWait(uint8_t, uint32_t) override { return true; }
+    bool busWait(uint8_t, uint32_t) override {
+        if (!deferredPending) return true;
+        ++waitCalls;
+        if (observe) observe("wait");
+        // A refill remains possible while waiting, even if the deadline then expires.
+        deferredFrame = driveRingFrame();
+        if (waitSucceeds) deferredPending = false;
+        return waitSucceeds;
+    }
     uint32_t busLastTransmitUs() const override { return 0; }
-    void busDeinit() override { cap_ = 0; buf_.clear(); ringActive_ = false; }
+    void busDeinit() override {
+        ++deinitCalls;
+        if (deferredPending) {
+            if (observe) observe("cancel");
+            ++cancelCalls;
+            deferredPending = false; // the hardware cancellation prevents further refills
+        }
+        if (observe) observe("deinit");
+        cap_ = 0; buf_.clear(); ringActive_ = false;
+    }
     mm::platform::RmtLoopbackResult busLoopback(const uint8_t*, size_t, size_t, uint8_t) override { return {}; }
 
     // --- ring hooks (the seam the platform drives). The mock stores the geometry and hands out
@@ -92,7 +110,24 @@ public:
         return true;
     }
     bool busIsRing() const MM_NONBLOCKING override { return ringActive_; }
-    bool busTransmitRing() override { return true; }   // the wire itself is the platform's; the encode is what we test
+    bool busTransmitRing() override {
+        ++transmitCalls;
+        if (!transmitSucceeds) return false;
+        if (deferRing) deferredPending = true;
+        return true;
+    }
+
+    // Opt-in asynchronous HAL seam: no driver encode happens until busWait.
+    bool deferRing = false;
+    bool waitSucceeds = true;
+    bool transmitSucceeds = true;
+    bool deferredPending = false;
+    unsigned waitCalls = 0;
+    unsigned transmitCalls = 0;
+    unsigned deinitCalls = 0;
+    unsigned cancelCalls = 0;
+    std::vector<uint8_t> deferredFrame;
+    std::function<void(const char*)> observe;
 
     // Replay one frame through the ring exactly as the platform does: prime the first min(N, needed) buffers, then refill in ring order until the slice that reaches totalRows. Returns the frame reassembled in ROW order (buffer contents concatenated in the order the DMA would clock them), WITHOUT the pad, so it lines up with a whole-frame encode's row region for a byte compare.
     std::vector<uint8_t> driveRingFrame() { return driveRingFrameCoalesced(1); }
@@ -377,7 +412,102 @@ bool wireRing(MockRingDriver& d, MockRingPeripheral& peripheral, mm::Buffer& src
     return peripheral.busInitRing(rowBytes, static_cast<uint32_t>(d.maxLaneLights()));
 }
 
+void checkDeferredSourceChange(bool timeout) {
+    for (bool snapshot : {false, true}) {
+        for (bool detach : {false, true}) {
+            INFO("snapshot=" << snapshot << " detach=" << detach << " timeout=" << timeout);
+            MockRingPeripheral peripheral;
+            MockRingDriver d;
+            mm::Buffer src, replacement;
+            mm::Correction corr;
+            REQUIRE(wireRing(d, peripheral, src, corr));
+            REQUIRE(replacement.allocate(7 * 16, 3));
+            std::memset(replacement.data(), 0xe7, replacement.bytes());
+            d.ringSnapshot = snapshot;
+            if (snapshot) REQUIRE(d.snapshotForTest());
+            const auto expected = peripheral.driveRingFrame();
+            const auto oldRows = d.maxLaneLights();
+            const auto deinitBefore = peripheral.deinitCalls;
+            peripheral.deferRing = true;
+            peripheral.waitSucceeds = !timeout;
+            peripheral.observe = [&](const char*) {
+                // The delayed encode and any cancellation still belong to the old frame.
+                CHECK(d.sourceBuffer() == &src);
+                CHECK(d.maxLaneLights() == oldRows);
+            };
+            d.tick();
+            REQUIRE(peripheral.deferredPending);
+            REQUIRE(peripheral.waitCalls == 0);
+
+            d.setSourceBuffer(detach ? nullptr : &replacement);
+
+            CHECK(peripheral.waitCalls == 1);
+            CHECK(peripheral.deferredFrame == expected); // real encodeRows consumed the old frame
+            CHECK_FALSE(peripheral.deferredPending);
+            CHECK(d.sourceBuffer() == (detach ? nullptr : &replacement));
+            if (timeout) {
+                CHECK(peripheral.cancelCalls == 1);
+                CHECK(peripheral.deinitCalls == deinitBefore + 1);
+                CHECK_FALSE(peripheral.busIsRing());
+            } else {
+                CHECK(peripheral.cancelCalls == 0);
+                CHECK(peripheral.deinitCalls == deinitBefore + (detach ? 1 : 0));
+                CHECK(peripheral.busIsRing() == !detach);
+            }
+            if (!detach) CHECK(d.maxLaneLights() == 7);
+            peripheral.observe = {};
+            d.release();
+        }
+    }
+}
+
 } // namespace
+
+TEST_CASE("MoonI80 ring: source replacement and detach finish deferred refills before changing source or geometry") {
+    checkDeferredSourceChange(false);
+}
+
+TEST_CASE("MoonI80 ring: source replacement and detach cancel timed-out deferred refills before changing source or geometry") {
+    checkDeferredSourceChange(true);
+}
+
+TEST_CASE("MoonI80 ring: failed give-up retry cancels the old transfer before nonnull source replacement") {
+    for (bool snapshot : {false, true}) {
+        INFO("snapshot=" << snapshot);
+        MockRingPeripheral peripheral;
+        MockRingDriver d;
+        mm::Buffer src, replacement;
+        mm::Correction corr;
+        REQUIRE(wireRing(d, peripheral, src, corr));
+        REQUIRE(replacement.allocate(7 * 16, 3));
+        d.ringSnapshot = snapshot;
+        if (snapshot) REQUIRE(d.snapshotForTest());
+        peripheral.deferRing = true;
+        peripheral.waitSucceeds = false;
+        const auto oldRows = d.maxLaneLights();
+        peripheral.observe = [&](const char*) {
+            CHECK(d.sourceBuffer() == &src);
+            CHECK(d.maxLaneLights() == oldRows);
+        };
+        d.tick();
+        REQUIRE(peripheral.deferredPending);
+        peripheral.transmitSucceeds = false;
+        // Exercise the real strike/retry policy, without copying its constants or flags.
+        for (unsigned tick = 0; tick < 200 && peripheral.transmitCalls < 2; ++tick) d.tick();
+        REQUIRE(peripheral.transmitCalls >= 2);
+        REQUIRE(peripheral.waitCalls > 0);
+
+        d.setSourceBuffer(&replacement);
+
+        CHECK(peripheral.cancelCalls == 1);
+        CHECK_FALSE(peripheral.deferredPending);
+        CHECK_FALSE(peripheral.busIsRing());
+        CHECK(d.sourceBuffer() == &replacement);
+        CHECK(d.maxLaneLights() == 7);
+        peripheral.observe = {};
+        d.release();
+    }
+}
 
 // 1.
 // TILING, the ring's slices, concatenated in row order, reproduce a whole-frame encode byte for byte.

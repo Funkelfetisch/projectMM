@@ -291,7 +291,7 @@ public:
     /// Pure build: re-parse the lanes and re-init the bus, off the hot path. A disabled driver never gets here, applyState routes it to release().
     void prepare() override {
         // BEFORE parseConfig, which reallocates state the ring's refill task reads on its own core.
-        drainInFlight();
+        if (!drainInFlight()) deinit();
         parseConfig();
         reinit();
     }
@@ -303,13 +303,21 @@ public:
         // A scratch that failed to allocate is retried, which needs no drain: tick idles without it.
         if (!outChannelsChanged()) { if (!wire_) prepareWire(correction_.outChannels); return; }
         const size_t before = frameBytes_;
-        drainInFlight();
+        const bool drained = drainInFlight();
+        if (!drained) deinit();
         parseConfig();
-        if (frameBytes_ != before) reinit();   // rebuild only on a real frame-size change (see above)
+        if (!drained || frameBytes_ != before) reinit();   // a cancelled bus must restart too
     }
 
-    /// Point the driver at the source frame buffer and re-parse the lane config.
-    void setSourceBuffer(Buffer* buf) override { sourceBuffer_ = buf; parseConfig(); }
+    /// Drain the transfer before rebinding its source or lane geometry; detach and failed waits cancel the bus.
+    void setSourceBuffer(Buffer* buf) override {
+        const bool drained = drainInFlight();
+        // Give-up retries clear transfer flags before enqueue, so only a confirmed completion removes that uncertainty.
+        if (!drained || gaveUpReported_ || !buf) deinit();
+        sourceBuffer_ = buf;
+        encodeSrc_ = nullptr;
+        parseConfig();
+    }
 
     /// Per-tick output: correct and transpose each row into the DMA buffer, then ship one transfer. A second DMA buffer picks the path, not the flag. Reported as blocking on purpose, so the hot-path report stays honest.
     void tick() MM_NONBLOCKING override {
@@ -482,10 +490,13 @@ public:
         return budget < 20u ? 20u : (budget > 100u ? 100u : budget);
     }
 
-    /// Block until nothing reads the DMA buffers or the snapshot: the barrier a live resize needs. It cannot skip on a timeout, since the teardown cancels the transfer.
-    void drainInFlight() {
-        if (!busWaitIfBusy(0)) inFlight_[0] = false;   // deinit below cancels the wedged transfer
-        if (!busWaitIfBusy(1)) inFlight_[1] = false;
+    /// Wait for both transfers; false requires bus teardown before changing anything a timed-out transfer reads.
+    bool drainInFlight() {
+        const bool first = busWaitIfBusy(0);
+        const bool second = busWaitIfBusy(1);
+        if (!first) inFlight_[0] = false;   // the caller's teardown cancels the wedged transfer
+        if (!second) inFlight_[1] = false;
+        return first && second;
     }
 
     /// Prefill both DMA buffers' shift-mode constants; a no-op in direct mode.
@@ -1066,7 +1077,7 @@ protected:
         gaveUpReported_ = false;
         giveUpRetry_ = 0;
         // Drain first: a rebuild must not race a transfer still reading the old buffer.
-        drainInFlight();
+        if (!drainInFlight()) deinit();
         if (laneCount_ == 0 || frameBytes_ == 0) { deinit(); return; }
         // EXACT-match reuse: a fixed-size peripheral goes invalid when reused at another size.
         if (peripheral_->wantsRing()) {

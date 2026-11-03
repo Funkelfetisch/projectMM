@@ -2,6 +2,7 @@
 
 #include "core/module/MoonModule.h"
 #include "core/module/StateDocument.h"   // what a live document's apply answers
+#include "core/util/PinReservations.h"
 
 #include <array>
 #include <atomic>
@@ -56,8 +57,11 @@ public:
     void setup();
     /// One pass: tick every top-level module, then pace and publish the timing.
     void tick() MM_NONBLOCKING;
-    /// Release every module, in reverse of the order they were added.
-    void release();
+    /// Release every module in reverse order; retain the entire tree when a
+    /// descendant still owns a resource that cannot safely be removed.
+    bool release();
+    /// Advance only explicit shutdown hooks; do not run normal scene ticks.
+    void shutdownStep(uint32_t now);
 
     /// Milliseconds since setup, which is the clock every effect animates against.
     uint32_t elapsed() const;
@@ -82,6 +86,14 @@ public:
     void prepareSubtree(MoonModule* scope) { prepareSubtrees(&scope, 1); }
     /// Run what was asked for since the last frame, at the frame boundary: the live documents, then the rebuild of the tree or the subtrees.
     void preparePending();
+    /// Completed rebuild count on the scheduler task, including deferred writes and top-level completion hooks.
+    uint32_t preparationRevision() const MM_NONBLOCKING { return preparationRevision_; }
+    /// Failed rebuild count survives later successful walks, so an awaiting caller cannot miss an intervening failure.
+    uint32_t failedPreparationRevision() const MM_NONBLOCKING { return failedPreparationRevision_; }
+    /// Whether a whole-tree or scoped rebuild still waits for a frame boundary.
+    bool preparationPending() const MM_NONBLOCKING;
+    /// Last rebuild's aggregate deferred-write result, shared by its documents rather than attributed to one caller.
+    const StateDocumentResult& preparationResult() const MM_NONBLOCKING { return preparationResult_; }
 
     /// What a queued live document's apply reports, with the tag its caller gave.
     using LiveDone = void (*)(uintptr_t tag, const StateDocumentResult& result);
@@ -139,11 +151,20 @@ public:
     /// Read one control at its own width, signed, or false when there is no numeric reading.
     bool getControlWide(const char* moduleName, const char* controlName, int32_t& out) const;
 
+    /// Cooperative pin reservations, called only while the module tree is quiesced.
+    bool reservePins(const void* owner, const uint16_t* pins, size_t count) { return pinReservations_.reserve(owner, pins, count); }
+    bool releasePins(const void* owner) { return pinReservations_.release(owner); }
+    bool pinReservedBy(const void* owner, uint16_t pin) const { return pinReservations_.heldBy(owner, pin); }
+    bool hasReservedPins() const { return pinReservations_.any(); }
+    /// True if a declared pin control would claim a reserved GPIO; no storage is changed.
+    bool pinControlConflicts(const ControlDescriptor& control, const char* valueJson, ApplyPolicy policy, const void* owner = nullptr) const;
+
 private:
     /// The first node in this subtree with the given name, or null.
     static MoonModule* firstInTree(MoonModule* mod, const char* name);
 
     static inline Scheduler* instance_ = nullptr;
+    PinReservations<8> pinReservations_;
     std::array<MoonModule*, 32> modules_{};
     uint8_t moduleCount_ = 0;
     /// A rebuild request, atomic because a lost request means a script edit silently never applies.
@@ -152,6 +173,9 @@ private:
     static constexpr uint8_t kPendingScopes = 4;
     /// Pending subtree rebuilds, null where free.
     std::array<std::atomic<MoonModule*>, kPendingScopes> preparePending_{};
+    uint32_t preparationRevision_ = 0;
+    uint32_t failedPreparationRevision_ = 0;
+    StateDocumentResult preparationResult_{};
     /// A live write is under way, so a write it makes in turn, a slot driving its target, is live too and saves nothing.
     bool liveWrite_ = false;
     /// Live documents waiting for the frame boundary, from the loop's own task only: a show builds a look in one or two.

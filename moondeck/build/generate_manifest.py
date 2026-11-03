@@ -28,6 +28,7 @@ Inputs:
   --version <ver>         release version, e.g. "1.0.0".
   --release-url <url>     base URL to the GitHub release assets.
   --flasher-args <path>   esp32/build/flasher_args.json from the build (ESP32 only).
+  --artifacts-dir <path>  Staged binaries; mandatory for MoonBase layout validation.
   --out <path>            manifest JSON destination.
 """
 
@@ -95,6 +96,7 @@ def main() -> int:
     parser.add_argument("--release-url", required=True,
                         help="Base URL where the .bin assets live (no trailing slash).")
     parser.add_argument("--flasher-args", type=Path, help="ESP32 only: IDF's flasher_args.json.")
+    parser.add_argument("--artifacts-dir", type=Path, help="Directory containing staged release binaries; required for MoonBase manifests.")
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
 
@@ -163,18 +165,55 @@ def esp32_parts(args, prefix: str) -> list[dict] | None:
     # first start), and add MoonBase at the factory slot. Offsets come from the same partition CSV
     # the firmware builds with (moonbase_table_csv), so manifest and table cannot disagree.
     # release.yml stages the two shared-moonbase assets these paths point at.
-    from build_esp32 import moonbase_table_csv, partition_offsets
+    from build_esp32 import moonbase_table_csv, _moonbase_partition_layout, _check_built_moonbase_table, otadata_slot0_bytes
     spec = FIRMWARES[args.firmware]
     if spec.get("moonbase"):
-        offs = partition_offsets(moonbase_table_csv(args.firmware))
+        try:
+            if not args.artifacts_dir:
+                raise ValueError("MoonBase requires --artifacts-dir containing staged binaries")
+            layout = _moonbase_partition_layout(moonbase_table_csv(args.firmware))
+            offs = {subtype: offset for (_, subtype), (offset, _) in layout.items()}
+            expected = {f"{prefix}.bin", f"{prefix}-bootloader.bin", f"{prefix}-partition-table.bin", "shared-ota-data.bin"}
+            if len(parts) != len(expected) or {p['path'] for p in parts} != expected:
+                raise ValueError("flasher metadata must contain one app, bootloader, table and otadata")
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"generate_manifest: {exc}")
+            return None
         for part in parts:
             if part["path"] == f"{prefix}.bin":
-                part["offset"] = int(offs["ota_0"], 16)
+                part["offset"] = offs["ota_0"]
             elif part["path"] == "shared-ota-data.bin":
                 part["path"] = "shared-ota-data-slot0.bin"
         parts.append({"path": f"shared-moonbase-{spec['chip']}.bin",
-                      "offset": int(offs["factory"], 16)})
+                      "offset": offs["factory"]})
         parts.sort(key=lambda p: p["offset"])
+        try:
+            directory = args.artifacts_dir
+            _check_built_moonbase_table(directory / f"{prefix}-partition-table.bin", layout)
+            app = directory / f"{prefix}.bin"
+            recovery = directory / f"shared-moonbase-{spec['chip']}.bin"
+            slot0 = directory / "shared-ota-data-slot0.bin"
+            for label, path, limit in (("app", app, layout[("app", "ota_0")][1]),
+                                       ("MoonBase", recovery, layout[("app", "factory")][1])):
+                if not path.is_file(): raise FileNotFoundError(f"missing {label} image: {path}")
+                if not 0 < path.stat().st_size <= limit: raise ValueError(f"{label} image does not fit its partition")
+            if slot0.read_bytes() != otadata_slot0_bytes() or slot0.stat().st_size != layout[("data", "ota")][1]:
+                raise ValueError("slot-0 otadata is invalid")
+            spans = []
+            for part in parts:
+                path = directory / part["path"]
+                size = path.stat().st_size
+                start = part["offset"]
+                if start < 0 or not size or start + size > 0x100000000:
+                    raise ValueError(f"invalid flash range: {path}")
+                if path not in (app, recovery, slot0) and any(start < base + length and base < start + size for base, length in layout.values()):
+                    raise ValueError(f"flash image overlaps a reserved partition: {path}")
+                spans.append((start, start + size))
+            spans.sort()
+            if any(a[1] > b[0] for a, b in zip(spans, spans[1:])): raise ValueError("flash images overlap")
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"generate_manifest: {exc}")
+            return None
 
     return parts
 

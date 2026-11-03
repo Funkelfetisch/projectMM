@@ -6,6 +6,7 @@
 #include "core/module/Scheduler.h"
 #include "core/util/ModuleFactory.h"
 #include "core/util/JsonSink.h"
+#include "light/drivers/RmtLedDriver.h"
 
 #include <cstdio>
 #include <cstring>
@@ -61,6 +62,20 @@ struct SdBox : public mm::MoonModule {
 struct SdFixed : public SdBox {
     bool userEditable() const override { return false; }
 };
+struct SdHandover : public SdKnob {
+    bool active = true;
+    bool userEditable() const override { return !active; }
+    bool blocksAncestorRemoval() const override { return active; }
+    bool acceptsControlWrite(const char*) const override { return !active; }
+};
+struct SdPins : public mm::MoonModule {
+    int8_t gpio = -1;
+    char lanePins[24] = "";
+    void defineControls() override {
+        controls_.addPin("gpio", gpio);
+        controls_.addText("lanePins", lanePins, sizeof(lanePins));
+    }
+};
 struct SdDriver : public mm::MoonModule {
     mm::ModuleRole role() const MM_NONBLOCKING override { return mm::ModuleRole::Driver; }
 };
@@ -76,6 +91,8 @@ void registerTypes() {
     mm::ModuleFactory::registerType<SdBox>("SdBox");
     mm::ModuleFactory::registerType<SdDriver>("SdDriver");
     mm::ModuleFactory::registerType<SdFixed>("SdFixed");
+    mm::ModuleFactory::registerType<SdHandover>("SdHandover");
+    mm::ModuleFactory::registerType<SdPins>("SdPins");
     done = true;
 }
 
@@ -171,6 +188,15 @@ TEST_CASE("$patch replace keeps exactly the listed children, in the document's o
     CHECK(valueOf(t.find("A")) == 3);
 }
 
+TEST_CASE("$patch replace explicitly reenables an existing matching child") {
+    Tree t;
+    REQUIRE(t.apply(R"({"Effects":{"RGB":{"type":"SdKnob","enabled":false}}})").ok);
+    REQUIRE(t.find("RGB") != nullptr);
+    CHECK_FALSE(t.find("RGB")->enabledSetting());
+    REQUIRE(t.apply(R"({"Effects":{"$patch":"replace","RGB":{"type":"SdKnob","enabled":true}}})").ok);
+    CHECK(t.find("RGB")->enabledSetting());
+}
+
 TEST_CASE("key order is creation order") {
     Tree t;
     REQUIRE(t.apply(R"({"Effects": {"Z": {"type": "SdKnob"}, "M": {"type": "SdKnob"}, "A": {"type": "SdKnob"}}})").ok);
@@ -224,6 +250,113 @@ TEST_CASE("a state document that breaks a tree rule anywhere changes nothing") {
     r = t.apply(R"({"Effects": {"Old": {"type": "SdKnob"}}})");
     CHECK(std::string(r.error) == "this module cannot be replaced");
     CHECK(t.children(t.find("Old")) == "Knob");
+}
+
+TEST_CASE("a state document cannot remove an ancestor of an active resource handover") {
+    Tree t;
+    REQUIRE(t.apply(R"({"Effects":{"Box":{"type":"SdBox","Inner":{"type":"SdBox","Held":{"type":"SdHandover"}}}}})").ok);
+    const auto* held = t.find("Held"); REQUIRE(held);
+    for (const char* document : {
+        R"({"Effects":{"Box":null}})",
+        R"({"Effects":{"Box":{"type":"SdOther"}}})",
+        R"({"Effects":{"Box":{"enabled":false}}})",
+        R"({"Effects":{"$patch":"replace","Fresh":{"type":"SdBox"}}})"
+    }) {
+        const auto result = t.apply(document);
+        CHECK_FALSE(result.ok); CHECK(result.changes == 0);
+        CHECK(t.find("Held") == held); CHECK(t.find("Box") != nullptr);
+        CHECK(t.find("Box")->enabledSetting());
+        CHECK(t.find("Fresh") == nullptr);
+    }
+    static_cast<SdHandover*>(t.find("Held"))->active = false;
+    REQUIRE(t.apply(R"({"Effects":{"Box":null}})").ok);
+    CHECK(t.find("Held") == nullptr);
+}
+
+TEST_CASE("scheduler shutdown retains the whole tree until a resource handover is complete") {
+    struct Held final : mm::MoonModule {
+        bool active = true;
+        unsigned steps = 0, ticks = 0;
+        unsigned* released;
+        explicit Held(unsigned& count) : released(&count) {}
+        bool blocksAncestorRemoval() const override { return active; }
+        void tick() MM_NONBLOCKING override { ++ticks; }
+        void shutdownStep(uint32_t) MM_NONBLOCKING override { if (++steps == 3) active = false; }
+        void release() override { ++*released; mm::MoonModule::release(); }
+    };
+    unsigned released = 0;
+    mm::Scheduler scheduler;
+    auto* parent = new SdBox(); parent->setName("Parent");
+    auto* held = new Held(released); held->setName("Held");
+    auto* sibling = new Held(released); sibling->setName("Sibling"); sibling->active = false;
+    REQUIRE(parent->addChild(held)); REQUIRE(parent->addChild(sibling)); scheduler.addModule(parent);
+    CHECK_FALSE(scheduler.release());
+    CHECK(scheduler.firstByName("Held") == held); CHECK(released == 0);
+    scheduler.shutdownStep(100); CHECK(held->steps == 1); CHECK(held->ticks == 0); CHECK_FALSE(scheduler.release());
+    scheduler.shutdownStep(110); CHECK(held->steps == 2); CHECK_FALSE(scheduler.release());
+    scheduler.shutdownStep(120); CHECK(held->steps == 3); CHECK(held->ticks == 0);
+    CHECK(scheduler.release()); CHECK(released == 2); CHECK(scheduler.firstByName("Held") == nullptr);
+}
+
+TEST_CASE("a held RMT output survives ancestor removal in live and stored documents") {
+    Tree t;
+    REQUIRE(t.apply(R"({"Effects":{"Box":{"type":"SdBox"}}})").ok);
+    auto* box = t.find("Box"); REQUIRE(box);
+    auto* driver = new mm::RmtLedDriver(); driver->setName("HeldRmt");
+    REQUIRE(box->addChild(driver));
+    driver->requestBlackFrame(52, 4);
+    for (auto source : {mm::StateSource::Request, mm::StateSource::Live, mm::StateSource::Stored}) {
+        const auto result = mm::applyStateDocument(t.s, R"({"Effects":{"Box":null}})", source);
+        CHECK((!result.ok || result.skipped > 0));
+        CHECK(t.find("Box") == box); CHECK(t.find("HeldRmt") == driver);
+    }
+    // This fixture never starts a peripheral; clear its synthetic hold for teardown.
+    REQUIRE(box->removeChild(driver)); delete driver;
+}
+
+TEST_CASE("a resource handover rejects a control write before changing other request values") {
+    Tree t;
+    REQUIRE(t.apply(R"({"Effects":{"Held":{"type":"SdHandover"},"Other":{"type":"SdKnob"}}})").ok);
+    auto* held = static_cast<SdHandover*>(t.find("Held"));
+    auto* other = static_cast<SdKnob*>(t.find("Other")); REQUIRE(held); REQUIRE(other);
+    for (auto source : {mm::StateSource::Request, mm::StateSource::Live}) {
+        auto result = mm::applyStateDocument(t.s, R"({"Effects":{"Other":{"value":42},"Held":{"value":31}}})", source);
+        CHECK_FALSE(result.ok); CHECK(result.changes == 0); CHECK(other->value == 10); CHECK(held->value == 10);
+    }
+    CHECK(t.s.setControl("Held", "enabled", "false") == mm::Scheduler::SetControlResult::ReadOnly);
+    CHECK(t.s.setControl("Effects", "enabled", "false") == mm::Scheduler::SetControlResult::ReadOnly);
+    auto stored = mm::applyStateDocument(t.s, R"({"Effects":{"Held":{"value":31,"enabled":false}}})", mm::StateSource::Stored);
+    CHECK(stored.skipped > 0); CHECK(held->value == 10); CHECK(held->enabledSetting());
+    stored = mm::applyStateDocument(t.s, R"({"Effects":{"enabled":false}})", mm::StateSource::Stored);
+    CHECK(stored.skipped > 0); CHECK(t.effects->enabledSetting());
+    held->active = false;
+}
+
+TEST_CASE("a fixed child without an active handover does not lock its owner") {
+    Tree t;
+    REQUIRE(t.apply(R"({"Effects":{"Box":{"type":"SdBox","Fixed":{"type":"SdFixed"}}}})").ok);
+    REQUIRE(t.apply(R"({"Effects":{"Box":null}})").ok);
+    CHECK(t.find("Box") == nullptr); CHECK(t.find("Fixed") == nullptr);
+}
+
+TEST_CASE("reserved pins reject conflicting controls without blocking other pins") {
+    Tree t;
+    REQUIRE(t.apply(R"({"Effects":{"Io":{"type":"SdPins"},"Other":{"type":"SdKnob"}}})").ok);
+    auto* io = static_cast<SdPins*>(t.find("Io")); auto* other = static_cast<SdKnob*>(t.find("Other"));
+    REQUIRE(io); REQUIRE(other);
+    int owner = 0; const uint16_t pins[] = {17, 47}; REQUIRE(t.s.reservePins(&owner, pins, 2));
+    CHECK(t.s.setControl("Io", "gpio", R"({"value":47})") == mm::Scheduler::SetControlResult::ReadOnly);
+    CHECK(t.s.setControl("Io", "lanePins", R"({"value":"16,47"})") == mm::Scheduler::SetControlResult::ReadOnly);
+    CHECK(t.s.setControl("Io", "lanePins", R"({"value":"bad"})") == mm::Scheduler::SetControlResult::ReadOnly);
+    CHECK(io->gpio == -1); CHECK(std::string(io->lanePins).empty());
+    const auto denied = t.apply(R"({"Effects":{"Other":{"value":42},"Io":{"gpio":17}}})");
+    CHECK_FALSE(denied.ok); CHECK(denied.changes == 0); CHECK(other->value == 10); CHECK(io->gpio == -1);
+    const auto stored = mm::applyStateDocument(t.s, R"({"Effects":{"Io":{"gpio":47,"lanePins":"17"}}})", mm::StateSource::Stored);
+    CHECK(stored.skipped > 0); CHECK(io->gpio == -1); CHECK(std::string(io->lanePins).empty());
+    REQUIRE(t.apply(R"({"Effects":{"Io":{"gpio":16,"lanePins":"18,19"}}})").ok);
+    CHECK(io->gpio == 16); CHECK(std::string(io->lanePins) == "18,19");
+    REQUIRE(t.s.releasePins(&owner));
+    REQUIRE(t.apply(R"({"Effects":{"Io":{"gpio":47}}})").ok); CHECK(io->gpio == 47);
 }
 
 TEST_CASE("a name the same document frees, by removal or a re-typed parent, can be created elsewhere") {
@@ -302,10 +435,131 @@ TEST_CASE("a script's control a live document sets lands after the rebuild, stil
     auto r = mm::applyStateDocument(t.s, R"({"Effects": {"Script": {"type": "SdScript", "source": "a", "late": 42}}})", mm::StateSource::Live);
     REQUIRE(r.ok);
     CHECK(r.deferred == 1);
+    const uint32_t before = t.s.preparationRevision();
+    CHECK(t.s.preparationPending());
+    CHECK(t.s.preparationRevision() == before);
     t.s.prepareTree();
+    CHECK(t.s.preparationRevision() == before + 1);
+    CHECK(t.s.preparationResult().ok);
+    CHECK(t.s.preparationResult().changes == 1);
     CHECK(static_cast<SdScript*>(t.find("Script"))->late == 42);
     CHECK_FALSE(t.find("Script")->dirty());
     CHECK(saves == 0);
+}
+
+TEST_CASE("a rebuild reports deferred live failures and still applies its remaining writes unsaved") {
+    Tree t;
+    static int saves = 0;
+    saves = 0;
+    t.s.setNoteDirtyHook([] { saves++; });
+    const auto accepted = mm::applyStateDocument(t.s,
+        R"({"Effects":{"Bad":{"type":"SdScript","source":"a","late":200},"Good":{"type":"SdScript","source":"a","late":42}}})",
+        mm::StateSource::Live);
+    REQUIRE(accepted.ok);
+    REQUIRE(accepted.deferred == 2);
+    CHECK(t.s.preparationRevision() == 0);
+    t.s.preparePending();
+    CHECK(t.s.preparationRevision() == 1);
+    const auto& result = t.s.preparationResult();
+    CHECK_FALSE(result.ok);
+    CHECK(std::string(result.error) == "deferred control did not apply");
+    CHECK(std::string(result.where) == "Bad.late");
+    CHECK(result.changes == 1);
+    CHECK(result.deferred == 0);
+    CHECK(static_cast<SdScript*>(t.find("Bad"))->late == 1);
+    CHECK(static_cast<SdScript*>(t.find("Good"))->late == 42);
+    CHECK_FALSE(t.find("Bad")->dirty());
+    CHECK_FALSE(t.find("Good")->dirty());
+    CHECK(saves == 0);
+    t.s.prepareTree();
+    CHECK(t.s.preparationRevision() == 2);
+    CHECK(t.s.preparationResult().ok);
+    CHECK(t.s.preparationResult().changes == 0);
+}
+
+TEST_CASE("preparation revisions follow completed scope and tree walks including their completion hooks") {
+    struct CompletionProbe : SdCount {
+        mm::Scheduler* scheduler = nullptr;
+        uint32_t revisionAtHook = 0;
+        int completions = 0;
+        bool requestAgain = false;
+        void onTreePrepared() override {
+            revisionAtHook = scheduler->preparationRevision();
+            ++completions;
+            if (requestAgain) scheduler->requestPrepare(this);
+        }
+    };
+    mm::Scheduler scheduler;
+    auto* probe = new CompletionProbe();
+    probe->scheduler = &scheduler;
+    probe->setName("Probe");
+    scheduler.addModule(probe);
+    CHECK(scheduler.preparationRevision() == 0);
+    CHECK_FALSE(scheduler.preparationPending());
+    scheduler.setup();
+    CHECK(scheduler.preparationRevision() == 1);
+    CHECK(probe->prepares == 1);
+    scheduler.requestPrepare(probe);
+    CHECK(scheduler.preparationPending());
+    CHECK(scheduler.preparationRevision() == 1);
+    scheduler.preparePending();
+    CHECK(scheduler.preparationRevision() == 2);
+    CHECK(probe->prepares == 2);
+    CHECK(probe->completions == 1);
+    CHECK(probe->revisionAtHook == 1);
+    CHECK_FALSE(scheduler.preparationPending());
+    scheduler.preparePending();
+    scheduler.prepareSubtrees(nullptr, 0);
+    CHECK(scheduler.preparationRevision() == 2);
+    scheduler.requestPrepare(probe);
+    scheduler.requestPrepareTree();
+    scheduler.prepareTree();
+    CHECK(scheduler.preparationRevision() == 3);
+    CHECK_FALSE(scheduler.preparationPending());
+    probe->requestAgain = true;
+    scheduler.prepareTree();
+    CHECK(scheduler.preparationRevision() == 4);
+    CHECK(scheduler.preparationPending());
+    probe->requestAgain = false;
+    scheduler.preparePending();
+    CHECK(scheduler.preparationRevision() == 5);
+    CHECK_FALSE(scheduler.preparationPending());
+    SdCount detached;
+    scheduler.requestPrepare(&detached);
+    scheduler.preparePending();
+    CHECK(scheduler.preparationRevision() == 6);
+    CHECK(probe->revisionAtHook == 5);
+    CHECK_FALSE(scheduler.preparationPending());
+    scheduler.requestPrepare(probe);
+    scheduler.requestPrepareTree();
+    scheduler.release();
+    CHECK_FALSE(scheduler.preparationPending());
+    CHECK(scheduler.preparationRevision() == 0);
+    CHECK(scheduler.preparationResult().ok);
+    scheduler.preparePending();
+    CHECK(scheduler.preparationRevision() == 0);
+}
+
+TEST_CASE("an explicit scoped rebuild consumes its scope while preserving another queued scope") {
+    mm::Scheduler scheduler;
+    auto* root = new SdBox(); root->setName("Root");
+    auto* first = new SdCount(); first->setName("First");
+    auto* second = new SdCount(); second->setName("Second");
+    root->addChild(first); root->addChild(second);
+    scheduler.addModule(root);
+    scheduler.requestPrepare(first);
+    scheduler.requestPrepare(second);
+    scheduler.prepareSubtree(first);
+    CHECK(scheduler.preparationRevision() == 1);
+    CHECK(scheduler.preparationPending());
+    CHECK(first->prepares == 1);
+    CHECK(second->prepares == 0);
+    scheduler.preparePending();
+    CHECK(scheduler.preparationRevision() == 2);
+    CHECK_FALSE(scheduler.preparationPending());
+    CHECK(first->prepares == 1);
+    CHECK(second->prepares == 1);
+    scheduler.release();
 }
 
 TEST_CASE("a mistyped control on a script the document leaves as it is is named at once") {

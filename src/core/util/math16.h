@@ -108,7 +108,8 @@
 /// The Newton step overflows when it starts at the input, which at the type's maximum made the first iteration wrap and the function return zero.
 /// Halving the bit width gives a start above the true root and inside the range, so every iteration stays representable.
 ///
-/// The distance squares in the wider unsigned type and roots there.
+/// The distance squares in the wider unsigned type, choosing the root by the squared range.
+/// Ordinary grids use the division-free narrow root, and larger distances keep the wide root.
 /// The narrow form is wrong far inside the normal range rather than only at the extremes: two coordinates of seventy thousand already sum past the narrow maximum.
 /// It saturated and reported the type's top for that distance.
 ///
@@ -226,7 +227,7 @@ private:
     bool     started_ = false;
 };
 
-/// Integer square root, rounded down, by the binary restoring method: no divide and no float.
+/// Integer square root, rounded down, by Newton iteration from a power-of-two bound.
 constexpr uint64_t isqrt64(uint64_t x) {
     if (x < 2) return x;                      // 0 and 1 are their own roots
     // From a power-of-two bound, not from the input: starting there overflows the first step.
@@ -284,10 +285,11 @@ inline angle16 atan16(int32_t y, int32_t x) {
 
 /// True Euclidean distance from the origin to (dx, dy): a real radius, not the octagon `dist8` approximates, and it does not saturate at 255.
 inline uint32_t dist16(int32_t dx, int32_t dy) {
-    // Squared wide and rooted wide: the narrow form is wrong far inside the normal range.
+    // Square wide before choosing the root: ordinary grids keep the division-free hot path.
     const uint64_t ax = static_cast<uint64_t>(dx < 0 ? -static_cast<int64_t>(dx) : dx);
     const uint64_t ay = static_cast<uint64_t>(dy < 0 ? -static_cast<int64_t>(dy) : dy);
     const uint64_t d2 = ax * ax + ay * ay;
+    if (d2 <= UINT32_MAX) return isqrt(static_cast<uint32_t>(d2));
     const uint64_t d = isqrt64(d2);
     return static_cast<uint32_t>(d > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : d);
 }

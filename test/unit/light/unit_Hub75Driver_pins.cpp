@@ -90,7 +90,7 @@ TEST_CASE("Hub75Driver reports a published board's lines as fixed pins while the
     selectBoard(d, "MoonHub75");
 
     const MoonModule& m = d;   // the hook is the base's public contract; the driver keeps it private
-    MoonModule::FixedPin out[16];
+    MoonModule::FixedPin out[16]{};
     const uint8_t n = m.fixedPins(out, 16);
     CHECK(n == 14);
     bool clkOn18 = false;

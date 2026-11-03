@@ -306,7 +306,7 @@ public:
         sink.append("{\"fields\":[{\"name\":\"ssid\",\"type\":\"text\",\"value\":");
         sink.writeJsonString(r.ssid);
         sink.append("},{\"name\":\"password\",\"type\":\"password\",\"value\":");
-        writeObfuscatedPassword(sink, r.password);   // as a Password control shows one
+        writePasswordConfigured(sink, r.password);   // as a Password control shows one
         // Right after what it joins with, the name and password; the IP settings below apply live without it.
         sink.append("},{\"name\":\"connect\",\"type\":\"button\",\"label\":\"Connect\"");
         sink.appendf("},{\"name\":\"ipSettings\",\"type\":\"select\",\"value\":%u,\"default\":%u,\"optionsRef\":\"ipSettings\",\"reshapes\":true}",
@@ -592,7 +592,7 @@ private:
             if (n.secured && w.indexOfSsid(n.ssid) < 0) {
                 sink.append("{\"name\":\"password\",\"type\":\"password\",\"value\":");
                 const bool mine = w.pendingPassword_ && w.pendingId_ == row + 1u;
-                writeObfuscatedPassword(sink, mine ? w.pendingPassword_ : "");
+                writePasswordConfigured(sink, mine ? w.pendingPassword_ : "");
                 sink.append("},");
             }
             sink.append("{\"name\":\"connect\",\"type\":\"button\",\"label\":\"Connect\"}");

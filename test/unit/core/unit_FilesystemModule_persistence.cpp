@@ -412,6 +412,35 @@ TEST_CASE("FilesystemModule writes valid JSON with children") {
     mm::platform::fsSetRoot(".");
 }
 
+TEST_CASE("A saved final slider value survives reboot after an identical live value") {
+    TempRoot temp("live_saved_final", true);
+    {
+        mm::Scheduler scheduler;
+        auto* fs = new mm::FilesystemModule(); fs->setTypeName("FilesystemModule"); fs->setScheduler(&scheduler);
+        auto* layer = new mm::Layer(); layer->setName("Layer"); layer->setTypeName("Layer");
+        auto* rainbow = new mm::RainbowEffect(); rainbow->setName("Rainbow"); rainbow->setTypeName("RainbowEffect");
+        rainbow->markWiredByCode(); layer->addChild(rainbow);
+        scheduler.addModule(fs); scheduler.addModule(layer); scheduler.setup();
+        constexpr const char* change = R"({"Layer":{"Rainbow":{"speed":91}}})";
+        REQUIRE(mm::applyStateDocument(scheduler, change, mm::StateSource::Live).ok);
+        CHECK(rainbow->speed == 91); fs->flush();
+        CHECK_FALSE(std::filesystem::exists(std::string(temp.path) + "/.config/Layer.json"));
+        REQUIRE(mm::applyStateDocument(scheduler, change, mm::StateSource::Request).ok);
+        fs->flush();
+        CHECK(std::filesystem::exists(std::string(temp.path) + "/.config/Layer.json"));
+        scheduler.release();
+    }
+    {
+        mm::Scheduler scheduler;
+        auto* fs = new mm::FilesystemModule(); fs->setTypeName("FilesystemModule"); fs->setScheduler(&scheduler);
+        auto* layer = new mm::Layer(); layer->setName("Layer"); layer->setTypeName("Layer");
+        auto* rainbow = new mm::RainbowEffect(); rainbow->setName("Rainbow"); rainbow->setTypeName("RainbowEffect");
+        rainbow->markWiredByCode(); layer->addChild(rainbow);
+        scheduler.addModule(fs); scheduler.addModule(layer); scheduler.setup();
+        CHECK(rainbow->speed == 91); scheduler.release();
+    }
+}
+
 // No size cap: a config LARGER than the old fixed 2 KB save buffer round-trips in full.
 // The save serializes into a growable JsonSink and the load reads a file-sized heap buffer, so neither side truncates.
 // Built from a FixtureProfilesModule with many custom profiles, its persisted array of role wirings comfortably exceeds 2048 bytes, which the old fixed buffer would have silently dropped (returning false → nothing written → config lost on reboot).
@@ -421,6 +450,7 @@ TEST_CASE("FilesystemModule round-trips a config larger than the old 2 KB cap") 
     mm::ModuleFactory::registerType<mm::FixtureProfilesModule>("FixtureProfilesModule");
 
     uint32_t markerId = 0;
+    uint32_t expectedProfiles = 0;
     {
         mm::Scheduler scheduler;
         auto* fs = new mm::FilesystemModule();
@@ -444,6 +474,7 @@ TEST_CASE("FilesystemModule round-trips a config larger than the old 2 KB cap") 
                 lp->setListRowField(id, "ch5", "{\"value\":5}");   // Pan at ch5 — a distinctive pick
             }
         }
+        expectedProfiles = lp->listRowCount();
         lp->markDirty();
         mm::FilesystemModule::noteDirty();
         fs->flush();
@@ -467,7 +498,7 @@ TEST_CASE("FilesystemModule round-trips a config larger than the old 2 KB cap") 
         scheduler.addModule(lp);
         scheduler.setup();
 
-        CHECK(lp->listRowCount() == 35);   // 20 built-ins + 15 custom, all restored
+        CHECK(lp->listRowCount() == expectedProfiles);   // every seeded and custom row survives
         mm::Correction c;
         REQUIRE(lp->deriveCorrection(markerId, 255, c));   // the marker profile resolves after reload
         CHECK(c.outChannels == 24);                        // its 24-channel width survived

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/module/MoonModule.h"
+#include "core/module/Scheduler.h"   // a newly required white byte widens layers at the next frame boundary
 #include "core/util/ScratchBuffer.h"
 #include "light/layers/Buffer.h"
 #include "light/layers/Layer.h"
@@ -29,11 +30,15 @@ public:
     static constexpr uint8_t kHeldAfter = 4;
     /// Held once safe mode has failed to stop the boots with dark frames.
     bool heldInSafeMode() const override { return MoonModule::failedBoots() >= kHeldAfter; }
-    /// Point the driver at the buffer it reads its slice from.
+    /// Bind or clear the source after synchronously stopping asynchronous readers of the old source and geometry; transfers reading only owned frames may continue.
     virtual void setSourceBuffer(Buffer* buf) = 0;
 
     /// The hardware block this driver claims, so two drivers cannot corrupt one peripheral; virtual rather than RTTI, which ESP32 builds compile without.
     virtual LedHwBlock hwBlock() const { return LedHwBlock::None; }
+
+    /// A driver that sequences its own power can reserve that pin from the
+    /// container's generic relay path, including during disable/cleanup.
+    virtual bool reservesPowerPin(uint8_t /*pin*/) const { return false; }
 
     /// Lead every driver card with the correction block, then the window, then the driver's own controls; a driver overrides defineDriverControls, so the placement is never re-implemented.
     void defineControls() final {
@@ -58,6 +63,15 @@ public:
     int32_t windowCount() const { return count_; }
     /// Set the window directly, which takes effect on the next parse as a control edit does.
     void setWindow(int32_t start, int32_t count) { start_ = start; count_ = count; }
+    /// Seed a board's output wiring before persisted controls overlay it.
+    void setDefaultCorrection(const char* preset, WhiteMode whiteMode) {
+        setDefaultFixtureName(preset);
+        whiteMode_ = static_cast<uint8_t>(whiteMode);
+    }
+    /// Seed the output response before persisted controls overlay it.
+    void setDefaultCurve(Correction::Curve curve) {
+        curveSel_ = static_cast<uint8_t>(curve);
+    }
     /// Test-only: resolve the window against a buffer of `bufN` lights into its length.
     nrOfLightsType resolveWindowLenForTest(nrOfLightsType bufN) const {
         nrOfLightsType outStart = 0, outLen = 0;
@@ -69,6 +83,7 @@ public:
 
     /// Rebuild this driver's correction, baking global times local brightness into one LUT, so the hot path stays one lookup per channel.
     void rebuildCorrection(uint8_t globalBrightness) {
+        const bool hadWhite = correction_.offWhite != Correction::kAbsent;
         // Applied unconditionally, so brightness works even before the fixture-profile library is up.
         const uint8_t tableBrightness = adoptBrightness(globalBrightness);
         correction_.whiteMode = static_cast<WhiteMode>(whiteMode_);
@@ -91,6 +106,9 @@ public:
         correction_.lut16 = lut16_.data();
         if (firstTable) correction_.rebuildBrightness(tableBrightness);   // a table that existed was filled by the rebuild above
         onCorrectionChanged();      // let a driver resize its correction-applied buffer
+        // The old layer can have been replaced; defer widening without dereferencing its borrowed pointer.
+        if (!hadWhite && correction_.offWhite != Correction::kAbsent)
+            if (Scheduler* scheduler = Scheduler::instance()) scheduler->requestPrepareTree();
     }
 
     /// Rebuild the correction when one of its own correction controls changed.

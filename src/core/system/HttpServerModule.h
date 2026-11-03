@@ -13,6 +13,7 @@
 namespace mm {
 
 struct StateDocumentResult;
+struct PresetTemplates;
 
 class Scheduler;
 
@@ -64,6 +65,8 @@ namespace ui { struct EmbeddedFile; }   // one served UI file, from the generate
 /// Publish/subscribe per client: `{"subscribe":[…]}` names the modules a client views, by name or type, each with its descendants, and `"*"` names the whole tree.
 ///
 /// The full state carries those modules whole and every other module as an outline: its header and children, without controls. A page so gets its root and its status bar's modules.
+///
+/// `detail:"values"` keeps the same scope and outline, with control names, types, values and readonly/hidden flags alone. Its document echoes `detail:"values"`; full metadata stays available through the module HTTP resource or a full subscription.
 ///
 /// A connect alone sends nothing, so a page that subscribes on open gets one document, and the WLED app, which never subscribes, gets only its own frame.
 ///
@@ -123,7 +126,7 @@ namespace ui { struct EmbeddedFile; }   // one served UI file, from the generate
 ///
 /// Each slot moves as much as its socket takes now. A refill, the costly part, waits for the next tick once the tick's 3 ms are spent, and the turn rotates so no slot is favored.
 ///
-/// Below the internal-RAM headroom one send queues at a time through the lease, and a send that moves nothing for 10 s is closed. No client, however slow, holds the render loop.
+/// Below the internal-RAM headroom a generated fragment keeps the lease until its owned memory is freed, then yields before the next refill. Borrowed spans yield after a chunk. A send that moves nothing for 10 s is closed.
 ///
 /// ## The WLED-compatibility shim
 ///
@@ -216,6 +219,14 @@ public:
 
     /// The scheduler every control write is applied through.
     void setScheduler(Scheduler* s) { scheduler_ = s; }
+    /// Product templates write native preset documents without changing the running tree.
+    void setPresetTemplates(const PresetTemplates* templates) { presetTemplates_ = templates; }
+
+    /// A product with concurrent radios uses the shared heap reserve and bounded writes; the generic send policy stays the default.
+    void setSendBudget(size_t reserve, size_t chunkLimit) {
+        sendFloor_ = reserve < platform::HEAP_RESERVE ? platform::HEAP_RESERVE : reserve;
+        sendChunkLimit_ = chunkLimit;
+    }
 
     /// Stream one binary frame to every client, the producer pushing payload bytes and this prepending the header. @xref{the-two-websocket-channels}
     bool sendBufferedFrame(const uint8_t* header, size_t headerLen,
@@ -379,6 +390,7 @@ public:
 private:
     platform::TcpServer server_;
     Scheduler* scheduler_ = nullptr;
+    const PresetTemplates* presetTemplates_ = nullptr;
 
     /// Eight: a few viewers plus the overlap while a refresh's old socket is still being reaped. @xref{how-the-two-channel-caps-are-sized}
     static constexpr int kMaxWsClients = 8;
@@ -461,6 +473,7 @@ private:
             File,   ///< the next chunk of a file, read into the block
             Tree,   ///< the next fragment of the state, from the cursor in the block
             Types,  ///< the next registered type with its defaults, which builds that one type to read them
+            PresetIndex, ///< one preset's metadata at a time, from a bounded name snapshot
         };
         Source source = Source::None;
         bool busy = false;                 ///< bytes are due, so the slot is taken
@@ -490,8 +503,8 @@ private:
     void drainSends();
     /// One send as far as `budget` bytes, the socket and the tick's time allow; `who` is the send as the lease knows it.
     void drainSend(Send& s, platform::TcpConnection& conn, const void* who, size_t budget, uint32_t tickStart);
-    /// What a refill found: more bytes, the source's end, or a failure that ends the connection.
-    enum class Refill : uint8_t { More, End, Failed };
+    /// What a refill found: bytes, end, a build failure, or temporary pressure leaving the serialization cursor uncommitted.
+    enum class Refill : uint8_t { More, End, Failed, Pressure };
     /// Free what went out and load the next bytes: queued frames first, at a frame boundary, then the source's next piece.
     Refill refill(Send& s);
     /// End a send: free its blocks and give up its lease turn, leaving its connection to the caller.
@@ -511,7 +524,7 @@ private:
     };
     PreviewFrame previewFrame_;
     Send previewSends_[kMaxPreviewClients];   ///< each preview client's share of the frame; a slow client lags
-    /// Whether `who` may queue now: always above the headroom, and below it the one send holding the lease, so none starves and the queue stays one socket's buffer.
+    /// Whether a large send may queue: above the headroom, or as the lease holder; small prepared HTTP answers drain separately.
     bool maySend(const void* who);
     /// Give the lease up when `who` holds it, as its send ends.
     void endSend(const void* who) {
@@ -525,16 +538,18 @@ private:
     uint32_t lowRamProgressMs_ = 0;        ///< when it last moved bytes: one stalled this long passes the lease on
     const void* lowRamWaiter_ = nullptr;   ///< the first send refused while the lease was held, which takes it next
     uint32_t lowRamWaitMs_ = 0;            ///< when it asked: one that stops asking this long loses its place
+    size_t sendFloor_ = kSendFloor;         ///< the default radio reserve; a product may use the shared allocator reserve
+    size_t sendChunkLimit_ = 0;            ///< zero keeps the generic throughput budget
 public:
     /// The internal RAM a send leaves free. On a board without PSRAM every unacknowledged segment is internal RAM, and a page load or a preview over a slow link queued 52 KB of them.
     static constexpr size_t kSendHeadroom = platform::kInternalFreeFloor / 2;
     /// The internal RAM no send may queue into: what WiFi needs to keep receiving acknowledgements and requests. A classic ESP32 under a page load and a preview fell to 2.6 KB free and dropped off the network.
     static constexpr size_t kSendFloor = 40 * 1024;
-    /// How many bytes a write may queue now: free internal RAM above kSendFloor, unlimited where it is unreported (0).
-    static size_t sendRoom() {
+    /// How many bytes a write may queue now: free internal RAM above the configured reserve, unlimited where it is unreported (0).
+    size_t sendRoom() const {
         const size_t f = platform::freeInternalHeap();
         if (f == 0) return SIZE_MAX;
-        return f > kSendFloor ? f - kSendFloor : 0;
+        return f > sendFloor_ ? f - sendFloor_ : 0;
     }
     /// Whether free internal RAM is above the headroom, or unreported (0). Below it every send takes its turn through `maySend`.
     static bool sendHasHeadroom() {
@@ -546,6 +561,7 @@ public:
         static constexpr uint8_t kMaxModules = 8;   ///< a page names its root and five types it reads beside it
         bool received = false;             ///< the client has subscribed, which is what its first document answers
         bool all = false;                  ///< `"*"`: the whole tree
+        bool valuesOnly = false;           ///< `detail:"values"`: control values without rendering metadata
         uint8_t count = 0;                 ///< how many names are held
         uint32_t names[kMaxModules] = {};  ///< each name's FNV-1a, a module name or a type name of any length
         /// Whether `mod` or one of its ancestors is named, by its name or its type.
@@ -600,12 +616,13 @@ public:
 private:
     /// The largest fragment a stream writes at a time, which keeps one fragment's writing short on the render task.
     static constexpr size_t kFragmentCeilBytes = 8192;
-    /// A fragment as large as the drain chunk, so a roomy board sends few frames and a tight one small blocks, up to kFragmentCeilBytes.
+    /// A fragment target within the drain cap and one quarter of available queue headroom; indivisible values are admitted afterwards.
     size_t fragmentBytes() const;
     /// A state answer's source: the cursor, and the header of the fragment in flight. @xref{the-full-state-streams}
     struct TreeSource {
         Subscription sub;          // copied at the start, so a subscribe arriving mid-document cannot switch the view halfway
         TreeCursor cursor;
+        char singleName[MoonModule::kNameLen] = {};   // re-resolve a single module before each fragment
         uint8_t hdr[10] = {};
         bool ws = false;           // each fragment a WebSocket frame, rather than the body of an HTTP answer
         bool hide = false;         // passwords hidden, the reader being on the device's own access point
@@ -618,6 +635,8 @@ private:
         bool wrote = false;        // a type went out, so the next one takes a comma
         bool last = false;         // the closing bracket went out
     };
+    /// A bounded name snapshot and the position in its streamed metadata, defined beside the preset handlers.
+    struct PresetIndexSource;
     /// A download's source: the open file and the chunk leaving now.
     struct FileSource {
         platform::FsReadStream stream;
@@ -627,6 +646,8 @@ private:
     };
     /// Start the state as `s`'s source, `ws` framing each fragment as a WebSocket frame and `hide` hiding passwords as it is written; false when its block does not fit.
     bool startTree(Send& s, const Subscription* sub, bool ws, bool hide, uint32_t answers);
+    /// Prime a fresh HTTP tree before 200; failures free the slot and answer with an error. A live WS frame never passes here.
+    bool primeHttpTree(Send& s, platform::TcpConnection& conn);
     /// Each control client's send: its document, then the frames queued for it.
     Send controlSends_[kMaxWsClients];
     Subscription subs_[kMaxWsClients];
@@ -728,7 +749,7 @@ private:
     /// A leaf's cached hashes, tried at `next` first and searched only when the tree moved since the baseline; `next` moves past the match.
     LeafHash* findLeaf(uint32_t pathHash, uint16_t& next);
     /// The next push must be a full state and a fresh baseline. @xref{when-a-patch-cannot-describe-the-change}
-    void requestFullResync() { fullResyncPending_ = true; }
+    void requestFullResync();
 
     /// Routes any module's schema change to the live instance's resync request.
     static void onSchemaChanged();
@@ -754,6 +775,18 @@ private:
     bool anyWsClientOnAccessPoint() const MM_NONBLOCKING;
     /// Answer a short reply, under 4 KB, written whole: it fits a fresh connection's empty send buffer, and a reboot route needs it out before the restart. A longer one goes through answerJson or answerBlock.
     void sendResponse(platform::TcpConnection& conn, int status, const char* contentType, const char* body);
+    void handlePresets(platform::TcpConnection& conn, const char* method, const char* path,
+                       const char* request, const char* query, const char* body, bool hasLength, size_t length);
+    void handlePresetTemplates(platform::TcpConnection& conn, const char* method, const char* path);
+    /// Stream a snapshotted preset list, retaining only the names and one entry's serialized metadata.
+    void servePresetIndex(platform::TcpConnection& conn);
+    void answerPreset(platform::TcpConnection& conn, int status, JsonSink& sink, const char* etag = nullptr);
+    /// Answer with an already owned preset document, transferring its exact bytes to the send slot without a copy.
+    void answerPresetBlock(platform::TcpConnection& conn, int status, char* data, size_t size, const char* etag = nullptr);
+    /// Reserve the small mutation answer before changing a file or the output state.
+    static constexpr size_t kPresetReplyBytes = 512;
+    Send* reservePresetReply(platform::TcpConnection& conn);
+    void answerPresetReply(platform::TcpConnection& conn, Send& slot, int status, JsonSink& sink, const char* etag = nullptr);
     /// Answer a refused document as `PATCH /api/state` does: the engine's error and where it is, with status 400.
     void sendRefusal(platform::TcpConnection& conn, const StateDocumentResult& r);
     /// The child module a delete or replace may act on: found, not top-level, and one the user can remove.
@@ -789,9 +822,9 @@ private:
     void writeModuleJson(JsonSink& sink, MoonModule* mod);
     /// A module's fields before its controls, which an outline carries alone.
     void writeModuleHeader(JsonSink& sink, MoonModule* mod);
-    static void writeControl(JsonSink& sink, const ControlDescriptor& c);
+    static void writeControl(JsonSink& sink, const ControlDescriptor& c, bool metadata = true);
     /// The flags after a control's value and extras, and its closing brace.
-    static void writeControlTail(JsonSink& sink, const ControlDescriptor& c);
+    static void writeControlTail(JsonSink& sink, const ControlDescriptor& c, bool metadata = true);
     /// For a hosts text, the boards the device list knows among its entries, as `"known":{entry: counterpart}`.
     static void writeKnownHosts(JsonSink& sink, const char* text);
     /// The entries alone, between the braces writeKnownHosts writes.

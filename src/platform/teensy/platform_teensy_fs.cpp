@@ -325,7 +325,7 @@ uint64_t sdCardUsed() { return g_sdMounted ? SD.usedSize() : 0; }
 uint64_t sdCardTotal() { return g_sdMounted ? SD.totalSize() : 0; }
 bool sdCardBootsByDefault() { return hasSdCard; }
 
-void fsList(const char* apiDir, FsListCb cb, void* user) {
+void fsList(const char* apiDir, FsListCb cb, void* user, FsListMode mode) {
     if (!cb) return;
     if (isFsRoot(apiDir) && g_sdMounted) cb("sd", true, 0, user);   // a second mount, listed at the root by hand
     const char* dir = nullptr;
@@ -335,7 +335,7 @@ void fsList(const char* apiDir, FsListCb cb, void* user) {
     if (!d || !d.isDirectory()) return;
     while (File e = d.openNextFile()) {
         const bool isDir = e.isDirectory();
-        cb(e.name(), isDir, isDir ? 0 : static_cast<uint32_t>(e.size()), user);
+        cb(e.name(), isDir, (isDir || mode == FsListMode::NamesOnly) ? 0 : static_cast<uint32_t>(e.size()), user);
         e.close();
     }
     d.close();

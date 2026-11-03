@@ -567,6 +567,62 @@ TEST_CASE("ControlModule follows a preset written or removed from outside") {
     CHECK(d.control->listRowCount() == 0);
 }
 
+TEST_CASE("ControlModule refreshes content-only preset revisions without schema and preserves row identity across visible changes") {
+    Device d;
+    static unsigned* schemaEvents = nullptr;
+    unsigned changes = 0;
+    struct Hook {
+        explicit Hook(unsigned& events) {
+            schemaEvents = &events;
+            mm::MoonModule::setSchemaChangedHook([] { ++*schemaEvents; });
+        }
+        ~Hook() { mm::MoonModule::setSchemaChangedHook(nullptr); schemaEvents = nullptr; }
+    } hook(changes);
+    const char* path = "/.config/presets/Look.json";
+    d.writePreset("Look", R"({"$slot":3,"Effects":{"enabled":true}})");
+    d.scheduler.notifyFileChanged(path);
+    REQUIRE(d.control->listRowCount() == 1);
+    REQUIRE(changes > 0);
+    const uint32_t id = d.firstRowId();
+    REQUIRE(id != 0);
+    const auto originalRow = d.rowNamed("Look");
+    const auto revision = d.control->presetsRevision();
+    changes = 0;
+
+    d.writePreset("Look", R"({"$slot":3,"Effects":{"enabled":false}})");
+    d.scheduler.notifyFileChanged(path);
+    CHECK(d.control->presetsRevision() > revision);
+    CHECK(d.rowNamed("Look") == originalRow);
+    CHECK(d.firstRowId() == id);
+    CHECK(changes == 0);
+
+    // Each public projection change refreshes schema without replacing the same file's id.
+    const auto update = [&](const char* document) {
+        changes = 0;
+        const auto before = d.control->presetsRevision();
+        d.writePreset("Look", document);
+        d.scheduler.notifyFileChanged(path);
+        CHECK(changes > 0);
+        CHECK(d.control->presetsRevision() > before);
+        CHECK(d.firstRowId() == id);
+    };
+    update(R"({"$slot":4,"Effects":{"enabled":false}})");
+    CHECK(d.rowNamed("Look").find("\"slot\":4") != std::string::npos);
+    update(R"({"$slot":4,"Drivers":{"palette":1}})");
+    CHECK(d.rowNamed("Look").find("\"captures\":\"Drivers\"") != std::string::npos);
+    CHECK(d.control->isLookOnly(0));
+    update(R"({"$slot":4,"Drivers":{"pins":"35"}})");
+    CHECK_FALSE(d.control->isLookOnly(0));
+    update(R"({"$slot":4,"captures":["Drivers"],"Drivers":{"pins":"35"}})");
+    CHECK(d.rowNamed("Look").find("an older format") != std::string::npos);
+
+    changes = 0;
+    REQUIRE(mm::platform::fsRemove(path));
+    d.scheduler.notifyFileChanged(path);
+    CHECK(changes > 0);
+    CHECK(d.control->listRowCount() == 0);
+}
+
 // A card's save button saves that one module, rooted at its container, so applying it puts back that module and leaves its siblings alone.
 TEST_CASE("ControlModule saves one card as a preset and puts back only that module") {
     Device d;

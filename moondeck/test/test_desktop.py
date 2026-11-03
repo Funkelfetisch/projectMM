@@ -32,15 +32,25 @@ def _host_build_dir() -> Path:
     }.get(platform.system(), platform.system().lower())
 
 
+def _display_build_dir(build_dir: Path) -> Path:
+    """Prefer a short in-tree path; isolated builds may live anywhere."""
+    try:
+        return build_dir.relative_to(ROOT)
+    except ValueError:
+        return build_dir
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--module", help="Filter to the named module (matches @module + @also).")
     p.add_argument("--test", help="doctest test-case pattern (wildcards allowed).")
+    p.add_argument("--build-dir", type=Path,
+                   help="test the specified build directory, including GCC/product builds")
     args = p.parse_args()
 
-    build_dir = _host_build_dir()
+    build_dir = (ROOT / args.build_dir).resolve() if args.build_dir else _host_build_dir()
     if not build_dir.exists():
-        print(f"Build directory not found: {build_dir.relative_to(ROOT)}. "
+        print(f"Build directory not found: {_display_build_dir(build_dir)}. "
               f"Run build_desktop.py first.")
         sys.exit(1)
 
@@ -54,7 +64,7 @@ def main():
     test_exe = next((c for c in candidates if c.exists()), None)
     if test_exe is None:
         print(f"Test executable not found under "
-              f"{build_dir.relative_to(ROOT)}/test/.")
+              f"{_display_build_dir(build_dir)}/test/.")
         print("Compile it first: uv run moondeck/build/build_desktop.py --tests (MoonDeck → desktop → Compile Tests).")
         sys.exit(1)
 
@@ -87,7 +97,7 @@ def main():
     if filtered:
         cmd.append("-s")  # show passing assertions for the small filtered set
 
-    print(f"Running tests from {build_dir.relative_to(ROOT)}/ ...")
+    print(f"Running tests from {_display_build_dir(build_dir)}/ ...")
     sys.stdout.flush()
     # Stream output line-by-line so the MoonDeck log updates as the test runs
     # instead of dumping everything at the end. Without bufsize=1 + iter(), the

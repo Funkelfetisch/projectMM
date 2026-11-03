@@ -65,6 +65,8 @@ public:
     void setWiFi(WiFiModule* w) { wifi_ = w; }
     /// Adopt the access point's settings, a child this module's cascade opens and closes.
     void setAccessPoint(AccessPointModule* a) { ap_ = a; }
+    /// Opt-in on BLE-controlled products: keep IP recovery on upstream builds unchanged.
+    void allowWifiToggle(bool allow) { wifiToggle_ = allow; }
 
     /// Persist and apply the power cap, before credentials arriving with it are used.
     void setTxPowerSetting(uint8_t dBm) {
@@ -138,6 +140,9 @@ public:
 
         // Always present, since every variant has a mode.
         controls_.addReadOnly("mode", modeStr_, sizeof(modeStr_));
+        if constexpr (platform::hasWiFi) {
+            if (wifiToggle_) controls_.addControl("wifiEnabled", wifiEnabled_);
+        }
 
         // Expert-only: discovery works without it.
         controls_.addControl("mDNS", mdnsEnabled_);
@@ -147,6 +152,28 @@ public:
     /// Advance the cascade, then apply anything a control changed live.
     void tick1s() MM_NONBLOCKING override {
         uint32_t now = platform::millis();
+        if constexpr (platform::hasWiFi) {
+            if (wifiToggle_ && wifiAppliedEnabled_ != wifiEnabled_) {
+                wifiAppliedEnabled_ = wifiEnabled_;
+                if (!wifiEnabled_) {
+                    closeAp();
+                    stopSta();
+                    if (state_ != State::ConnectedEth && state_ != State::WaitingEth) {
+                        state_ = State::Idle;
+                        restartMdns();
+                    }
+                } else if (state_ != State::ConnectedEth && state_ != State::WaitingEth) {
+                    beginSta(now);
+                }
+            }
+            if (wifiToggle_ && !wifiEnabled_ && state_ != State::ConnectedEth && state_ != State::WaitingEth) {
+                updateMetrics();
+                std::snprintf(modeStr_, sizeof(modeStr_), "WiFi off");
+                std::snprintf(statusBuf_, sizeof(statusBuf_), "WiFi disabled");
+                setStatus(statusBuf_);
+                return;   // no station retries, AP fallback or provisioning while explicitly off
+            }
+        }
 
         // Held only while the leaseless cable is still in, so unplugging clears it.
         if (!platform::ethLinkUp() && (ethDegraded_ || ethLinkUpAt_ != 0)) {
@@ -205,6 +232,10 @@ public:
     }
 
 private:
+    bool wifiToggle_ = false;
+    /// Persisted product choice; BLE stays independent of this IP-interface flag.
+    bool wifiEnabled_ = true;
+    bool wifiAppliedEnabled_ = true;
     Scheduler* scheduler_ = nullptr;
     SystemModule* systemModule_ = nullptr;
     EthernetModule* ethernet_ = nullptr;   ///< the wired interface's settings, absent on a build without Ethernet
@@ -421,6 +452,7 @@ private:
     bool hasKnown() const MM_NONBLOCKING { return wifi_ && wifi_->knownCount() > 0; }
     /// Join the first network in the join order not tried this round, a new round unless `next`, since a scan between attempts reorders what is left.
     bool startSta(uint32_t now, bool next = false) {
+        if (wifiToggle_ && !wifiEnabled_) return false;
         if (!wifi_) return false;
         if (!next) triedCount_ = 0;
         uint8_t order[WiFiModule::kMaxKnown];
@@ -461,6 +493,9 @@ private:
 
     /// Stop the station, noting the radio stopped with it.
     void stopSta() {
+        // Drain cached mDNS esp_netif references before Wi-Fi destroys its interfaces.
+        platform::mdnsShutdown();
+        mdnsRunning_ = false;
         platform::wifiStaStop();
         noteRadioStopped();
     }
@@ -594,6 +629,7 @@ private:
 
     /// Open the access point beside whatever else runs, true once it is up.
     bool openAp() {
+        if (wifiToggle_ && !wifiEnabled_) return false;
         if (apUp_) return true;
         const platform::WifiApConfig cfg = ap_ ? ap_->config(firstNetworkPassword())
                                                : platform::WifiApConfig{readDeviceName(), captive::kAddressText, ""};
@@ -613,6 +649,8 @@ private:
     /// Close the access point, leaving whatever else runs.
     void closeAp() {
         if (!apUp_) return;
+        platform::mdnsShutdown();
+        mdnsRunning_ = false;
         platform::wifiApStop();
         noteRadioStopped();
         apUp_ = false;

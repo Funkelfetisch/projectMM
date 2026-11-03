@@ -58,28 +58,36 @@ void compress(uint32_t h[8], const uint8_t block[64]) {
 
 }  // namespace
 
-void sha256(const void* data, size_t len, uint8_t out[kSha256DigestSize]) {
-    // The first 32 bits of the fractional parts of the square roots of the first 8 primes (FIPS 180-4 §5.3.3).
-    uint32_t h[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-                     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
-
+bool Sha256::update(const void* data, size_t len) {
+    if ((!data && len) || len > (UINT64_MAX / 8u) - bytes_) return false;
     const uint8_t* p = static_cast<const uint8_t*>(data);
-    size_t remaining = len;
-
-    while (remaining >= 64) {
-        compress(h, p);
-        p += 64;
-        remaining -= 64;
+    bytes_ += len;
+    if (held_) {
+        const size_t needed = 64 - held_;
+        const size_t n = len < needed ? len : needed;
+        if (n) std::memcpy(tail_ + held_, p, n);
+        held_ += n; len -= n;
+        if (n) p += n;
+        if (held_ == 64) { compress(state_, tail_); held_ = 0; }
     }
+    while (len >= 64) {
+        compress(state_, p);
+        p += 64;
+        len -= 64;
+    }
+    if (len) { std::memcpy(tail_, p, len); held_ = len; }
+    return true;
+}
 
-    // Padding: the 0x80 terminator, zeroes, then the length in BITS as a big-endian 64-bit value. Two blocks when the tail plus the terminator leaves no room for that length (FIPS 180-4 §5.1.1).
+void Sha256::digest(uint8_t out[kSha256DigestSize]) const {
+    if (!out) return;
+    uint32_t h[8]; std::memcpy(h, state_, sizeof(h));
+    // FIPS 180-4 §5.1.1: the terminator and bit length may require two blocks.
     uint8_t tail[128] = {};
-    // Guarded: memcpy's src is `nonnull` even for a zero length, so sha256(nullptr, 0) is UB by the letter of the standard and UBSan reports it. Hashing nothing is a legal thing to ask for.
-    if (remaining) std::memcpy(tail, p, remaining);
-    tail[remaining] = 0x80;
-    const size_t tailLen = (remaining >= 56) ? 128 : 64;
-
-    const uint64_t bits = static_cast<uint64_t>(len) * 8;
+    if (held_) std::memcpy(tail, tail_, held_);
+    tail[held_] = 0x80;
+    const size_t tailLen = (held_ >= 56) ? 128 : 64;
+    const uint64_t bits = bytes_ * 8;
     for (int i = 0; i < 8; i++) {
         tail[tailLen - 1 - static_cast<size_t>(i)] = static_cast<uint8_t>((bits >> (i * 8)) & 0xFF);
     }
@@ -93,6 +101,13 @@ void sha256(const void* data, size_t len, uint8_t out[kSha256DigestSize]) {
         out[i * 4 + 2] = static_cast<uint8_t>((h[i] >> 8) & 0xFF);
         out[i * 4 + 3] = static_cast<uint8_t>(h[i] & 0xFF);
     }
+}
+
+void sha256(const void* data, size_t len, uint8_t out[kSha256DigestSize]) {
+    if (!out) return;
+    Sha256 state;
+    if (!state.update(data, len)) { std::memset(out, 0, kSha256DigestSize); return; }
+    state.digest(out);
 }
 
 void sha256Hex(const void* data, size_t len, char* out, size_t outBytes) {

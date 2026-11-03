@@ -1,0 +1,115 @@
+{
+  "qualification": "historical source/netlist verified; not physical firmware acceptance",
+  "historical_sources_manifest": "/home/veit/.local/state/nebulite-helio-firmware-backups/20261025-105450Z/battery-inventory-20261026/historical-manifest.json",
+  "wled_profiles": {
+    "source_commit": "8c58252cc2f1c0edb1d52b39a625052ed86b8a8c",
+    "products": [
+      "croptop",
+      "jacket"
+    ],
+    "battery_channels": 1,
+    "adc_gpio": 15,
+    "voltage_gain": 1.66,
+    "calibration_offset_volts": 0.96,
+    "calibration_semantics": "Vbat = calibrated ADC volts * gain + offset; offset is not a gain",
+    "compatibility_issue": "GPIO15 is ADC2: the product HAL implements S3 oneshot ADC2 with host SDK-fixture coverage; exact-board native coexistence and voltage calibration remain unqualified.",
+    "physical_calibration": "unverified historical configuration; owner explicitly cautions it may have been incorrect"
+  },
+  "classic_esp32_topology": {
+    "source": "owner report",
+    "two_batteries": "Y cable to shared charger",
+    "sensing": "one divider; exact pin and values not yet verified",
+    "archived_schematic": {
+      "source": "NEBULITE2 original KiCad schematic; not current board or physical acceptance",
+      "source_commit": "b3dcba7fabc6cf234461adc4449880bbdb0253fc",
+      "git_blob": "396567d84c29a08d1f838d517fe3d757072956ec",
+      "sha256": "71bd2427064ccd8ca96c56933a3509dab52b604478e5c16ae4456c2c768ffdb3",
+      "module": "ESP32-WROOM-32E",
+      "battery_rail": "One J4 connector on common +BATT/GND",
+      "chargers": 1,
+      "charger_type": "MCP73832-2-OT",
+      "adc_gpio": null,
+      "divider_top_ohms": null,
+      "divider_bottom_ohms": null,
+      "qualification": "Common charger topology source-verified; Y cable remains owner report, divider and board revision unqualified",
+      "rejected_divider_candidate": "R11/R12 are microphone bias on 3.3V/GND, not a battery divider"
+    }
+  },
+  "nebulite_s3_topology": {
+    "source": "historical EasyEDA export; not current live or physical acceptance",
+    "source_netlist": "/home/veit/git/helio-pcb/variants/helio-mini-80/evidence/NEBULITE-rev5-live-battery-reference.json",
+    "sha256": "14ac791761faae08cafe9341e2e91767b59f2739c383654582cc32bc91d4c92f",
+    "project_uuid": "5a57abf336f24d5e958010553894a1f0",
+    "pcb_uuid": "4c6d574bd7320452",
+    "module": "ESP32-S3-MINI-1-N8",
+    "chargers": 2,
+    "charger_type": "TP4056",
+    "channels": [
+      {
+        "battery": 1,
+        "adc_gpio": 15,
+        "adc_unit": 2,
+        "adc_channel": 4,
+        "module_pad": 19,
+        "divider_top_ohms": 100000,
+        "divider_bottom_ohms": 100000,
+        "nominal_gain": 2.0,
+        "charge_status_gpio": 45,
+        "charge_status_module_pad": 41
+      },
+      {
+        "battery": 2,
+        "adc_gpio": 16,
+        "adc_unit": 2,
+        "adc_channel": 5,
+        "module_pad": 20,
+        "divider_top_ohms": 100000,
+        "divider_bottom_ohms": 100000,
+        "nominal_gain": 2.0,
+        "charge_status_gpio": 42,
+        "charge_status_module_pad": 38
+      }
+    ],
+    "charge_status_qualification": "nets also connect through LED and 1k to +5V; input levels and charger-state semantics not physically qualified",
+    "physical_calibration": null,
+    "activation": "blocked pending exact revision selection, native ADC2 coexistence acceptance and physical calibration"
+  },
+  "mini80": {
+    "source_netlist": "/home/veit/git/helio-pcb/variants/helio-mini-80/evidence/fromF-copy-v184-netlist-after.json",
+    "source_sha256": "79306b9358a80c54f2755c2565dae59738b90ca32ea16eaa99ee4b97e5f2c84b",
+    "module": "ESP32-S3-MINI-1-N8",
+    "charger": "BQ24074RGTR",
+    "battery_cells": 1,
+    "adc_gpio": 1,
+    "sense_enable_gpio": 2,
+    "usb_power_good_gpio": 5,
+    "charge_status_mcu_gpio": null,
+    "sense_switch": "TMUX1101DCKR",
+    "divider_top_ohms": 300000,
+    "divider_bottom_ohms": 100000,
+    "sense_pulldown_ohms": 1000000,
+    "nominal_loaded_gain": 4.3,
+    "settle_max_ms": null,
+    "physical_calibration": null,
+    "activation": "unqualified; no GPIO enable performed by this inventory"
+  },
+  "available_hardware": {
+    "source": "owner correction 2026-10-26",
+    "controller": "ESP32-S3 variant; exact revision not yet verified",
+    "battery_available": "probably none",
+    "battery_connection": "none reported",
+    "charger_circuit": "not inferred from absence of battery",
+    "measurement_acceptance": "voltage and percentage calibration require an actual battery and reference measurement"
+  },
+  "nebulite_s3_minimal": {
+    "source_netlist": "/home/veit/git/helio-pcb/variants/helio-mini-80/evidence/NEBULITE-v6-original-live-reference.json",
+    "sha256": "4d1b1b7a28892e7d602ce2e8c0ff2f7cbf6a8809986bf8726704556c4f7d4cfa",
+    "project_uuid": "3aac7de93e7345909d80e266141f39de",
+    "pcb_uuid": "c7022539de4d4a899bbf3cde5233e38c",
+    "battery_chargers_in_export": 0,
+    "adc_module_pads_19_20": "GND",
+    "charge_status_module_pads_38_41": "unconnected",
+    "battery_profile": "must not inherit two-pack profile",
+    "owner_device_match": "unconfirmed"
+  }
+}

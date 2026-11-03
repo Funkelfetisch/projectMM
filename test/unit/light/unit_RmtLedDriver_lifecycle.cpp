@@ -6,9 +6,11 @@
 #include "light/drivers/Correction.h"
 #include "correction_presets.h"
 #include "light/layers/Buffer.h"
+#include "platform/RmtCheckedDetach.h"
 #include "unit/core/conditional_controls.h"  // shared conditional-control helpers
 
 #include <cstring>  // std::strcpy (writing the pins text control directly)
+#include <string>
 
 // These tests pin the symbol-buffer LIFECYCLE, the exact class of bug that reached hardware: a review fix made deinit() free symbols_, and because reinit() calls deinit(), every rebuild freed the buffer tick() needs, so the driver silently stopped transmitting. None of that touches the RMT peripheral (ESP32-only); it's pure host-testable buffer ownership, which is why a unit test is the right guard. The frameBuffer()/frameCapacity() accessors are test-only (mirror ArtNet's correctedBuffer()).
 
@@ -26,6 +28,333 @@ void wire(mm::RmtLedDriver& d, mm::Buffer& src, mm::Correction& corr,
 }
 
 } // namespace
+
+TEST_CASE("RMT checked detach retries only unfinished release phases") {
+    struct Ops {
+        std::string calls;
+        char fail = 0;
+        bool stopped = false, channel = true, encoder = true;
+        bool disabled() const { return stopped; }
+        bool wait() { calls += 'W'; return fail != 'W'; }
+        bool disable() { calls += 'D'; return fail != 'D'; }
+        void markDisabled() { calls += 'M'; stopped = true; }
+        bool removeChannel() {
+            if (!channel) return true;
+            calls += 'C';
+            if (fail == 'C') return false;
+            channel = false;
+            return true;
+        }
+        bool removeEncoder() {
+            if (!encoder) return true;
+            calls += 'E';
+            if (fail == 'E') return false;
+            encoder = false;
+            return true;
+        }
+    } ops;
+    ops.fail = 'W';
+    CHECK_FALSE(mm::platform::rmtCheckedDetachPhases(ops));
+    CHECK(ops.calls == "W");
+    CHECK_FALSE(ops.stopped);
+    ops.calls.clear(); ops.fail = 'D';
+    CHECK_FALSE(mm::platform::rmtCheckedDetachPhases(ops));
+    CHECK(ops.calls == "WD");
+    CHECK_FALSE(ops.stopped);
+    ops.calls.clear(); ops.fail = 'C';
+    CHECK_FALSE(mm::platform::rmtCheckedDetachPhases(ops));
+    CHECK(ops.calls == "WDMC");
+    CHECK(ops.stopped);
+    CHECK(ops.channel);
+    CHECK(ops.encoder);
+    ops.calls.clear(); ops.fail = 'E';
+    CHECK_FALSE(mm::platform::rmtCheckedDetachPhases(ops));
+    CHECK(ops.calls == "CE");
+    CHECK_FALSE(ops.channel);
+    CHECK(ops.encoder);
+    ops.calls.clear(); ops.fail = 0;
+    CHECK(mm::platform::rmtCheckedDetachPhases(ops));
+    CHECK(ops.calls == "E");
+    CHECK_FALSE(ops.encoder);
+}
+
+TEST_CASE("RMT checked detach keeps the handle on an unfinished or failed release") {
+    struct Reset {
+        mm::platform::RmtWs2812Handle& handle;
+        ~Reset() {
+            mm::platform::setTestRmtFailures(false, false);
+            mm::platform::setTestRmtDetachFailure(false);
+            mm::platform::rmtWs2812Deinit(handle);
+        }
+    };
+    mm::platform::RmtWs2812Handle handle;
+    Reset reset{handle};
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtDetachFailure(false);
+    REQUIRE(mm::platform::rmtWs2812Init(handle, 16, 40'000'000, false));
+    mm::platform::setTestRmtFailures(false, true);
+    CHECK_FALSE(mm::platform::rmtWs2812DetachChecked(handle));
+    CHECK(handle.impl != nullptr);
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtDetachFailure(true);
+    CHECK_FALSE(mm::platform::rmtWs2812DetachChecked(handle));
+    CHECK(handle.impl != nullptr);
+    mm::platform::setTestRmtDetachFailure(false);
+    CHECK(mm::platform::rmtWs2812DetachChecked(handle));
+    CHECK(handle.impl == nullptr);
+    CHECK(mm::platform::rmtWs2812DetachChecked(handle));
+}
+
+TEST_CASE("RMT frame confirmation requires successful start and completed wait") {
+    struct ResetFailures { ~ResetFailures() { mm::platform::setTestRmtFailures(false, false); mm::platform::setTestRmtFailurePin(-1); } } reset;
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtFailurePin(-1);
+    mm::RmtLedDriver driver;
+    mm::Buffer source;
+    mm::Correction correction;
+    std::strcpy(driver.pins, "16,17");
+    std::strcpy(driver.ledsPerPin, "32,32");
+    wire(driver, source, correction, 64);
+    CHECK_FALSE(driver.lastFrameLatched());
+    driver.tick();
+    CHECK(driver.lastFrameLatched());
+    driver.onCorrectionChanged();
+    CHECK_FALSE(driver.lastFrameLatched());
+    driver.tick();
+    CHECK(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailures(false, true);
+    driver.tick();
+    CHECK_FALSE(driver.lastFrameLatched());
+    driver.onCorrectionChanged();
+    mm::platform::setTestRmtFailures(false, false);
+    CHECK(driver.waitForPins());
+    CHECK_FALSE(driver.lastFrameLatched());
+    driver.tick();
+    CHECK(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailurePin(17);
+    mm::platform::setTestRmtFailures(false, true);
+    driver.tick();
+    CHECK_FALSE(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailurePin(-1);
+    mm::platform::setTestRmtFailures(false, false);
+    CHECK(driver.waitForPins());
+    CHECK_FALSE(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailures(true, false);
+    driver.tick();
+    CHECK_FALSE(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailures(false, true);
+    driver.tick();
+    CHECK_FALSE(driver.lastFrameLatched());
+    CHECK_FALSE(driver.waitForPins());
+    mm::platform::setTestRmtFailures(false, false);
+    CHECK(driver.waitForPins());
+    CHECK(driver.lastFrameLatched());
+    driver.tick();
+    CHECK(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailures(false, true);
+    driver.tick();
+    CHECK(driver.frameInFlight());
+    driver.onControlChanged("loopbackTest");
+    CHECK_FALSE(driver.frameInFlight());
+    CHECK_FALSE(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailures(false, false);
+    driver.tick();
+    CHECK(driver.lastFrameLatched());
+    driver.release();
+    CHECK_FALSE(driver.lastFrameLatched());
+}
+
+TEST_CASE("RMT black-frame gate sends zero bytes and holds visible output until confirmed") {
+    struct ResetFailures { ~ResetFailures() { mm::platform::setTestRmtFailures(false, false); mm::platform::setTestRmtFailurePin(-1); } } reset;
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtFailurePin(-1);
+    mm::RmtLedDriver driver;
+    mm::Buffer source;
+    mm::Correction correction;
+    std::strcpy(driver.pins, "16,17");
+    std::strcpy(driver.ledsPerPin, "32,32");
+    wire(driver, source, correction, 64);
+    std::memset(source.data(), 255, 64 * 3);
+    using BlackStatus = mm::RmtLedDriver::BlackFrameStatus;
+    CHECK(driver.blackFrameStatus() == BlackStatus::Idle);
+    driver.tick();
+    REQUIRE(driver.frameBuffer()[0] != 0);
+    mm::platform::setTestRmtFailures(false, true);
+    driver.tick();
+    REQUIRE(driver.frameInFlight());
+    mm::platform::resetTestRmtTransmitCount();
+    driver.requestBlackFrame();
+    CHECK(driver.blackFrameStatus() == BlackStatus::Pending);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    driver.tick();
+    CHECK_FALSE(driver.blackFrameLatched());
+    CHECK(driver.blackFrameStatus() == BlackStatus::Pending);
+    CHECK(mm::platform::testRmtTransmitCount() == 0);
+    mm::platform::setTestRmtFailures(false, false);
+    driver.tick();
+    REQUIRE(driver.blackFrameLatched());
+    CHECK(driver.blackFrameStatus() == BlackStatus::Latched);
+    for (size_t i = 0; i < 64 * 3; ++i) CHECK(driver.frameBuffer()[i] == 0);
+    const auto blackTransmits = mm::platform::testRmtTransmitCount();
+    CHECK(blackTransmits == 2);
+    driver.tick();
+    CHECK(mm::platform::testRmtTransmitCount() == blackTransmits);
+    driver.onCorrectionChanged();
+    CHECK_FALSE(driver.blackFrameLatched());
+    CHECK(driver.blackFrameStatus() == BlackStatus::Failed);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    driver.tick();
+    CHECK(mm::platform::testRmtTransmitCount() == blackTransmits);
+    driver.requestBlackFrame();
+    driver.tick();
+    REQUIRE(driver.blackFrameLatched());
+    const auto afterCorrection = mm::platform::testRmtTransmitCount();
+    CHECK(afterCorrection == blackTransmits + 2);
+    driver.onControlChanged("loopbackTest");
+    CHECK_FALSE(driver.blackFrameLatched());
+    CHECK_FALSE(driver.releaseBlackFrame());
+    driver.tick();
+    CHECK(mm::platform::testRmtTransmitCount() == afterCorrection);
+    driver.requestBlackFrame();
+    driver.tick();
+    REQUIRE(driver.blackFrameLatched());
+    const auto afterReinit = mm::platform::testRmtTransmitCount();
+    CHECK(afterReinit == afterCorrection + 2);
+    CHECK(driver.releaseBlackFrame());
+    CHECK(driver.blackFrameStatus() == BlackStatus::Idle);
+    driver.tick();
+    CHECK(mm::platform::testRmtTransmitCount() == afterReinit + 2);
+    CHECK(driver.frameBuffer()[0] != 0);
+    mm::platform::setTestRmtFailurePin(17);
+    driver.requestBlackFrame();
+    driver.tick();
+    CHECK_FALSE(driver.blackFrameLatched());
+    CHECK(driver.blackFrameStatus() == BlackStatus::Failed);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    const auto failedTransmits = mm::platform::testRmtTransmitCount();
+    driver.tick();
+    CHECK(mm::platform::testRmtTransmitCount() == failedTransmits);
+    mm::platform::setTestRmtFailurePin(-1);
+    driver.requestBlackFrame();
+    driver.tick();
+    CHECK(driver.blackFrameLatched());
+    CHECK(driver.releaseBlackFrame());
+}
+
+TEST_CASE("RMT black-frame request waits for an initialized driver and source") {
+    struct ResetFailures { ~ResetFailures() { mm::platform::setTestRmtFailures(false, false); mm::platform::setTestRmtFailurePin(-1); } } reset;
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtFailurePin(-1);
+    mm::platform::resetTestRmtTransmitCount();
+    mm::RmtLedDriver driver;
+    driver.requestBlackFrame();
+    driver.tick();
+    CHECK(driver.blackFrameStatus() == mm::RmtLedDriver::BlackFrameStatus::Pending);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    CHECK(mm::platform::testRmtTransmitCount() == 0);
+
+    mm::Buffer source;
+    mm::Correction correction;
+    std::strcpy(driver.pins, "16");
+    std::strcpy(driver.ledsPerPin, "64");
+    wire(driver, source, correction, 64);
+    std::memset(source.data(), 255, 64 * 3);
+    driver.tick();
+    REQUIRE(driver.blackFrameStatus() == mm::RmtLedDriver::BlackFrameStatus::Latched);
+    CHECK(mm::platform::testRmtTransmitCount() == 1);
+    for (size_t i = 0; i < 64 * 3; ++i) CHECK(driver.frameBuffer()[i] == 0);
+    CHECK(driver.releaseBlackFrame());
+}
+
+TEST_CASE("RMT qualified black frame rejects shortened strips and wrong channel counts") {
+    mm::RmtLedDriver driver;
+    mm::Buffer source;
+    mm::Correction correction;
+    std::strcpy(driver.pins, "16");
+    std::strcpy(driver.ledsPerPin, "52");
+    wire(driver, source, correction, 16);
+    mm::platform::resetTestRmtTransmitCount();
+
+    driver.requestBlackFrame(52, 4);
+    driver.tick();
+    CHECK(driver.blackFrameStatus() == mm::RmtLedDriver::BlackFrameStatus::Failed);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    CHECK(mm::platform::testRmtTransmitCount() == 0);
+
+    REQUIRE(driver.detachForPower());
+    REQUIRE(driver.attachForPower());
+    driver.tick();
+    CHECK(driver.blackFrameStatus() == mm::RmtLedDriver::BlackFrameStatus::Failed);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    CHECK(mm::platform::testRmtTransmitCount() == 0);
+
+    driver.requestBlackFrame(16, 4);
+    driver.tick();
+    CHECK(driver.blackFrameStatus() == mm::RmtLedDriver::BlackFrameStatus::Failed);
+    CHECK_FALSE(driver.releaseBlackFrame());
+    CHECK(mm::platform::testRmtTransmitCount() == 0);
+
+    driver.requestBlackFrame(16, 3);
+    driver.tick();
+    CHECK(driver.blackFrameLatched());
+    CHECK(driver.releaseBlackFrame());
+    driver.release();
+}
+
+TEST_CASE("RMT power handover holds output through wait and detach failures") {
+    struct ResetFailures {
+        ~ResetFailures() {
+            mm::platform::setTestRmtFailures(false, false);
+            mm::platform::setTestRmtFailurePin(-1);
+            mm::platform::setTestRmtDetachFailure(false);
+        }
+    } reset;
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtFailurePin(-1);
+    mm::platform::setTestRmtDetachFailure(false);
+    mm::RmtLedDriver driver;
+    mm::Buffer source;
+    mm::Correction correction;
+    std::strcpy(driver.pins, "16,17");
+    std::strcpy(driver.ledsPerPin, "32,32");
+    wire(driver, source, correction, 64);
+    std::memset(source.data(), 255, 64 * 3);
+    CHECK_FALSE(driver.detachForPower()); // no hold was requested
+    driver.tick();
+    REQUIRE(driver.lastFrameLatched());
+    mm::platform::setTestRmtFailures(false, true);
+    driver.tick();
+    REQUIRE(driver.frameInFlight());
+    driver.requestBlackFrame();
+    CHECK_FALSE(driver.detachForPower()); // frame still owns the buffer
+    CHECK_FALSE(driver.userEditable());
+    CHECK(driver.blocksAncestorRemoval());
+    CHECK_FALSE(driver.attachForPower());
+    const auto capacity = driver.frameCapacity();
+    driver.setSourceBuffer(nullptr); // cannot replace a buffer still in use
+    driver.prepare();
+    CHECK(driver.frameCapacity() == capacity);
+    mm::platform::setTestRmtFailures(false, false);
+    mm::platform::setTestRmtDetachFailure(true);
+    CHECK_FALSE(driver.detachForPower()); // failed detach retains the hold
+    CHECK_FALSE(driver.userEditable());
+    mm::platform::resetTestRmtTransmitCount();
+    driver.tick();
+    CHECK(mm::platform::testRmtTransmitCount() == 0);
+    mm::platform::setTestRmtDetachFailure(false);
+    REQUIRE(driver.detachForPower());
+    REQUIRE(driver.attachForPower());
+    CHECK_FALSE(driver.userEditable());
+    CHECK_FALSE(driver.blackFrameLatched());
+    driver.tick();
+    REQUIRE(driver.blackFrameLatched());
+    for (size_t i = 0; i < 64 * 3; ++i) CHECK(driver.frameBuffer()[i] == 0);
+    REQUIRE(driver.releaseBlackFrame());
+    CHECK(driver.userEditable());
+    CHECK_FALSE(driver.blocksAncestorRemoval());
+    driver.tick();
+    CHECK(driver.frameBuffer()[0] != 0);
+}
 
 TEST_CASE("RmtLedDriver sizes the symbol buffer in prepare") {
     mm::RmtLedDriver d;

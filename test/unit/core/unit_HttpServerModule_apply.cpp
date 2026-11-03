@@ -178,9 +178,11 @@ TEST_CASE("apply-core: a delete removes the module, and refuses a top-level one 
     registerTestTypes();
     mm::Scheduler s;
     auto* root = new Box();
+    REQUIRE(root != nullptr);
     root->setName("Root");
     s.addModule(root);
     auto* fixed = new Fixed();
+    REQUIRE(fixed != nullptr);
     fixed->setName("F");
     root->addChild(fixed);
     mm::HttpServerModule http;
@@ -532,8 +534,12 @@ TEST_CASE("a configured control write goes out early, and a driven one waits for
 TEST_CASE("buildStatePatch: a status change rides the patch (no resync needed)") {
     registerTestTypes();
     mm::Scheduler s;
-    auto* root = new Box(); root->setName("Root");
-    auto* k = new Knob(); k->setName("K");
+    auto* root = new Box();
+    REQUIRE(root != nullptr);
+    root->setName("Root");
+    auto* k = new Knob();
+    REQUIRE(k != nullptr);
+    k->setName("K");
     root->addChild(k);
     s.addModule(root);
     s.setup();
@@ -795,4 +801,28 @@ TEST_CASE("the frame walker hands a Ping and a Close to the control callback, in
     CHECK(seen[0] == "text:{\"a\":1}");
     CHECK(seen[1] == "9:hi");
     CHECK(seen[2] == "8:\x03\xe8");
+}
+
+TEST_CASE("HTTP state and patches expose only password configuration while persistence retains the secret") {
+    struct Secret : mm::MoonModule {
+        char password[32] = "bench-only-credential";
+        void defineControls() override { controls_.addPassword("password", password, sizeof(password)); }
+    };
+    mm::Scheduler scheduler;
+    auto* secret = new Secret(); secret->setName("Secret");
+    scheduler.addModule(secret); scheduler.setup();
+    mm::HttpServerModule http; http.setScheduler(&scheduler);
+    mm::JsonSink state; mm::HttpServerModule::TreeCursor cursor;
+    REQUIRE(http.writeTreeFragment(state, cursor, 0));
+    const std::string shown(state.data());
+    CHECK(shown.find("bench-only-credential") == std::string::npos);
+    CHECK(shown.find("\"type\":\"password\",\"value\":true") != std::string::npos);
+    mm::JsonSink saved; mm::writeStateMember(saved, *secret, true);
+    CHECK(std::string(saved.data()).find("bench-only-credential") != std::string::npos);
+    http.baselineLeafHashesForTest();
+    secret->password[0] = '\0';
+    mm::JsonSink patch; http.buildStatePatchForTest(patch);
+    CHECK(std::string(patch.data()).find("false") != std::string::npos);
+    CHECK(std::string(patch.data()).find("bench-only-credential") == std::string::npos);
+    scheduler.release();
 }

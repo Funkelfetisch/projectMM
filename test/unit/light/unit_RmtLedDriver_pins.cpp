@@ -463,6 +463,24 @@ TEST_CASE("the default timing is the one that drives WS2812B and SK6812 alike") 
     CHECK(c.period_ns == 1250);
 }
 
+TEST_CASE("HELIO seeds SK6812 timing and leaves the selector editable") {
+    mm::RmtLedDriver d;
+    mm::Buffer src;
+    mm::Correction corr;
+    d.timing = 0;  // value persisted by a generic WS2812 configuration
+    d.setDefaultTiming(mm::RmtLedDriver::kTimingSk6812Rgbw);
+    wire(d, src, corr, 8);
+    d.setup();
+    const auto& c = d.wireTimingForTest();
+    CHECK(d.timing == mm::RmtLedDriver::kTimingSk6812Rgbw);
+    CHECK(c.t0h_ns == 300);
+    CHECK(c.t1h_ns == 600);
+    CHECK(c.period_ns == 1250);
+    d.timing = mm::RmtLedDriver::kTiming800k;
+    d.applyState();
+    CHECK(d.wireTimingForTest().t0h_ns == 350);
+}
+
 TEST_CASE("selecting 400 kHz doubles the bit cell, which is what a 12V WS2811 strip decodes") {
     mm::RmtLedDriver d;
     mm::Buffer src;

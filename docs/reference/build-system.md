@@ -69,6 +69,8 @@ The Ethernet PHY and its pins are runtime settings. Each firmware carries the dr
 
 Some variants carry [MoonBase](../explanation/architecture/moonbase.md), the second boot image: `esp32`, `esp32-eth`, `esp32-wrover`, `esp32-pico`, `esp32-16mb`, `esp32s3-zero`, `esp32s3-n8r2`, `esp32c3`, and `qemu`, which is emulated. On those, `flash_esp32.py` writes the whole layout in one pass: the app in the large `ota_0` slot, MoonBase in `factory`, and an otadata that boots the app. A network update writes the app and never the partition table, so a device on an older table adopts a new one only through a full serial flash. On the 4 MB classic that also moves the filesystem, and the device comes back unprovisioned.
 
+ESP-IDF's generic `idf.py flash` instructions and generated `flash_args` do not describe that two-image layout: they put the application at the factory address. Do not use them for a MoonBase build. A successful experimental `nebulite-esp32` build is not an installation or migration authorization; its original hardware and recovery path still need qualification.
+
 ## ESP-IDF version
 
 **Pinned to `v6.1`**, commit `fff9895c`, the GA tag. `setup_esp_idf.py` holds it in `PINNED_IDF_VERSION`, warns when the installed tree differs, and offers to check the pin out. A stray `git pull` or a fresh clone on a newer commit then converges back; `--no-checkout` keeps it a warning. CI builds against the matching `espressif/idf` Docker tag. The firmware uses v6 APIs (`esp_eth_phy_new_generic`, the component manager for mDNS, the RMT v2, parlio and LCD drivers), and C++20 needs GCC 12 or newer.

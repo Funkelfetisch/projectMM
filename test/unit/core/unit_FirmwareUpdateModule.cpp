@@ -4,6 +4,15 @@
 #include "core/system/FirmwareUpdateModule.h"
 #include <cstring>
 
+TEST_CASE("FirmwareUpdateModule treats the platform reservation as an active update") {
+    struct Reset { ~Reset() { mm::platform::setTestOtaBusy(false); std::strcpy(mm::g_otaStatus, "idle"); } } reset;
+    std::strcpy(mm::g_otaStatus, "idle"); mm::platform::setTestOtaBusy(false);
+    CHECK_FALSE(mm::otaInFlight());
+    mm::platform::setTestOtaBusy(true); CHECK(mm::otaInFlight());
+    std::strcpy(mm::g_otaStatus, "error: unrelated request"); CHECK(mm::otaInFlight());
+    mm::platform::setTestOtaBusy(false); CHECK_FALSE(mm::otaInFlight());
+}
+
 // The `firmware` control always carries a name: the variant from build_info.h, or "unknown" on a local desktop build.
 TEST_CASE("FirmwareUpdateModule firmware control populated") {
     // A release build gets the real variant, which the install picker reads.

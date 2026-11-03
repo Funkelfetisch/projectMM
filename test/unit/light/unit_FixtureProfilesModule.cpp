@@ -15,7 +15,7 @@ using mm::Correction;
 
 namespace {
 // The count of seeded read-only built-ins (see FixtureProfilesModule::seedBuiltins). Referenced by name so adding a built-in updates one constant, not a scatter of magic numbers across the cases.
-constexpr int kBuiltinCount = 20;   // the six RGB orders, RGBW, GRBW, WRGB, three 16-bit, GRB6, RGBWYP, RGBCCT, IRGB + 4 moving heads
+constexpr int kBuiltinCount = 21;   // the six RGB orders, RGBW, GRBW, WRGB, three 16-bit, GRB6, RGBWYP, RGBCCT, IRGB + 4 moving heads
 
 // Serialize the profiles List value (the persisted form) to a string.
 std::string profilesJson(FixtureProfilesModule& m) {

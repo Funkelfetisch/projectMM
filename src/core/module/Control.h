@@ -57,7 +57,7 @@ enum class ControlType : uint8_t {
     Text,       ///< a character buffer, rendered as a text input
     TextArea,   ///< a buffer rendered as a resizable multi-line box
     FilePath,   ///< a buffer naming a file, whose contents the UI edits in place
-    Password,   ///< secret text, which the API obfuscates rather than sending in clear
+    Password,   ///< secret text, whose API value is a configured flag
     ReadOnly,   ///< display-only text
     ReadOnlyInt,///< display-only telemetry, shown with a unit suffix
     Select,     ///< a dropdown over an options array, stored as an index
@@ -296,7 +296,7 @@ public:
                                .max = bufSize, .validate = validate};
     }
 
-    /// Bind a buffer holding a secret, which the API obfuscates rather than sending in clear, with an optional check on every write.
+    /// Bind a buffer holding a secret, whose API value is a configured flag, with an optional check on every write.
     void addPassword(const char* name, char* var, uint8_t bufSize = 32,
                      bool (*validate)(const char*) = nullptr) {
         if (!grow(name)) return;
@@ -471,13 +471,13 @@ bool hasDefault(ControlType t);
 /// Append the value fragment alone, the caller composing the wrapper around it; `saving` writes the form the saved file keeps.
 void writeControlValue(JsonSink& sink, const ControlDescriptor& c, bool saving = false);
 
-/// Append a password as the API shows one, XOR-ed with a fixed key and base64-encoded: obfuscation against reading it at a glance, not a secret.
-void writeObfuscatedPassword(JsonSink& sink, const char* password);
+/// The public API carries only whether a password is configured; persistence retains its value.
+void writePasswordConfigured(JsonSink& sink, const char* password);
 
-/// While active, a password is written empty: for a client on the device's own access point, which has not shown it knows the network's password.
+/// Scope the access point's restricted topology and config-file view. Password controls are set-only on every interface.
 class SecretsHidden {
 public:
-    /// Hide stored passwords for this scope when `hide`, show them when not, and restore what was before on leaving.
+    /// Restrict the view for this scope and restore the previous restriction on leaving.
     explicit SecretsHidden(bool hide) MM_NONBLOCKING;
     /// Restore what was before.
     ~SecretsHidden() MM_NONBLOCKING;

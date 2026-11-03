@@ -52,11 +52,11 @@ def main() -> int:
     only.add_argument("--ui", action="store_true", help="run only the UI suite (needs a device)")
     ap.add_argument("--junit-dir", type=Path, default=ROOT / "build" / "moondeck-logs",
                     help="where the JUnit results go; CI points it where its annotations step reads them")
-    ap.add_argument("--clip", help="with --ui, perform only the run files whose name holds this, such as 16-restore-a-backup")
+    ap.add_argument("--clip", help="with --python or --ui, run only tests matching this name")
     args = ap.parse_args()
     args.junit_dir = args.junit_dir.resolve()   # the caller's folder, since the runs below start in the repo
-    if args.clip and not args.ui:
-        ap.error("--clip narrows the UI suite: pass --ui with it")
+    if args.clip and not (args.ui or args.python):
+        ap.error("--clip requires --python or --ui")
     # The UI lane is OPT-IN: it needs a MoonLight listening, so a bare run stays the
     # pure suites that work on any machine. It skips rather than fails when asked for
     # without a device, which is what the tests themselves decide.
@@ -70,7 +70,7 @@ def main() -> int:
         junit = args.junit_dir / "junit-python.xml"   # the results beside the console, to be kept as runs
         junit.parent.mkdir(parents=True, exist_ok=True)
         junit.unlink(missing_ok=True)   # a run that writes none records none, rather than the last one's results as this tree's
-        cmd += ["pytest", "test/python", "-q", f"--junitxml={junit}"]
+        cmd += ["pytest", "test/python", "-q", f"--junitxml={junit}"] + (["-k", args.clip] if args.clip else [])
         rc |= run(cmd, "Python (test/python)")
         if junit.exists():
             test_runs.record(test_runs.pytest_runs(junit))

@@ -369,6 +369,7 @@ function renameKeys(obj, file, report) {
 export function applyMigrations(files, live = []) {
     const out = {};
     const report = [];
+    const sources = new Map();
     for (const [path, content] of Object.entries(files)) {
         let newPath = path;
         const base = path.slice(path.lastIndexOf("/") + 1);
@@ -379,6 +380,12 @@ export function applyMigrations(files, live = []) {
             newPath = path.slice(0, path.lastIndexOf("/") + 1) + fr.to;
             report.push({ kind: "renamed", where: path, detail: `file → ${newPath} (${fr.date})` });
         }
+        // A retired file can survive beside its replacement. Neither name proves which
+        // settings to keep, so reject the backup before Restore writes any of its files.
+        if (sources.has(newPath)) {
+            throw new Error(`backup files ${sources.get(newPath)} and ${path} both restore to ${newPath}; review the conflicting files before restoring`);
+        }
+        sources.set(newPath, path);
         if (newPath.startsWith("/.config/presets/")) {
             // Preset payloads reference the captured container by name; two known value renames.
             let text = content;

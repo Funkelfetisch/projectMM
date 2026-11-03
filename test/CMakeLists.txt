@@ -7,6 +7,10 @@ add_executable(mm_tests
     # core/
     unit/core/unit_PartitionTables.cpp
     unit/core/unit_SpscRing.cpp
+    unit/core/unit_BleControlService.cpp
+    unit/light/unit_MiniLedPowerSequence.cpp
+    unit/core/unit_BleAdvertisement.cpp
+    unit/core/unit_PresetStore.cpp
     unit/core/unit_AnalogService.cpp
     unit/core/unit_AudioCapture.cpp
     unit/core/unit_platform_audiofft.cpp
@@ -16,6 +20,12 @@ add_executable(mm_tests
     unit/core/unit_ActiveInstance.cpp
     unit/test_main.cpp
     unit/core/unit_Color.cpp
+    unit/core/unit_BleMessage.cpp
+    unit/core/unit_BleRpcSession.cpp
+    unit/core/unit_BleConnectionRegistry.cpp
+    unit/core/unit_BlePeerIo.cpp
+    unit/core/unit_BlePeerTable.cpp
+    unit/core/unit_BleRpcPeers.cpp
     unit/core/unit_math8.cpp
     unit/core/unit_math16.cpp
     unit/core/unit_AreaSample.cpp
@@ -54,6 +64,13 @@ add_executable(mm_tests
     unit/core/unit_WledPacket.cpp
     unit/core/unit_FilesystemModule_persistence.cpp
     unit/core/unit_ControlModule.cpp
+    unit/core/unit_Bh1750Service.cpp
+    unit/core/unit_BatteryReading.cpp
+    unit/core/unit_BatteryService.cpp
+    unit/core/unit_BleBattery.cpp
+    unit/core/unit_BleConnectionPolicy.cpp
+    unit/core/unit_esp32_adc.cpp
+    unit/core/unit_HelioAudioMigration.cpp
     unit/core/unit_FilesystemModule_subtree.cpp
     unit/core/unit_FirmwareUpdateModule.cpp
     unit/core/unit_FirmwareImage.cpp
@@ -211,6 +228,7 @@ add_executable(mm_tests
     unit/light/unit_FireEffect.cpp
     unit/light/unit_GridLayout.cpp
     unit/light/unit_Rings241Layout.cpp
+    unit/light/unit_RingLayout.cpp
     unit/light/unit_SingleColumnLayout.cpp
     unit/light/unit_SphereLayout.cpp
     unit/light/unit_WheelLayout.cpp
@@ -247,11 +265,25 @@ add_executable(mm_tests
     unit/light/unit_PlasmaEffect.cpp
     unit/light/unit_PreviewDriver.cpp
     unit/light/unit_RainbowEffect.cpp
+    unit/light/unit_NebuliteRainbowEffect.cpp
+    unit/light/unit_NebuliteBlinkEffect.cpp
+    unit/light/unit_WledWashingMotion.cpp
+    unit/light/unit_NebuliteWashingEffect.cpp
+    unit/light/unit_WledTwinkleMotion.cpp
+    unit/light/unit_NebuliteSolidEffect.cpp
+    unit/light/unit_WledBlinkTiming.cpp
+    unit/light/unit_WledTwoColorPalette.cpp
     unit/light/unit_NetworkReceiveEffect.cpp
     unit/light/unit_NetworkReceiveEffect_protocols.cpp
     unit/light/unit_I80Peripheral.cpp
     unit/light/unit_MoonI80Peripheral.cpp
     unit/light/unit_Hub75Driver_pins.cpp
+    unit/light/unit_HelioWledPresetsEffect.cpp
+    unit/light/unit_RingsEffect.cpp
+    unit/light/unit_ProductPresets.cpp
+    unit/light/unit_ProductUsage.cpp
+    unit/light/unit_BleSceneCatalog.cpp
+    unit/light/unit_HelioFactoryTestEffect.cpp
     unit/light/unit_Hub75Slots.cpp
     unit/light/unit_ParallelSlots.cpp
     unit/light/unit_ParlioPeripheral.cpp
@@ -279,6 +311,7 @@ add_custom_target(effect_sweep_gen ALL
 )
 
 target_include_directories(mm_tests PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_include_directories(mm_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/esp32_adc)
 target_link_libraries(mm_tests PRIVATE mm_core mm_platform)
 
 # doctest::Approx takes a double, so every CHECK against a float literal promotes: inside

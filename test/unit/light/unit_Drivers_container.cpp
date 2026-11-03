@@ -1,6 +1,8 @@
 /// @module Drivers
 
 #include "doctest.h"
+#include "core/module/Scheduler.h"
+#include "core/module/StateDocument.h"
 #include "light/drivers/Drivers.h"
 #include "light/layers/Layer.h"
 #include "light/layouts/GridLayout.h"
@@ -10,6 +12,9 @@
 #include "light/drivers/ParallelLedDriver.h"     // its installer and bench controls, for the mode case
 #include "light/drivers/RmtLedDriver.h"
 #include "light/drivers/PreviewDriver.h"     // the one driver safe mode keeps
+#include "light/drivers/PwmLightDriver.h"
+#include "light/effects/SolidEffect.h"
+#include "light/layers/Effects.h"
 #include "correction_presets.h"                  // mm::test::rebuildFromPreset
 #include "../core/conditional_controls.h"   // mm::test::setControlValue
 #include "platform/platform.h"                 // gpioRead: the desktop reads back what gpioWrite put there
@@ -30,7 +35,337 @@ public:
     int loopCalls = 0;
 };
 
+class PowerPinOwner : public CountingDriver {
+public:
+    bool reserved = true;
+    bool reservesPowerPin(uint8_t pin) const override { return reserved && pin == 17; }
+};
+
+class RgbFrameDriver : public mm::DriverBase {
+public:
+    void setSourceBuffer(mm::Buffer* buffer) override { source = buffer; }
+    void defineDriverControls() override { defineCorrectionControls(); }
+    void tick() MM_NONBLOCKING override {
+        if (source && source->data()) correction_.apply(source->data(), output, source->channelsPerLight());
+    }
+    mm::Buffer* source = nullptr;
+    uint8_t output[3] = {};
+};
+
+struct ManualWhiteRig {
+    mm::FixtureProfilesModule profiles;
+    mm::Layouts layouts;
+    mm::GridLayout grid;
+    mm::Effects effects;
+    mm::Layer layer;
+    mm::SolidEffect solid;
+    mm::Drivers drivers;
+    RgbFrameDriver rgb;
+    mm::PwmLightDriver accent;
+
+    explicit ManualWhiteRig(bool withWhite = true) {
+        profiles.setup();
+        grid.width = 2; grid.height = 1; grid.depth = 1;
+        layouts.addChild(&grid);
+        layouts.applyState();
+        effects.addChild(&layer);
+        effects.setLayouts(&layouts);
+        layer.addChild(&solid);
+        drivers.multicore = false;
+        drivers.brightness = 255;
+        drivers.on = true;
+        drivers.setEffects(&effects);
+        rgb.setDefaultCorrection("RGB", mm::WhiteMode::None);
+        rgb.setDefaultCurve(mm::Correction::Curve::Linear);
+        accent.setDefaultCorrection("White", mm::WhiteMode::None);
+        accent.setDefaultCurve(mm::Correction::Curve::Linear);
+        std::strcpy(accent.pins, "46");
+        accent.bits = 12;
+        accent.setWindow(1, 1);
+        drivers.addChild(&rgb);
+        if (withWhite) drivers.addChild(&accent);
+    }
+    void prepare() {
+        drivers.defineControls();
+        drivers.setup();
+        layer.prepare();
+        drivers.prepare();
+        if (accent.parent() == &drivers && accent.enabled()) accent.prepare();
+    }
+    ~ManualWhiteRig() {
+        drivers.release();
+        drivers.removeChild(&accent);
+        drivers.removeChild(&rgb);
+        layer.removeChild(&solid);
+        effects.removeChild(&layer);
+        layouts.removeChild(&grid);
+    }
+};
+
+mm::Drivers* mutationDrivers = nullptr;
+
+struct DriverMutationHook {
+    explicit DriverMutationHook(mm::Drivers& drivers) {
+        mutationDrivers = &drivers;
+        mm::MoonModule::setQuiesceRenderHook([] {
+            if (mutationDrivers) mutationDrivers->quiesceRenderSplit();
+        });
+    }
+    ~DriverMutationHook() {
+        mm::MoonModule::setQuiesceRenderHook(nullptr);
+        mutationDrivers = nullptr;
+    }
+};
+
+struct DeletedLayer : mm::Layer {
+    explicit DeletedLayer(bool& deleted) : deleted_(deleted) {}
+    ~DeletedLayer() override { deleted_ = true; }
+    bool& deleted_;
+};
+
+// The drivers borrow a heap-owned Layer's Buffer in the single-core identity path.
+// StateDocument must sever those borrows before it destroys that Layer.
+struct DriverLifetimeRig {
+    mm::FixtureProfilesModule profiles;
+    mm::Layouts layouts;
+    mm::GridLayout grid;
+    mm::Effects effects;
+    mm::Drivers drivers;
+    mm::NetworkSendDriver network;
+    mm::RmtLedDriver rmt;
+    mm::Scheduler scheduler;
+
+    explicit DriverLifetimeRig(bool& deleted) {
+        profiles.setName("Fixtures"); profiles.setTypeName("FixtureProfiles");
+        layouts.setName("Layouts"); layouts.setTypeName("Layouts");
+        effects.setName("Effects"); effects.setTypeName("Effects");
+        drivers.setName("Drivers"); drivers.setTypeName("Drivers");
+        grid.width = 2; grid.height = 1; grid.depth = 1;
+        layouts.addChild(&grid);
+        effects.setLayouts(&layouts);
+        auto* old = new DeletedLayer(deleted);
+        old->setName("Old Layer"); old->setTypeName("Layer");
+        effects.addChild(old);
+        drivers.multicore = false;
+        drivers.brightness = 255;
+        drivers.on = true;
+        drivers.setEffects(&effects);
+        network.setName("Network"); network.setTypeName("NetworkSend");
+        rmt.setName("RMT"); rmt.setTypeName("RmtLed");
+        network.setDefaultCorrection("RGB", mm::WhiteMode::None);
+        rmt.setDefaultCorrection("RGB", mm::WhiteMode::None);
+        std::strcpy(rmt.pins, "35");
+        std::strcpy(rmt.ledsPerPin, "2");
+        // Empty hosts keep the real Network driver local to the fixture.
+        network.hosts[0] = '\0';
+        drivers.addChild(&network);
+        drivers.addChild(&rmt);
+        scheduler.addModule(&profiles);
+        scheduler.addModule(&layouts);
+        scheduler.addModule(&effects);
+        scheduler.addModule(&drivers);
+        scheduler.setup();
+    }
+    ~DriverLifetimeRig() {
+        drivers.setEffects(nullptr);
+        drivers.release();
+        drivers.removeChild(&network);
+        drivers.removeChild(&rmt);
+        while (effects.childCount()) {
+            auto* child = effects.child(0);
+            effects.removeChild(child);
+            mm::Scheduler::deleteTree(child);
+        }
+        layouts.removeChild(&grid);
+    }
+};
+
 } // namespace
+
+TEST_CASE("Drivers detach real Network and RMT buffers before StateDocument deletes their heap layer") {
+    bool deleted = false;
+    DriverLifetimeRig rig(deleted);
+    DriverMutationHook hook(rig.drivers);
+    auto* old = rig.effects.activeLayer();
+    REQUIRE(old != nullptr);
+    REQUIRE(old->buffer().data() != nullptr);
+    REQUIRE(old->buffer().count() == 2);
+    REQUIRE(rig.network.layer() == old);
+    REQUIRE(rig.rmt.layer() == old);
+    const auto prepared = rig.scheduler.preparationRevision();
+
+    const auto removed = mm::applyStateDocument(rig.scheduler, R"({"Effects":{"Old Layer":null}})");
+    INFO(removed.error);
+    REQUIRE(removed.ok);
+    REQUIRE(deleted); // the former Buffer owner is gone, rather than merely detached alive
+    REQUIRE(rig.effects.childCount() == 0);
+    CHECK(rig.scheduler.preparationRevision() == prepared);
+    CHECK(rig.network.layer() == nullptr);
+    CHECK(rig.rmt.layer() == nullptr);
+
+    // Both real correction callbacks run in the delete/prepare gap. Network resizes
+    // unconditionally; RGB->RGBW forces RMT to re-parse the source geometry.
+    REQUIRE(rig.scheduler.setControl("Network", "fixture", R"({"value":"RGBW"})") == mm::Scheduler::SetControlResult::Ok);
+    REQUIRE(rig.scheduler.setControl("RMT", "fixture", R"({"value":"RGBW"})") == mm::Scheduler::SetControlResult::Ok);
+    rig.drivers.fixtureChannels();
+    CHECK(rig.scheduler.preparationRevision() == prepared);
+    CHECK(rig.network.layer() == nullptr);
+    CHECK(rig.rmt.layer() == nullptr);
+
+    auto* fresh = new mm::Layer;
+    fresh->setName("New Layer"); fresh->setTypeName("Layer");
+    REQUIRE(rig.effects.addChild(fresh));
+    rig.scheduler.preparePending();
+    REQUIRE(fresh->buffer().data() != nullptr);
+    CHECK(fresh->buffer().count() == 2);
+    CHECK(fresh->buffer().channelsPerLight() == 4);
+    CHECK(rig.network.layer() == fresh);
+    CHECK(rig.rmt.layer() == fresh);
+    // Rebinding restores the real correction callbacks after the empty interval too.
+    rig.network.rebuildCorrection(128);
+    rig.rmt.rebuildCorrection(128);
+}
+
+TEST_CASE("Drivers manual white capability widens a default layer and carries Solid white to native PWM") {
+    ManualWhiteRig rig;
+    REQUIRE(rig.layer.channelsPerLight() == 3);
+    rig.prepare();
+    REQUIRE(rig.layer.channelsPerLight() == 4);
+    REQUIRE(rig.layer.buffer().channelsPerLight() == 4);
+    CHECK(rig.layer.fixtureChannels().colorChannels == 4);
+    rig.solid.red = 200;
+    rig.solid.green = 100;
+    rig.solid.blue = 50;
+    rig.solid.white = 128;
+    rig.solid.brightness = 255;
+    rig.layer.tick();
+    REQUIRE(rig.layer.buffer().data() != nullptr);
+    CHECK(rig.layer.buffer().data()[3] == 128);
+    rig.drivers.tick();
+    CHECK(rig.rgb.output[0] == 200);
+    CHECK(rig.rgb.output[1] == 100);
+    CHECK(rig.rgb.output[2] == 50);
+    REQUIRE(rig.accent.channelForTest(0) >= 0);
+    CHECK(mm::platform::pwmPinForTest(rig.accent.channelForTest(0)) == 46);
+    CHECK(mm::platform::pwmDutyForTest(rig.accent.channelForTest(0)) == (128u * 4095u + 127u) / 255u);
+}
+
+TEST_CASE("Drivers manual white capability is absent for RGB only disabled or removed white outputs") {
+    bool withWhite = true;
+    bool disabled = false;
+    bool removed = false;
+    SUBCASE("RGB only") { withWhite = false; }
+    SUBCASE("disabled white") { disabled = true; }
+    SUBCASE("removed white") { removed = true; }
+    ManualWhiteRig rig(withWhite);
+    if (disabled) rig.accent.setEnabled(false);
+    if (removed) REQUIRE(rig.drivers.removeChild(&rig.accent));
+    rig.prepare();
+    CHECK(rig.drivers.fixtureChannels().colorChannels == 3);
+    CHECK(rig.layer.channelsPerLight() == 3);
+}
+
+TEST_CASE("Drivers manual white capability survives layer replacement and never shrinks a wider layer") {
+    ManualWhiteRig rig;
+    rig.prepare();
+    REQUIRE(rig.layer.channelsPerLight() == 4);
+    mm::Layer replacement;
+    REQUIRE(rig.effects.removeChild(&rig.layer));
+    rig.effects.addChild(&replacement);
+    replacement.setLayouts(&rig.layouts);
+    CHECK(replacement.channelsPerLight() == 3);
+    rig.drivers.prepare();
+    replacement.prepare();
+    CHECK(replacement.fixtureChannels().colorChannels == 4);
+    CHECK(replacement.channelsPerLight() == 4);
+    replacement.setChannelsPerLight(11);
+    rig.drivers.prepare();
+    replacement.prepare();
+    CHECK(replacement.channelsPerLight() == 11);
+    rig.accent.setEnabled(false);
+    rig.drivers.prepare();
+    replacement.prepare();
+    CHECK(replacement.fixtureChannels().colorChannels == 3);
+    CHECK(replacement.channelsPerLight() == 11);
+    rig.effects.removeChild(&replacement);
+    rig.effects.addChild(&rig.layer);
+    rig.drivers.prepare();
+    replacement.release();
+}
+
+TEST_CASE("Drivers manual white capability survives the production Scheduler setup and replacement prepare order") {
+    ManualWhiteRig rig;
+    mm::Scheduler scheduler;
+    rig.layouts.setName("Layouts"); rig.layouts.setTypeName("Layouts");
+    rig.effects.setName("Effects"); rig.effects.setTypeName("Effects");
+    rig.drivers.setName("Drivers"); rig.drivers.setTypeName("Drivers");
+    scheduler.addModule(&rig.layouts);
+    scheduler.addModule(&rig.effects);
+    scheduler.addModule(&rig.drivers);
+    REQUIRE(rig.layer.channelsPerLight() == 3);
+    scheduler.setup();
+    REQUIRE(rig.drivers.fixtureChannels().colorChannels == 4);
+    REQUIRE(rig.layer.channelsPerLight() == 4);
+    REQUIRE(rig.layer.buffer().channelsPerLight() == 4);
+    mm::Layer replacement;
+    struct Restore {
+        ManualWhiteRig& rig;
+        mm::Layer& replacement;
+        ~Restore() {
+            rig.effects.removeChild(&replacement);
+            if (rig.layer.parent() != &rig.effects) rig.effects.addChild(&rig.layer);
+            rig.drivers.setEffects(&rig.effects);
+            rig.drivers.prepare();
+        }
+    } restore{rig, replacement};
+    REQUIRE(rig.effects.removeChild(&rig.layer));
+    REQUIRE(rig.effects.addChild(&replacement));
+    REQUIRE(replacement.channelsPerLight() == 3);
+    scheduler.prepareTree();
+    CHECK(replacement.fixtureChannels().colorChannels == 4);
+    CHECK(replacement.channelsPerLight() == 4);
+    CHECK(replacement.buffer().channelsPerLight() == 4);
+}
+
+TEST_CASE("Drivers manual white capability widens on a live fixture edit and avoids redundant prepares") {
+    bool alreadyWide = false;
+    SUBCASE("default RGB layer needs one prepare") {}
+    SUBCASE("existing wider layer retains its width") { alreadyWide = true; }
+    ManualWhiteRig rig;
+    mm::Scheduler scheduler;
+    rig.layouts.setName("Layouts"); rig.layouts.setTypeName("Layouts");
+    rig.effects.setName("Effects"); rig.effects.setTypeName("Effects");
+    rig.drivers.setName("Drivers"); rig.drivers.setTypeName("Drivers");
+    rig.rgb.setName("RGB");
+    rig.accent.setName("Accent");
+    rig.accent.setDefaultCorrection("RGB", mm::WhiteMode::None);
+    if (alreadyWide) rig.layer.setChannelsPerLight(11);
+    scheduler.addModule(&rig.layouts);
+    scheduler.addModule(&rig.effects);
+    scheduler.addModule(&rig.drivers);
+    scheduler.setup();
+    REQUIRE(rig.layer.channelsPerLight() == (alreadyWide ? 11 : 3));
+    const auto initial = scheduler.preparationRevision();
+    REQUIRE(scheduler.setControl("Accent", "fixture", R"({"value":"White"})") == mm::Scheduler::SetControlResult::Ok);
+    scheduler.preparePending();
+    if (alreadyWide) CHECK(scheduler.preparationRevision() - initial <= 1);
+    else CHECK(scheduler.preparationRevision() == initial + 1);
+    REQUIRE(rig.layer.channelsPerLight() == (alreadyWide ? 11 : 4));
+    rig.solid.red = 200; rig.solid.green = 100; rig.solid.blue = 50; rig.solid.white = 128;
+    rig.layer.tick();
+    rig.drivers.tick();
+    CHECK(rig.rgb.output[0] == 200);
+    CHECK(rig.rgb.output[1] == 100);
+    CHECK(rig.rgb.output[2] == 50);
+    REQUIRE(rig.accent.channelForTest(0) >= 0);
+    CHECK(mm::platform::pwmDutyForTest(rig.accent.channelForTest(0)) == (128u * 4095u + 127u) / 255u);
+    const auto prepared = scheduler.preparationRevision();
+    REQUIRE(scheduler.setControl("Accent", "fixture", R"({"value":"White"})") == mm::Scheduler::SetControlResult::Ok);
+    REQUIRE(scheduler.setControl("Drivers", "brightness", R"({"value":128})") == mm::Scheduler::SetControlResult::Ok);
+    scheduler.notifyListChanged(rig.profiles);
+    scheduler.preparePending();
+    CHECK(scheduler.preparationRevision() == prepared);
+}
 
 // A minimal driver that owns its Correction (filled by the container via rebuildCorrection()) and defines the correction controls, so a test can read the resulting LUT.
 class CorrectionCapturingDriver : public mm::DriverBase {
@@ -39,6 +374,33 @@ public:
     void tick() MM_NONBLOCKING override {}
     void defineDriverControls() override { defineCorrectionControls(); }
 };
+
+TEST_CASE("Drivers manual white capability is folded after the first motion output without replacing its map") {
+    mm::FixtureProfilesModule profiles;
+    profiles.setup();
+    mm::Drivers drivers;
+    CorrectionCapturingDriver motion, white;
+    motion.setDefaultCorrection("MH BeeEyes 15", mm::WhiteMode::None);
+    white.setDefaultCorrection("White", mm::WhiteMode::None);
+    motion.defineControls();
+    white.defineControls();
+    drivers.addChild(&motion);
+    const auto before = drivers.fixtureChannels();
+    REQUIRE(before.movable());
+    REQUIRE(before.colorChannels == 3);
+    drivers.addChild(&white);
+    const auto after = drivers.fixtureChannels();
+    CHECK(after.colorChannels == 4);
+    CHECK(after.pan == before.pan);
+    CHECK(after.tilt == before.tilt);
+    CHECK(after.zoom == before.zoom);
+    CHECK(after.rotate == before.rotate);
+    CHECK(after.gobo == before.gobo);
+    white.setEnabled(false);
+    CHECK(drivers.fixtureChannels().colorChannels == 3);
+    drivers.removeChild(&white);
+    drivers.removeChild(&motion);
+}
 
 // Counts prepare() (the structural rebuild that reinits the output peripheral) against onCorrectionChanged() (the light refresh), to prove a refresh is correction-only.
 class RebuildTrackingDriver : public mm::DriverBase {
@@ -302,6 +664,47 @@ TEST_CASE("the relay opens at brightness 0 and closes again when brightness retu
     drivers.on = false;
     drivers.onControlChanged("on");
     CHECK_FALSE(mm::platform::gpioRead(12));          // and `on` still opens it whatever brightness says
+    mm::platform::clearTestGpioLevel();
+}
+
+TEST_CASE("generic relay control never writes a driver-owned power pin") {
+    mm::platform::clearTestGpioLevel();
+    mm::Drivers drivers;
+    PowerPinOwner owner;
+    REQUIRE(drivers.addChild(&owner));
+    std::strcpy(drivers.relayPins, "17,18");
+    drivers.on = true; drivers.brightness = 100;
+    drivers.onControlChanged("relayPins");
+    CHECK_FALSE(mm::platform::gpioRead(17));
+    CHECK(mm::platform::gpioRead(18));
+    CHECK(std::strcmp(drivers.status(), "relay pin is owned by a driver") == 0);
+    // The owner may keep the reservation during disable/cleanup.
+    owner.setEnabled(false);
+    mm::platform::setTestGpioLevel(17, true);
+    drivers.on = false; drivers.onControlChanged("on");
+    CHECK(mm::platform::gpioRead(17));
+    CHECK_FALSE(mm::platform::gpioRead(18));
+    std::strcpy(drivers.relayPins, "17,,bad");
+    drivers.onControlChanged("relayPins");
+    CHECK(mm::platform::gpioRead(17));
+    drivers.relayPins[0] = 0; drivers.onControlChanged("relayPins");
+    CHECK(mm::platform::gpioRead(17));
+    mm::platform::clearTestGpioLevel();
+}
+
+TEST_CASE("a newly reserved power pin is not written by the old relay owner") {
+    mm::platform::clearTestGpioLevel();
+    mm::Drivers drivers; PowerPinOwner owner; owner.reserved = false;
+    REQUIRE(drivers.addChild(&owner));
+    std::strcpy(drivers.relayPins, "17"); drivers.on = true; drivers.brightness = 100;
+    drivers.onControlChanged("relayPins"); REQUIRE(mm::platform::gpioRead(17));
+    owner.reserved = true;
+    // Model the dedicated owner's separate low request, then a relay refresh.
+    mm::platform::setTestGpioLevel(17, false);
+    drivers.onControlChanged("relayPins"); CHECK_FALSE(mm::platform::gpioRead(17));
+    mm::platform::setTestGpioLevel(17, true);
+    drivers.relayPins[0] = 0; drivers.onControlChanged("relayPins");
+    CHECK(mm::platform::gpioRead(17));
     mm::platform::clearTestGpioLevel();
 }
 

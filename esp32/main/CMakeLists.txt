@@ -9,6 +9,7 @@ idf_component_register(
         # desktop, so one list serves both: src/module_types.cpp carries the reason.
         "../../src/module_types.cpp"
         ${MM_CORE_SOURCES}
+        "../../src/core/util/FirmwareSignature.cpp"
         "../../src/platform/esp32/platform_esp32.cpp"
         "../../src/platform/esp32/moonlive_emit_xtensa.cpp"
         "../../src/platform/esp32/moonlive_emit_riscv.cpp"
@@ -18,13 +19,17 @@ idf_component_register(
         "../../src/platform/esp32/platform_esp32_sdmmc.cpp"
     "../../src/platform/esp32/platform_esp32_h264.cpp"
         "../../src/platform/esp32/platform_esp32_ota.cpp"
+        "../../src/platform/esp32/platform_esp32_variant.cpp"
         "../../src/platform/esp32/platform_esp32_improv.cpp"
+        "../../src/platform/esp32/platform_esp32_ble.cpp"
+        "../../src/platform/esp32/platform_esp32_panic.cpp"
         "../../src/platform/esp32/platform_esp32_rmt.cpp"
         "../../src/platform/esp32/platform_esp32_pwm.cpp"
         "../../src/platform/esp32/rmt_hi_vector.S"
         "../../src/platform/esp32/platform_esp32_tasks.cpp"
         "../../src/platform/esp32/platform_esp32_worker.cpp"
         "../../src/platform/esp32/platform_esp32_gpio.cpp"
+        "../../src/platform/esp32/platform_esp32_adc.cpp"
         "../../src/platform/esp32/platform_esp32_i80.cpp"
         "../../src/platform/esp32/platform_esp32_hub75.cpp"
         "../../src/platform/esp32/platform_esp32_moon_i80.cpp"
@@ -47,6 +52,8 @@ idf_component_register(
 # compile line via the common set, so platform_esp32_rmt.cpp finds driver/rmt_*.h.
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+# Keep the custom image descriptor even under section garbage collection.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u mm_firmware_variant_descriptor")
 
 # The script compiler runs once per script load, never per frame, so it is built for size: the code it emits is the same either way.
 set_source_files_properties("../../src/core/moonlive/MoonLiveCompiler.cpp" PROPERTIES COMPILE_OPTIONS "-Os")
@@ -100,6 +107,14 @@ if(MM_FIRMWARE_NAME)
     # strips quotes from a -D value before comparing it with the cache, so a quoted value never
     # matched and re-ran CMake on every build.
     set_property(SOURCE ${BUILD_INFO_DIR}/build_info.cpp APPEND PROPERTY COMPILE_DEFINITIONS MM_FIRMWARE_NAME="${MM_FIRMWARE_NAME}")
+    set_property(SOURCE ../../src/platform/esp32/platform_esp32_variant.cpp APPEND PROPERTY COMPILE_DEFINITIONS MM_FIRMWARE_NAME="${MM_FIRMWARE_NAME}")
+    if(MM_FIRMWARE_NAME STREQUAL "helio1" OR MM_FIRMWARE_NAME STREQUAL "nebulite-s3")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_PANIC_RECORD=1)
+        target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")
+    endif()
+    if(MM_FIRMWARE_NAME STREQUAL "helio1")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_UI_NO_WEARABLE_ASSETS=1)
+    endif()
 endif()
 if(MM_RELEASE)
     # Quoted here, as MM_FIRMWARE_NAME above. Release-channel tag (latest / vX.Y.Z); only the
@@ -157,7 +172,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(UI_DIR ${COMPONENT_DIR}/../../src/ui)
 # Every UI file, by glob, so a file added to src/ui re-embeds without a second edit here: the hand-kept list had already missed migrate.js, semver.js and preview-adapt.js.
 file(GLOB UI_SOURCES CONFIGURE_DEPENDS ${UI_DIR}/*.js ${UI_DIR}/*.html ${UI_DIR}/*.css ${UI_DIR}/*.png
-     ${UI_DIR}/vendor/*.js)
+     ${UI_DIR}/vendor/*.js ${UI_DIR}/*.svg ${UI_DIR}/products/*.png ${UI_DIR}/products/*.webp)
 add_custom_command(
     OUTPUT ${UI_DIR}/ui_embedded.h
     COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DOUT=${UI_DIR}/ui_embedded.h -DPYTHON_CMD=${Python3_EXECUTABLE} -P ${UI_DIR}/embed_ui.cmake

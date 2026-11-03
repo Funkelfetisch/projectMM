@@ -318,6 +318,14 @@ bool gpioWrite(uint8_t gpio, bool high) {
     return true;
 }
 
+bool gpioPreloadOutput(uint8_t gpio, bool high) {
+    // The Teensy latch-before-direction behavior is not qualified here.
+    (void)gpio; (void)high;
+    return false;
+}
+
+bool gpioPreloadLowOutput(uint8_t gpio) { return gpioPreloadOutput(gpio, false); }
+
 namespace {
 // A0 to A13 are pins 14 to 27, A14 to A17 are pins 38 to 41.
 bool isAnalogPin(uint8_t gpio) { return (gpio >= 14 && gpio <= 27) || (gpio >= 38 && gpio <= 41); }
@@ -388,6 +396,8 @@ const char* reasonFor(uint32_t srsr, bool faulted, bool watchdog) {
     return "UNKNOWN";
 }
 }  // namespace
+
+const char* lastPanicSummary() { return ""; }
 
 const char* resetReason() {
     static const char* reason = nullptr;
@@ -897,3 +907,5 @@ void videoCaptureShutdown() {}
 VideoCaptureStats videoCaptureStats() MM_NONBLOCKING { return VideoCaptureStats{}; }
 
 }  // namespace mm::platform
+
+#include "platform/ble_control_stub.inc"

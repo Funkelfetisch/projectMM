@@ -1961,6 +1961,8 @@ UdpSocket::~UdpSocket() {
 
 bool UdpSocket::open() {
     if (fd_ >= 0) return true;
+    // Socket setup precedes BLE prepare, so persisted Wi-Fi-off boots need independent lwIP initialization.
+    ensureNetifInit();
     fd_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd_ < 0) return false;
     // Allow sends to a broadcast address (e.g. 255.255.255.255 for an Art-Net / E1.31 spray to every device on the LAN). Without SO_BROADCAST the stack rejects such a send; it has no effect on unicast/multicast sends.
@@ -2094,15 +2096,15 @@ bool TcpConnection::write(const uint8_t* data, size_t len) {
     uint32_t lastProgress = start;
     size_t sent = 0;
     while (sent < len) {
+        const uint32_t now = millis();
+        if (now - lastProgress >= kWriteStallMs || now - start >= kWriteTotalMs)
+            return false;   // progress cannot extend the total deadline
         auto n = lwip_write(fd_, data + sent, len - sent);
         if (n > 0) {
             sent += static_cast<size_t>(n);
             lastProgress = millis();
         } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            const uint32_t now = millis();
-            if (now - lastProgress >= kWriteStallMs || now - start >= kWriteTotalMs)
-                return false;   // stalled or crawling peer: close it, never hang the render loop
-            vTaskDelay(pdMS_TO_TICKS(1)); // wait for send buffer space
+            vTaskDelay(1);   // one actual tick: a 1 ms conversion can round down to zero
         } else {
             return false; // real error
         }
@@ -2174,6 +2176,7 @@ TcpServer::~TcpServer() {
 
 bool TcpServer::open(uint16_t port) {
     if (fd_ >= 0) return true;
+    ensureNetifInit();   // listening is safe even when every IP radio is off
 #if CONFIG_LWIP_IPV6
     // Dual-stack: lwIP binds IPv6-any as any type, so one socket serves the IPv4 clients and the IPv6 address mDNS now advertises.
     fd_ = socket(AF_INET6, SOCK_STREAM, 0);

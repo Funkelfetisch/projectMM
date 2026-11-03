@@ -32,25 +32,13 @@
 /// That cost a long debugging round on a relay that was working the whole time.
 /// The input buffer costs nothing here and makes a driven pin readable, which is what every other peripheral on this chip already does.
 ///
-/// ## Only the first converter, deliberately
-///
-/// One unit is opened on first use and kept, since the handle owns the peripheral and opening one per read would reconfigure it every tick.
-/// The second converter is shared with the radio on every chip here and times out whenever the radio holds it.
-/// A pin there would read fine on the bench and fail once the device joined a network, so refusing is the honest answer until something needs it.
-///
-/// A raw count is not a fixed fraction of full scale, every part's converter being nonlinear in its own way.
-/// And the correction for its own silicon lives in the chip's fuses.
-/// The scheme is chosen by which capability the target declares, curve fitting where it is supported and line fitting otherwise.
-
 #include "platform/platform.h"
+#include "platform/GpioPreload.h"
 
 #include "sdkconfig.h"        // CONFIG_IDF_TARGET_*: selects the per-chip strap/reserved table
 #include "soc/gpio_num.h"     // GPIO_IS_VALID_GPIO / GPIO_IS_VALID_OUTPUT_GPIO
 #include "driver/gpio.h"      // gpio_get_level / gpio_get_drive_capability: the live-state reads
 #include "driver/rtc_io.h"    // rtc_gpio_is_valid_gpio
-#include "esp_adc/adc_oneshot.h"  // adcRead: the ADC1 oneshot unit
-#include "esp_adc/adc_cali.h"      // adcReadMv: per-chip eFuse correction
-#include "esp_adc/adc_cali_scheme.h"
 #include "esp_efuse.h"        // esp_efuse_get_pkg_ver: the classic ESP32's PACKAGE decides its pin table
 #include "soc/efuse_defs.h"   // EFUSE_RD_CHIP_VER_PKG_*: the package ids
 #include "esp_heap_caps.h"    // heap_caps_get_total_size(MALLOC_CAP_SPIRAM): detect PSRAM without a new
@@ -211,88 +199,20 @@ bool gpioWrite(uint8_t gpio, bool high) {
     return gpio_set_level(static_cast<gpio_num_t>(gpio), high ? 1 : 0) == ESP_OK;
 }
 
-// The analogue converter: @xref{only-the-first-converter-deliberately|why one unit, and why not the second}.
-namespace {
-adc_oneshot_unit_handle_t g_adc1 = nullptr;
-bool g_adcChanReady[ADC_CHANNEL_9 + 1] = {};
-
-/// The ADC1 channel this GPIO is, or -1. Per chip, because the mapping is fixed in silicon.
-int adc1ChannelFor(uint8_t gpio) {
-    adc_unit_t unit;
-    adc_channel_t chan;
-    if (adc_oneshot_io_to_channel(static_cast<int>(gpio), &unit, &chan) != ESP_OK) return -1;
-    if (unit != ADC_UNIT_1) return -1;      // ADC2 races the WiFi radio: see above
-    return static_cast<int>(chan);
-}
-}  // namespace
-
-bool adcRead(uint8_t gpio, uint16_t& raw) {
-    const int chan = adc1ChannelFor(gpio);
-    if (chan < 0) return false;
-    if (!g_adc1) {
-        adc_oneshot_unit_init_cfg_t init = {};
-        init.unit_id = ADC_UNIT_1;
-        if (adc_oneshot_new_unit(&init, &g_adc1) != ESP_OK) { g_adc1 = nullptr; return false; }
-    }
-    if (!g_adcChanReady[chan]) {
-        adc_oneshot_chan_cfg_t cfg = {};
-        // 12 dB (the full ~0..3.1 V span) and the chip's widest resolution: a sense divider and a pedal both swing across the whole range, and a narrower attenuation would clip them silently. adcMaxCount() reports the matching full scale so a caller scales correctly.
-        cfg.atten    = ADC_ATTEN_DB_12;
-        cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-        if (adc_oneshot_config_channel(g_adc1, static_cast<adc_channel_t>(chan), &cfg) != ESP_OK)
-            return false;
-        g_adcChanReady[chan] = true;
-    }
-    int value = 0;
-    if (adc_oneshot_read(g_adc1, static_cast<adc_channel_t>(chan), &value) != ESP_OK) return false;
-    raw = static_cast<uint16_t>(value < 0 ? 0 : value);
-    return true;
+bool gpioPreloadOutput(uint8_t gpio, bool high) {
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio) || gpioCapability(gpio).reserved) return false;
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << gpio;
+    cfg.mode = GPIO_MODE_INPUT_OUTPUT;
+    cfg.intr_type = GPIO_INTR_DISABLE;
+    return preloadThenEnable(
+        [&]() { return gpio_set_level(static_cast<gpio_num_t>(gpio), high ? 1 : 0) == ESP_OK; },
+        [&]() { return gpio_config(&cfg) == ESP_OK; });
 }
 
-uint16_t adcMaxCount() { return 4095; }    // 12 bits, matching ADC_BITWIDTH_DEFAULT on these chips
+bool gpioPreloadLowOutput(uint8_t gpio) { return gpioPreloadOutput(gpio, false); }
 
-// Calibrated voltages, applied through a handle created once per unit and kept, exactly as the unit's own handle is.
-namespace {
-adc_cali_handle_t g_adcCali = nullptr;
-bool g_adcCaliTried = false;
-
-/// The calibration handle at our attenuation, or nothing where the chip carries no factory data; attempted once, since a part without it would otherwise retry on every read.
-adc_cali_handle_t adcCali() {
-    if (g_adcCaliTried) return g_adcCali;
-    g_adcCaliTried = true;
-#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-    adc_cali_curve_fitting_config_t cfg = {};
-    cfg.unit_id  = ADC_UNIT_1;
-    cfg.atten    = ADC_ATTEN_DB_12;
-    cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    if (adc_cali_create_scheme_curve_fitting(&cfg, &g_adcCali) != ESP_OK) g_adcCali = nullptr;
-#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-    adc_cali_line_fitting_config_t cfg = {};
-    cfg.unit_id  = ADC_UNIT_1;
-    cfg.atten    = ADC_ATTEN_DB_12;
-    cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
-    if (adc_cali_create_scheme_line_fitting(&cfg, &g_adcCali) != ESP_OK) g_adcCali = nullptr;
-#endif
-    return g_adcCali;
-}
-}  // namespace
-
-bool adcReadMv(uint8_t gpio, uint16_t& mv) {
-    uint16_t raw = 0;
-    if (!adcRead(gpio, raw)) return false;
-    adc_cali_handle_t cali = adcCali();
-    if (!cali) return false;                    // no eFuse calibration: refuse rather than guess
-    int out = 0;
-    if (adc_cali_raw_to_voltage(cali, static_cast<int>(raw), &out) != ESP_OK) return false;
-    mv = static_cast<uint16_t>(out < 0 ? 0 : out);
-    return true;
-}
-
-// The test seams are desktop-only: on a board the pins are real, and a test that wants to inject a level has the hardware to do it.
 void setTestGpioLevel(uint8_t, bool) {}
 void clearTestGpioLevel() {}
-void setTestAdcValue(uint8_t, uint16_t) {}
-void setTestAdcMv(uint8_t, uint16_t) {}
-void clearTestAdcValue() {}
 
 }  // namespace mm::platform

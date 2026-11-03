@@ -21,6 +21,17 @@ public:
     /// Volumetric: the two profiles steer every slice.
     Dim dimensions() const override { return Dim::D3; }
 
+    /// Two wide RGB planes, optional dither carry and one profile per axis.
+    WorkingMemory workingMemory(Coord3D raster, uint8_t) const override {
+        if (raster.x <= 0 || raster.y <= 0 || raster.z <= 0) return {};
+        const uint64_t cells = static_cast<uint64_t>(raster.x) * raster.y * raster.z;
+        const size_t profiles = (static_cast<size_t>(raster.x) + raster.y) * sizeof(int32_t);
+        constexpr size_t perCell = 3u * (2u * sizeof(uint16_t) + sizeof(uint8_t));
+        if (cells > (SIZE_MAX - profiles) / perCell) return {SIZE_MAX, SIZE_MAX};
+        return {static_cast<size_t>(cells) * perCell + profiles,
+                static_cast<size_t>(cells) * 3u * sizeof(uint16_t)};
+    }
+
     /// Which emitters pour color in. `All` is the intended picture, the rest show one at a time.
     enum class Mode : uint8_t { All = 0, Orbital, Lissajous, Border };
 
@@ -61,13 +72,20 @@ public:
 
     /// Size the wide plane, its spare, the dither error and the two profiles, and clear them.
     void prepare() override {
+        clearStatus();
         const size_t needed = static_cast<size_t>(width()) * height() * depth() * 3u;
+        if (needed == 0) { MoonModule::release(); return; }
         plane_.resize(needed);
         scratch_.resize(needed);
         carry_.resize(needed);
         // The profiles are the whole velocity field: one value per column, one per row.
         xProf_.resize(static_cast<size_t>(width()));
         yProf_.resize(static_cast<size_t>(height()));
+        if (!plane_ || !scratch_ || !xProf_ || !yProf_) {
+            MoonModule::release();
+            setStatus("effect buffers unavailable", Severity::Error);
+            return;
+        }
         if (plane_)   std::memset(plane_.data(), 0, plane_.bytes());
         if (scratch_) std::memset(scratch_.data(), 0, scratch_.bytes());
         // resize() keeps old contents at an unchanged size, so the dither's error needs clearing too.

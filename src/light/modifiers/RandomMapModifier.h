@@ -36,16 +36,17 @@ public:
     /// No control forces a rebuild: the rate is read live each tick.
     bool affectsPrepare(const char* /*controlName*/) const override { return false; }
 
-    /// The box stays as it is, stashed for the permutation.
-    void modifyLogicalSize(Coord3D& size) override { box_ = size; }
-
-    /// Flatten the coordinate to an index, look up its permuted one, and unflatten it back.
-    bool modifyLogical(Coord3D& pos) const override {
+    /// Prepare one permutation before the layer's two coordinate passes, keeping a failed allocation stable until the next prepare.
+    void modifyLogicalSize(Coord3D& size) override {
+        box_ = size;
         const nrOfLightsType boxCount =
             static_cast<nrOfLightsType>(box_.x) * static_cast<nrOfLightsType>(box_.y) *
             static_cast<nrOfLightsType>(box_.z);
         ensurePermutation(boxCount);
+    }
 
+    /// Flatten the coordinate to an index, look up its permuted one, and unflatten it back.
+    bool modifyLogical(Coord3D& pos) const override {
         const lengthType w = box_.x > 0 ? box_.x : 1;
         const lengthType h = box_.y > 0 ? box_.y : 1;
         const nrOfLightsType idx =
@@ -91,7 +92,7 @@ public:
 
 private:
     /// Rebuilt when the box count changed or a beat bumped the generation.
-    void ensurePermutation(nrOfLightsType boxCount) const {
+    void ensurePermutation(nrOfLightsType boxCount) {
         if (boxCount == 0) { releasePerm(); return; }
         if (boxCount != permCount_ || !perm_) {
             releasePerm();
@@ -108,7 +109,7 @@ private:
     }
 
     /// Fisher-Yates from the identity, so the result is always a true bijection.
-    void shuffle() const {
+    void shuffle() {
         for (nrOfLightsType i = 0; i < permCount_; i++) perm_[i] = i;
         rngState_ = 0xBADF00Du ^ (generation_ * 2654435761u);
         // i from high to low; swap perm_[i-1] with perm_[j], j in [0, i).
@@ -121,24 +122,24 @@ private:
     }
 
     /// LCG (glibc constants), same as ParticlesEffect, fast, integer, deterministic.
-    uint32_t rand() const {
+    uint32_t rand() {
         rngState_ = rngState_ * 1103515245u + 12345u;
         return rngState_ >> 8;   // drop the low bits (poor randomness in an LCG)
     }
 
-    void releasePerm() const {
+    void releasePerm() {
         if (perm_) { platform::free(perm_); perm_ = nullptr; }
         permCount_ = 0;
     }
 
     /// The box the permutation is over, stashed in modifyLogicalSize.
     Coord3D box_;
-    /// Mutable: mapToPhysical is const but lazily (re)builds the permutation.
-    mutable nrOfLightsType* perm_ = nullptr;
-    mutable nrOfLightsType  permCount_ = 0;
-    mutable uint32_t        rngState_ = 0xBADF00Du;
-    mutable uint32_t        generation_ = 1;   ///< bumped per beat; shuffle keys off it
-    mutable uint32_t        builtGen_ = 0;     ///< generation the current perm_ was built for
+    /// Fixed throughout both coordinate passes of one prepare.
+    nrOfLightsType* perm_ = nullptr;
+    nrOfLightsType  permCount_ = 0;
+    uint32_t       rngState_ = 0xBADF00Du;
+    uint32_t       generation_ = 1;   ///< bumped per beat; shuffle keys off it
+    uint32_t       builtGen_ = 0;     ///< generation the current perm_ was built for
 
     /// Dt*bpm accumulator (numerator; one beat per 60000).
     uint64_t phaseNum_ = 0;

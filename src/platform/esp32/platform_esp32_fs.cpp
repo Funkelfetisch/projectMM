@@ -202,8 +202,8 @@ int64_t fsSize(const char* path) {
 }
 
 namespace {
-// Every entry of one translated LittleFS directory, with its size.
-void listDir(const char* full, FsListCb cb, void* user) {
+// LittleFS supplies known entry types, so a names-only scan needs no per-entry stat.
+void listDir(const char* full, FsListCb cb, void* user, FsListMode mode) {
     DIR* d = ::opendir(full);
     if (!d) return;
     struct dirent* ent;
@@ -211,23 +211,27 @@ void listDir(const char* full, FsListCb cb, void* user) {
     char childPath[400];
     struct stat st;
     while ((ent = ::readdir(d)) != nullptr) {
+        if (mode == FsListMode::NamesOnly && (ent->d_type == DT_REG || ent->d_type == DT_DIR)) {
+            cb(ent->d_name, ent->d_type == DT_DIR, 0, user);
+            continue;
+        }
         std::snprintf(childPath, sizeof(childPath), "%s/%s", full, ent->d_name);
         const bool statOk = stat(childPath, &st) == 0;
         const bool isDir = statOk && S_ISDIR(st.st_mode);
-        const uint32_t size = (statOk && !isDir) ? static_cast<uint32_t>(st.st_size) : 0;
+        const uint32_t size = (mode == FsListMode::Metadata && statOk && !isDir) ? static_cast<uint32_t>(st.st_size) : 0;
         cb(ent->d_name, isDir, size, user);
     }
     ::closedir(d);
 }
 }  // namespace
 
-void fsList(const char* dir, FsListCb cb, void* user) {
-    if constexpr (hasSdCard) { if (isSdPath(dir)) { sdCardList(dir, cb, user); return; } }
+void fsList(const char* dir, FsListCb cb, void* user, FsListMode mode) {
+    if constexpr (hasSdCard) { if (isSdPath(dir)) { sdCardList(dir, cb, user, mode); return; } }
     if (!fsMounted_ || !cb) return;
     // A second mount, not a real subdirectory, so the root lists it by hand while a card is mounted.
     if constexpr (hasSdCard) { if (isFsRoot(dir) && sdCardMounted()) cb("sd", true, 0, user); }
     char full[128];
-    if (fsTranslate(dir, full, sizeof(full))) listDir(full, cb, user);
+    if (fsTranslate(dir, full, sizeof(full))) listDir(full, cb, user, mode);
 }
 
 // A LittleFS stream keeps both paths so close() can rename without re-deriving them; an SD one is owned and typed by platform_esp32_sdmmc.cpp, reached only through its own sdCardXxx calls below.

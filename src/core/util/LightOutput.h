@@ -40,6 +40,8 @@ class LightOutput {
 public:
     /// The live pipeline's shape.
     virtual const LightSummary& summary() const = 0;
+    /// Current uncorrected master brightness, or full brightness when unavailable.
+    virtual uint8_t masterBrightness() const { return 255; }
     /// The palette whose representative color is nearest a hue (0..359) and saturation (0..255).
     virtual uint8_t nearestPalette(uint16_t hue, uint8_t sat) const = 0;
     /// A palette's representative hue (0..359) and saturation (0..255).

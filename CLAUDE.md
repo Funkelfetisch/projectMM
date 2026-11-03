@@ -60,7 +60,7 @@ The product owner is the critical success factor. They review every line before 
 
 **Reverting is the product owner's call**, whatever prompted it: a contradicting doc, a reviewer finding, a failing check, or the agent's own second thoughts. State the case and wait.
 
-**Anti-stalling.** If a build error or test failure survives 2 fix attempts: stop. Ask, or propose a rollback (itself a revert: ask).
+**Anti-stalling.** If a build error or test failure survives 10 fix attempts: stop. Ask, or propose a rollback (itself a revert: ask).
 
 **Invite the product owner to test, then stop.** If they could see or judge the result, hand it over and wait for their observation before concluding or moving on. Leave the state running.
 

@@ -1,0 +1,241 @@
+{
+  "source": {
+    "repo": "AuraviaLTD/WLED",
+    "ref": "autobuild",
+    "sha": "8c58252cc2f1c0edb1d52b39a625052ed86b8a8c"
+  },
+  "qualification": "source-verified; not physically accepted on MoonLight",
+  "profiles": {
+    "croptop": {
+      "ledCount": 9,
+      "outputs": [
+        {
+          "start": 0,
+          "len": 8,
+          "pin": [
+            36
+          ],
+          "order": 1,
+          "type": 22
+        },
+        {
+          "start": 8,
+          "len": 1,
+          "pin": [
+            46
+          ],
+          "order": 1,
+          "type": 41
+        }
+      ],
+      "buttons": [
+        {
+          "type": 2,
+          "pin": [
+            41
+          ],
+          "macros": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "type": 2,
+          "pin": [
+            37
+          ],
+          "macros": [
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "microphone": {
+        "type": 1,
+        "pin": [
+          39,
+          38,
+          40,
+          -1,
+          -1,
+          -1
+        ]
+      },
+      "battery": {
+        "enabled": true,
+        "pin": 15,
+        "min-voltage": 3,
+        "max-voltage": 4.22,
+        "capacity": 2000,
+        "calibration": 0.96,
+        "voltage-multiplier": 1.66,
+        "interval": 3000,
+        "auto-off": {
+          "auto-off-enabled": true,
+          "threshold": 9
+        },
+        "indicator": {
+          "indicator-enabled": true,
+          "preset": 0,
+          "threshold": 10,
+          "duration": 5
+        }
+      },
+      "assets": {
+        "croptop_top.png": "5e28939aed13df6580fc766a3d08027cec8c29fbd980ab617ccb3ee0abaea718",
+        "croptop_leds.png": "c7528a16dddf05f804bf28c20906f7969e1bd60a071786d0b50c839a39068f06"
+      }
+    },
+    "jacket": {
+      "ledCount": 91,
+      "outputs": [
+        {
+          "start": 0,
+          "len": 30,
+          "pin": [
+            36
+          ],
+          "order": 1,
+          "type": 22
+        },
+        {
+          "start": 30,
+          "len": 1,
+          "pin": [
+            46
+          ],
+          "order": 1,
+          "type": 41
+        },
+        {
+          "start": 31,
+          "len": 30,
+          "pin": [
+            35
+          ],
+          "order": 1,
+          "type": 22
+        },
+        {
+          "start": 61,
+          "len": 30,
+          "pin": [
+            48
+          ],
+          "order": 1,
+          "type": 22
+        }
+      ],
+      "buttons": [
+        {
+          "type": 2,
+          "pin": [
+            41
+          ],
+          "macros": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "type": 2,
+          "pin": [
+            37
+          ],
+          "macros": [
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "microphone": {
+        "type": 1,
+        "pin": [
+          39,
+          38,
+          40,
+          -1,
+          -1,
+          -1
+        ]
+      },
+      "battery": {
+        "enabled": true,
+        "pin": 15,
+        "min-voltage": 3,
+        "max-voltage": 4.22,
+        "capacity": 2000,
+        "calibration": 0.96,
+        "voltage-multiplier": 1.66,
+        "interval": 3000,
+        "auto-off": {
+          "auto-off-enabled": true,
+          "threshold": 9
+        },
+        "indicator": {
+          "indicator-enabled": true,
+          "preset": 0,
+          "threshold": 10,
+          "duration": 5
+        }
+      },
+      "assets": {
+        "jacket_top.png": "6315bbb56406b1e77b8216cc3639476eeaf3c17f2dfb24abee586bb984b0cd3d",
+        "jacket_leds.png": "e8b3a0516de44c0da05a8483c9269262d2541f2c3b5e6d5209420603f5bef258"
+      }
+    },
+    "helio1": {
+      "ledCount": 62,
+      "outputs": [
+        {
+          "start": 0,
+          "len": 62,
+          "pin": [
+            2
+          ],
+          "order": 34,
+          "type": 30
+        }
+      ],
+      "buttons": [
+        {
+          "type": 2,
+          "pin": [
+            0
+          ],
+          "macros": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "type": 0,
+          "pin": [
+            -1
+          ],
+          "macros": [
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "microphone": {
+        "type": 1,
+        "pin": [
+          26,
+          5,
+          21,
+          -1
+        ]
+      },
+      "battery": null,
+      "assets": {}
+    }
+  }
+}

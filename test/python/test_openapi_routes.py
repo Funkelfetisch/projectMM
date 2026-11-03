@@ -12,12 +12,13 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = yaml.safe_load((ROOT / "docs" / "reference" / "openapi.yaml").read_text())
 SERVER = (ROOT / "src" / "core" / "system" / "HttpServerModule.cpp").read_text()
 METHODS = ("get", "post", "patch", "delete")
-STATIC = {"/"}   # the UI's index page, a static file the spec leaves out
+STATIC = {"/", "/modules"}   # UI entry points, not API operations
 
 
 def server_routes():
     """Per method: exact paths, prefixes and suffixes, read from the dispatch comparisons between `// Route` and the OPTIONS branch."""
-    region = SERVER[SERVER.index("    // Route\n"):SERVER.index('strcmp(method, "OPTIONS")')]
+    start = SERVER.index("    // Route\n")
+    region = SERVER[start:SERVER.index('strcmp(method, "OPTIONS")', start)]
     parts = re.split(r'strcmp\(method, "(\w+)"\)', region)
     routes = {}
     for method, chunk in zip(parts[1::2], parts[2::2]):

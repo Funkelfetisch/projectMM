@@ -3,7 +3,6 @@
 #include "core/module/Control.h"
 
 #include "core/util/JsonSink.h"
-#include "core/system/Base64.h"   // the password obfuscation's encoding
 #include "core/util/JsonUtil.h"
 
 #include <climits>
@@ -80,16 +79,8 @@ SecretsHidden::SecretsHidden(bool hide) MM_NONBLOCKING : prev_(g_secretsHidden) 
 SecretsHidden::~SecretsHidden() MM_NONBLOCKING { g_secretsHidden = prev_; }
 bool SecretsHidden::active() MM_NONBLOCKING { return g_secretsHidden; }
 
-void writeObfuscatedPassword(JsonSink& sink, const char* password) {
-    if (g_secretsHidden) { sink.append("\"\""); return; }
-    constexpr uint8_t kKey = 0x5A;   // shared with app.js's decodePassword
-    uint8_t scrambled[64];
-    size_t n = std::strlen(password);
-    if (n > sizeof(scrambled)) n = sizeof(scrambled);
-    for (size_t k = 0; k < n; k++) scrambled[k] = static_cast<uint8_t>(password[k]) ^ kKey;
-    char encoded[96];
-    base64Encode(std::span(scrambled).first(n), std::span(encoded));
-    sink.appendf("\"%s\"", encoded);
+void writePasswordConfigured(JsonSink& sink, const char* password) {
+    sink.append(password && password[0] ? "true" : "false");
 }
 
 void writeControlValue(JsonSink& sink, const ControlDescriptor& c, bool saving) {
@@ -118,7 +109,7 @@ void writeControlValue(JsonSink& sink, const ControlDescriptor& c, bool saving) 
         case ControlType::FilePath:
         case ControlType::Password:
         case ControlType::ReadOnly:
-            // Char buffers, written straight into the sink with no truncation; a Password is plain here for persistence, and the API obfuscates it through writeObfuscatedPassword.
+            // Char buffers, written straight into the sink with no truncation; a Password is plain here for persistence, and the public API reports only its configured flag.
             sink.writeJsonString(static_cast<char*>(c.ptr));
             return;
         case ControlType::ReadOnlyInt:

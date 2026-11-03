@@ -172,6 +172,13 @@ endif()
 if(MM_VERSION)
     set_property(SOURCE src/core/util/build_info.cpp APPEND PROPERTY COMPILE_DEFINITIONS MM_VERSION="${MM_VERSION}")
 endif()
+# Product defaults are exercised on the desktop before a hardware build.
+if(MM_FIRMWARE_NAME)
+    add_compile_definitions(MM_FIRMWARE_NAME=${MM_FIRMWARE_NAME})
+    if(MM_FIRMWARE_NAME STREQUAL "\"helio1\"")
+        add_compile_definitions(MM_UI_NO_WEARABLE_ASSETS=1)
+    endif()
+endif()
 
 # Platform library (desktop). moonlive_emit.cpp is the desktop MoonLive backend (host-ISA
 # codegen) — it lives here because emitted machine code is platform/ISA-specific.
@@ -275,7 +282,7 @@ set_source_files_properties(${CMAKE_SOURCE_DIR}/src/core/util/build_info.cpp PRO
 # embed_ui.cmake assemble the `<uv> run python` list internally.
 # Every UI file, by glob, so a file added to src/ui re-embeds without a second edit here: the hand-kept list had already missed migrate.js, semver.js and preview-adapt.js.
 file(GLOB UI_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/ui/*.js ${CMAKE_SOURCE_DIR}/src/ui/*.html
-     ${CMAKE_SOURCE_DIR}/src/ui/*.css ${CMAKE_SOURCE_DIR}/src/ui/*.png ${CMAKE_SOURCE_DIR}/src/ui/vendor/*.js)
+     ${CMAKE_SOURCE_DIR}/src/ui/*.css ${CMAKE_SOURCE_DIR}/src/ui/*.png ${CMAKE_SOURCE_DIR}/src/ui/vendor/*.js ${CMAKE_SOURCE_DIR}/src/ui/*.svg ${CMAKE_SOURCE_DIR}/src/ui/products/*.png ${CMAKE_SOURCE_DIR}/src/ui/products/*.webp)
 add_custom_command(
     OUTPUT ${CMAKE_SOURCE_DIR}/src/ui/ui_embedded.h
     COMMAND ${CMAKE_COMMAND} -DUI_DIR=${CMAKE_SOURCE_DIR}/src/ui -DOUT=${CMAKE_SOURCE_DIR}/src/ui/ui_embedded.h -DUV_EXECUTABLE=${UV_EXECUTABLE} -P ${CMAKE_SOURCE_DIR}/src/ui/embed_ui.cmake

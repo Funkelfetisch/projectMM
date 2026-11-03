@@ -110,6 +110,49 @@ TEST_CASE("RandomMapModifier rebuilds on a grid resize") {
     for (mm::nrOfLightsType i = 0; i < n; i++) CHECK(seen[i] == 1);
 }
 
+TEST_CASE("RandomMapModifier keeps failed-prepare mapping stable until an explicit retry") {
+    struct RestoreAllocations {
+        ~RestoreAllocations() { mm::platform::setTestAllocRefusedFrom(0); }
+    } restore;
+    mm::RandomMapModifier modifier;
+    mm::Coord3D size{8, 8, 1};
+    const size_t before = mm::platform::allocatedBytes();
+    const uint32_t blocksBefore = mm::platform::allocatedCount();
+    mm::platform::setTestAllocRefusedFrom(1);
+    modifier.modifyLogicalSize(size);
+    mm::platform::setTestAllocRefusedFrom(0);
+
+    auto walk = [&] {
+        std::vector<mm::nrOfLightsType> destinations;
+        for (mm::lengthType y = 0; y < 8; ++y) {
+            for (mm::lengthType x = 0; x < 8; ++x) {
+                mm::Coord3D position{x, y, 0};
+                REQUIRE(modifier.modifyLogical(position));
+                destinations.push_back(flat(position, 8, 8));
+            }
+        }
+        return destinations;
+    };
+    const auto first = walk();
+    const auto second = walk();
+    CHECK(first == second);
+    REQUIRE(first.size() == 64);
+    for (mm::nrOfLightsType i = 0; i < 64; ++i) CHECK(first[i] == i);
+    CHECK(mm::platform::allocatedBytes() == before);
+    CHECK(mm::platform::allocatedCount() == blocksBefore);
+
+    modifier.modifyLogicalSize(size);
+    const auto recovered = walk();
+    CHECK(recovered == walk());
+    CHECK(recovered != first);
+    std::vector<int> seen(64, 0);
+    for (auto destination : recovered) {
+        REQUIRE(destination < 64);
+        ++seen[destination];
+    }
+    for (int count : seen) CHECK(count == 1);
+}
+
 // tick() timer behavior through a real Layer: the modifier reads the Layer clock and, on a beat, asks the Layer to rebuild (coalesced). We observe the MODIFIER'S MAPPING before vs after a timed run. A beat reshuffles (mapping differs); bpm 0 freezes it.
 namespace {
 bool mappingChangesOverMs(uint8_t bpm, int total_ms) {

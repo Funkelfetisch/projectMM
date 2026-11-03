@@ -36,7 +36,7 @@ def _host_build_dir() -> Path:
 # MSVC multi-config places the binary under <build>/Release/MoonLight.exe;
 # every other generator drops it directly under <build>/MoonLight. Pick the
 # first that exists at lookup time so the file works on every host.
-def _resolve_executable() -> Path:
+def _resolve_executable(product=None) -> Path:
     bdir = _host_build_dir()
     candidates = [
         bdir / "MoonLight.exe",
@@ -48,6 +48,10 @@ def _resolve_executable() -> Path:
         ROOT / "build" / "MoonLight",
         ROOT / "build" / "MoonLight.exe",   # the same root-build case on Windows
     ]
+    if product:
+        dirs = [Path(str(bdir) + "-" + product), ROOT / "build" / ("gcc-" + product)]
+        candidates = [directory / leaf for directory in dirs
+                      for leaf in ("MoonLight", "MoonLight.exe", "Release/MoonLight.exe")]
     # Only this host's artefact shape is a candidate: a stale MoonLight.exe left in a shared
     # checkout must never be picked on macOS/Linux (and vice versa), however new it is.
     want_exe = platform.system() == "Windows"
@@ -100,13 +104,18 @@ def _kill_running():
 
 
 def main():
+    global EXECUTABLE
     ap = argparse.ArgumentParser(description="Run the desktop build in the background.")
     # Ports below 1024 need root, so the default stays 8080. Port 80 exists for Home Assistant's
     # WLED integration, which hardcodes port 80 and offers no way to specify another
     # (`sudo uv run moondeck/run/run_desktop.py --port 80`).
     ap.add_argument("--port", type=int, default=None,
                     help="HTTP port (default 8080; 80 needs root, for the Home Assistant WLED integration)")
+    ap.add_argument("--no-browser", action="store_true", help="run without opening a browser")
+    ap.add_argument("--product", choices=("helio1", "nebulite-s3", "nebulite-esp32"), help="run the matching desktop product build")
     args = ap.parse_args()
+    if args.product:
+        EXECUTABLE = _resolve_executable(args.product)
     if args.port is not None and not (1 <= args.port <= 65535):
         print(f"--port must be 1..65535, got {args.port}")
         sys.exit(1)
@@ -131,7 +140,7 @@ def main():
     # Detach: own session, stdio disconnected from this script, output redirected
     # to a log file the user can tail. The app survives this script exiting and
     # is unaffected by MoonDeck terminating other scripts.
-    log_path = _host_build_dir() / "MoonLight.log"
+    log_path = (EXECUTABLE.parent if args.product else _host_build_dir()) / "MoonLight.log"
     log_fp = open(log_path, "wb")  # closed when this script exits; the child keeps the fd
 
     popen_kwargs = dict(
@@ -149,6 +158,8 @@ def main():
         popen_kwargs["start_new_session"] = True  # own session, immune to our SIGTERM
 
     cmd = [str(EXECUTABLE)]
+    if args.no_browser:
+        cmd += ["--no-browser"]
     if args.port is not None:
         cmd += ["--port", str(args.port)]
     proc = subprocess.Popen(cmd, **popen_kwargs)

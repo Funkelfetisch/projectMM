@@ -23,6 +23,49 @@ namespace mm {
 ///
 /// A large map on a board without PSRAM can outgrow the largest free block, so the destinations split into power-of-two pages; the output is identical either way.
 class MappingLUT {
+    // One build owns one payload budget. The current heap can shrink during its
+    // walks; the snapshot also counts earlier allocations on host heap fixtures.
+    // Admission cooperates with other users rather than reserving the heap atomically.
+    class AllocationBudget {
+    public:
+        explicit AllocationBudget(size_t reserve)
+            : reserve_(reserve < platform::HEAP_RESERVE ? platform::HEAP_RESERVE : reserve),
+              remaining_(available()) {}
+
+        bool fits(size_t bytes) const { return bytes <= remaining_ && bytes <= available(); }
+
+        void reclaimed(size_t bytes) {
+            const size_t unlimited = static_cast<size_t>(-1);
+            remaining_ = bytes > unlimited - remaining_ ? unlimited : remaining_ + bytes;
+        }
+
+        void* allocate(size_t bytes) {
+            if (!fits(bytes)) return nullptr;
+            void* result = platform::alloc(bytes);
+            if (!result) return nullptr;
+            const size_t heap = platform::freeHeap();
+            const size_t internal = platform::freeInternalHeap();
+            if ((heap > 0 && heap < reserve_) || (internal > 0 && internal < reserve_)) {
+                platform::free(result);
+                return nullptr;
+            }
+            remaining_ -= bytes;
+            return result;
+        }
+
+    private:
+        size_t available() const {
+            const size_t internal = platform::freeInternalHeap();
+            if (internal > 0 && internal < reserve_) return 0;
+            const size_t heap = platform::freeHeap();
+            if (heap == 0) return static_cast<size_t>(-1); // unreported desktop heap
+            return heap > reserve_ ? heap - reserve_ : 0;
+        }
+
+        size_t reserve_;
+        size_t remaining_;
+    };
+
 public:
     /// An empty table, in identity mode until one is built.
     MappingLUT() = default;
@@ -50,66 +93,94 @@ public:
         logicalCount_ = count;
     }
 
-    /// Allocate a table filled in logical order by `setMapping`, in three tiers: a single block, then pages, then refusal; false only when memory genuinely cannot hold it.
-    bool build(nrOfLightsType logicalCount, nrOfLightsType maxDestinations) {
-        return beginBuild(logicalCount) && sizeDestinations(maxDestinations);
+    /// Map no source to any output, so composition clears physical lights without allocating a table.
+    void setEmpty() {
+        free();
+        identity_ = false;
     }
 
-    /// Start a table built in place as a compressed sparse row: `count` each destination, `startRuns`, `place` each again in order, `endBuild`, which readers wait for. False when memory refuses; the same size keeps the blocks.
-    bool beginBuild(nrOfLightsType logicalCount) {
-        freePages();
+    /// Allocate the table within the shared heap reserve: a single block, then pages, then refusal.
+    bool build(nrOfLightsType logicalCount, nrOfLightsType maxDestinations) {
+        if (static_cast<size_t>(logicalCount) >= kMaxElements ||
+            static_cast<size_t>(maxDestinations) > kMaxElements) { free(); return false; }
+        const bool reuseOffsets = offsets_ && logicalCount_ == logicalCount;
+        if (!reuseOffsets) free();
+        AllocationBudget budget(platform::HEAP_RESERVE);
         identity_ = false;
         overwrites_ = true;
         logicalCount_ = logicalCount;
-        destinationCount_ = 0;
-        destinationCapacity_ = 0;
+
+        size_t offsetBytes = (static_cast<size_t>(logicalCount) + 1) * sizeof(nrOfLightsType);
+        size_t destBytes = static_cast<size_t>(maxDestinations) * sizeof(nrOfLightsType);
+
         // Only the destinations array can hit the fragmentation cliff; offsets is small.
-        const size_t offsetBytes = static_cast<size_t>(logicalCount + 1) * sizeof(nrOfLightsType);
-        if (!(offsets_ && offsetsBytes_ == offsetBytes)) {
-            platform::free(offsets_);
-            offsets_ = static_cast<nrOfLightsType*>(platform::alloc(offsetBytes));
-            if (!offsets_) { free(); return false; }
-            offsetsBytes_ = offsetBytes;
-        }
+        if (!reuseOffsets) offsets_ = static_cast<nrOfLightsType*>(budget.allocate(offsetBytes));
+        if (!offsets_) { free(); return false; }
         std::memset(offsets_, 0, offsetBytes);
+
+        if (!allocateDestinations(destBytes, maxDestinations, budget)) {
+            free();
+            return false;
+        }
+
+        destinationCount_ = 0;
+        destinationLimit_ = maxDestinations;
         return true;
     }
 
-    /// Count one destination of logical light `li`, in an in-place build's first pass.
-    void count(nrOfLightsType li) {
-        if (li < logicalCount_) offsets_[li]++;
-    }
+    /// Build a CSR in place from a deterministic emitter, called twice with a (logical, physical) visitor.
+    template<typename Enumerate>
+    bool build(nrOfLightsType logicalCount, nrOfLightsType maxDestinations, Enumerate enumerate,
+               size_t reserve = platform::HEAP_RESERVE) {
+        if (static_cast<size_t>(logicalCount) >= kMaxElements) { free(); return false; }
+        const bool reuseOffsets = offsets_ && logicalCount_ == logicalCount;
+        if (!reuseOffsets) free();
+        AllocationBudget budget(reserve);
+        identity_ = false;
+        overwrites_ = true;
+        logicalCount_ = logicalCount;
+        const size_t offsetBytes = (static_cast<size_t>(logicalCount) + 1) * sizeof(nrOfLightsType);
+        if (!reuseOffsets) offsets_ = static_cast<nrOfLightsType*>(budget.allocate(offsetBytes));
+        if (!offsets_) { free(); return false; }
+        std::memset(offsets_, 0, offsetBytes);
 
-    /// Turn the counts into each light's run start, the cursors `place` advances, and size the destinations at their total; false when memory refuses, leaving the identity fast path.
-    bool startRuns() {
+        size_t total = 0;
+        bool valid = true;
+        enumerate([&](nrOfLightsType logical, nrOfLightsType) {
+            if (logical >= logicalCount || total >= maxDestinations) { valid = false; return; }
+            ++offsets_[logical];
+            ++total;
+        });
+        if (!valid || total > kMaxElements) { free(); return false; }
+
         nrOfLightsType running = 0;
-        for (nrOfLightsType i = 0; i < logicalCount_; i++) {
-            const nrOfLightsType c = offsets_[i];
+        for (size_t i = 0; i < logicalCount; ++i) {
+            const nrOfLightsType count = offsets_[i];
             offsets_[i] = running;
-            running += c;
+            running = static_cast<nrOfLightsType>(running + count);
         }
-        offsets_[logicalCount_] = running;
-        return sizeDestinations(running);
-    }
+        offsets_[logicalCount] = running;
+        if (!allocateDestinations(total * sizeof(nrOfLightsType), running, budget)) { free(); return false; }
 
-    /// Place `dest` as the next destination of logical light `li`, in an in-place build's second pass; bounded, so a second pass that disagrees with the first costs a destination, not memory.
-    void place(nrOfLightsType li, nrOfLightsType dest) {
-        if (li >= logicalCount_ || offsets_[li] >= destinationCapacity_) return;
-        writeDestination(offsets_[li]++, dest);
-    }
-
-    /// Close an in-place build: each cursor, now at its run's end, which is the next run's start, moves up one light.
-    void endBuild() {
-        for (nrOfLightsType i = logicalCount_; i > 0; i--) offsets_[i] = offsets_[i - 1];
+        size_t written = 0;
+        enumerate([&](nrOfLightsType logical, nrOfLightsType physical) {
+            if (logical >= logicalCount || offsets_[logical] >= total) { valid = false; return; }
+            writeDestination(offsets_[logical]++, physical);
+            ++written;
+        });
+        if (!valid || written != total) { free(); return false; }
+        for (size_t i = logicalCount; i > 0; --i) offsets_[i] = offsets_[i - 1];
         offsets_[0] = 0;
-        destinationCount_ = offsets_[logicalCount_];
+        destinationCount_ = running;
+        destinationLimit_ = running;
+        return true;
     }
 
     /// Fill one logical entry's destinations (call sequentially, idx 0..logicalCount-1)
     void setMapping(nrOfLightsType logicalIdx, const nrOfLightsType* physicals, nrOfLightsType count) {
         if (!offsets_ || logicalIdx >= logicalCount_) return;
         offsets_[logicalIdx] = destinationCount_;
-        for (nrOfLightsType i = 0; i < count && destinationCount_ < destinationCapacity_; i++) {
+        for (nrOfLightsType i = 0; i < count && destinationCount_ < destinationLimit_; i++) {
             writeDestination(destinationCount_, physicals[i]);
             destinationCount_++;
         }
@@ -125,18 +196,16 @@ public:
     /// Release the table and return to the identity fast path.
     void free() {
         if (offsets_) { platform::free(offsets_); offsets_ = nullptr; }
-        if (destinations_) { platform::free(destinations_); destinations_ = nullptr; }
-        offsetsBytes_ = 0;
-        destinationsBytes_ = 0;
-        freePages();
+        freeDestinations();
         logicalCount_ = 0;
         destinationCount_ = 0;
         destinationCapacity_ = 0;
+        destinationLimit_ = 0;
         identity_ = true;
         overwrites_ = true;
     }
 
-    /// Whether a table is allocated, rather than the identity fast path. @xref{four-mapping-kinds}
+    /// Whether composition uses a mapping, including an empty map that clears every output. @xref{four-mapping-kinds}
     bool hasLUT() const { return !identity_; }
     /// Whether the destinations are split into pages.
     bool isPaged() const { return paged_; }
@@ -152,14 +221,17 @@ public:
 
     /// The bytes the table uses, which is zero in identity mode.
     size_t memoryUsed() const {
-        if (identity_) return 0;
-        return static_cast<size_t>(logicalCount_ + 1) * sizeof(nrOfLightsType)
-             + static_cast<size_t>(destinationCount_) * sizeof(nrOfLightsType);
+        if (!offsets_) return 0;
+        return (static_cast<size_t>(logicalCount_) + 1) * sizeof(nrOfLightsType)
+             + static_cast<size_t>(destinationCapacity_) * sizeof(nrOfLightsType);
     }
 
     /// The bytes a prospective build would take, which paging does not change.
     static size_t estimateBytes(nrOfLightsType logicalCount, nrOfLightsType maxDest) {
-        return static_cast<size_t>(logicalCount + 1) * sizeof(nrOfLightsType)
+        if (static_cast<size_t>(logicalCount) >= kMaxElements ||
+            static_cast<size_t>(maxDest) > kMaxElements - static_cast<size_t>(logicalCount) - 1)
+            return static_cast<size_t>(-1);
+        return (static_cast<size_t>(logicalCount) + 1) * sizeof(nrOfLightsType)
              + static_cast<size_t>(maxDest) * sizeof(nrOfLightsType);
     }
 
@@ -194,62 +266,42 @@ public:
     }
 
 private:
+    static constexpr size_t kMaxElements = static_cast<size_t>(-1) / sizeof(nrOfLightsType);
 
-    /// Size the destinations at `total`, false when memory refuses, which returns the table to identity.
-    bool sizeDestinations(nrOfLightsType total) {
-        destinationCapacity_ = total;
-        destinationCount_ = 0;
-        if (allocateDestinations(static_cast<size_t>(total) * sizeof(nrOfLightsType), total)) return true;
-        free();
-        return false;
-    }
-
-    /// Release the pages, in reverse order, giving the allocator its best chance to coalesce the blocks.
-    void freePages() {
+    void freeDestinations() {
+        if (destinations_) { platform::free(destinations_); destinations_ = nullptr; }
         for (int i = pageCount_ - 1; i >= 0; i--) {
             platform::free(pages_[i]);
             pages_[i] = nullptr;
         }
         pageCount_ = 0;
         paged_ = false;
+        destinationCapacity_ = 0;
     }
 
     /// Tier the destinations allocation, false only on tier 3. @xref{paged-destinations}
-    bool allocateDestinations(size_t destBytes, nrOfLightsType maxDestinations) {
-        if (destBytes == 0) {   // nothing to map, so no block is held for it
-            platform::free(destinations_);
-            destinations_ = nullptr;
-            destinationsBytes_ = 0;
-            paged_ = false;
-            return true;
-        }
-        if (destinations_ && destinationsBytes_ == destBytes) { paged_ = false; return true; }   // the same size keeps the block
-        platform::free(destinations_);
-        destinations_ = nullptr;
-        destinationsBytes_ = 0;
+    bool allocateDestinations(size_t destBytes, nrOfLightsType maxDestinations, AllocationBudget& budget) {
+        if (maxDestinations <= destinationCapacity_) return true; // keep admitted storage, even under pressure
+        const size_t releasedBytes = static_cast<size_t>(destinationCapacity_) * sizeof(nrOfLightsType);
+        freeDestinations();
+        budget.reclaimed(releasedBytes);
+        if (!budget.fits(destBytes)) return false;
 
         // A zero maxAllocBlock means unlimited, so the desktop exercises the flat path too.
         size_t maxBlock = platform::maxAllocBlock();
         if (maxBlock == 0 || maxBlock >= destBytes) {
-            destinations_ = static_cast<nrOfLightsType*>(platform::alloc(destBytes));
-            if (destinations_) { destinationsBytes_ = destBytes; paged_ = false; return true; }
+            destinations_ = static_cast<nrOfLightsType*>(budget.allocate(destBytes));
+            if (destinations_) { destinationCapacity_ = maxDestinations; paged_ = false; return true; }
             // Fall through to paging if the single alloc lost a race.
         }
 
-        // Refuse rather than cram the heap: starving the stacks fails somewhere else instead.
-        size_t freeHeap = platform::freeHeap();
-        if (freeHeap != 0) {  // 0 == desktop (unlimited) → always page-able
-            size_t budget = freeHeap > platform::HEAP_RESERVE
-                                ? freeHeap - platform::HEAP_RESERVE : 0;
-            if (budget < destBytes) return false;
-        }
-
         // Tier 2: page it.
-        int needed = static_cast<int>((maxDestinations + kPageEntries - 1) / kPageEntries);
+        int needed = static_cast<int>((static_cast<size_t>(maxDestinations) + kPageEntries - 1) / kPageEntries);
         if (needed > kMaxPages) return false;
         for (int p = 0; p < needed; p++) {
-            pages_[p] = static_cast<nrOfLightsType*>(
-                platform::alloc(static_cast<size_t>(kPageEntries) * sizeof(nrOfLightsType)));
+            const size_t remaining = static_cast<size_t>(maxDestinations) - static_cast<size_t>(p) * kPageEntries;
+            const size_t entries = remaining < kPageEntries ? remaining : kPageEntries;
+            pages_[p] = static_cast<nrOfLightsType*>(budget.allocate(entries * sizeof(nrOfLightsType)));
             if (!pages_[p]) {
                 // Partial failure: unwind the pages we got (reverse order).
                 for (int q = p - 1; q >= 0; q--) { platform::free(pages_[q]); pages_[q] = nullptr; }
@@ -258,6 +310,7 @@ private:
             }
         }
         pageCount_ = needed;
+        destinationCapacity_ = maxDestinations;
         paged_ = true;
         return true;
     }
@@ -272,12 +325,11 @@ private:
     nrOfLightsType logicalCount_ = 0;
     nrOfLightsType* offsets_ = nullptr;
     nrOfLightsType* destinations_ = nullptr;   // tier-1 single block (null when paged)
-    size_t offsetsBytes_ = 0;                   // what offsets_ holds, which a rebuild at the same size keeps
-    size_t destinationsBytes_ = 0;              // and destinations_
     nrOfLightsType* pages_[kMaxPages] = {};     // tier-2 pages (empty when single)
     int pageCount_ = 0;
     nrOfLightsType destinationCount_ = 0;
     nrOfLightsType destinationCapacity_ = 0;
+    nrOfLightsType destinationLimit_ = 0;  // current build's fill limit, distinct from retained storage
     bool overwrites_ = true;   // single-write destinations → blendMap may copy
 };
 

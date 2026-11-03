@@ -178,6 +178,10 @@ public:
     using QuiesceRenderFn = void (*)();
     /// Install the hook that stops the render worker before a structural mutation.
     static void setQuiesceRenderHook(QuiesceRenderFn fn) { quiesceRenderHook_ = fn; }
+    /// Install a completed-frame task snapshot barrier that preserves the render worker.
+    static void setTaskSnapshotHook(QuiesceRenderFn fn) { taskSnapshotHook_ = fn; }
+    /// Establish the read-only snapshot boundary without tearing down output.
+    static void beforeTaskSnapshot() { if (taskSnapshotHook_) taskSnapshotHook_(); }
     /// Fire the resync directly, for a change the control rebuild does not cover.
     static void notifySchemaChanged() { if (schemaChangedHook_) schemaChangedHook_(); }
 
@@ -345,11 +349,49 @@ public:
     /// Whether the user may delete or replace this module, which a load-bearing child declines.
     virtual bool userEditable() const { return true; }
 
+    /// A module can reserve its controls while an external hardware owner is active.
+    virtual bool acceptsControlWrite(const char* /*name*/) const { return true; }
+    /// Park a resource before changing its configuration; false keeps storage unchanged.
+    virtual bool prepareControlWrite(const char* /*name*/) { return true; }
+    /// Owner of pins already held for this module's own configuration.
+    virtual const void* pinReservationOwner() const { return nullptr; }
+
+    /// An active resource handover may also forbid deleting an ancestor.
+    /// Ordinary fixed children do not prevent removal of their owning parent.
+    virtual bool blocksAncestorRemoval() const { return false; }
+    /// Advance a checked hardware handover during application shutdown. An
+    /// owner overriding this must keep output disabled and must not block.
+    /// The ordinary render/control tick is not run during this phase.
+    virtual void shutdownStep(uint32_t now) MM_NONBLOCKING {
+        for (uint8_t i = childCount_; i > 0; --i) children_[i - 1]->shutdownStep(now);
+    }
+    bool subtreeRemovalAllowed() const {
+        if (blocksAncestorRemoval()) return false;
+        for (uint8_t i = 0; i < childCount_; ++i)
+            if (children_[i] && !children_[i]->subtreeRemovalAllowed()) return false;
+        return true;
+    }
+
     /// Whether a written config may re-apply live, which a module with one-shot setup declines.
     virtual bool appliesConfigLive() const { return true; }
 
     /// Park any worker of this module's that reads the tree, returning once it is idle.
     virtual void quiesce() {}
+
+    /// Park resources throughout a subtree before a checked destructive
+    /// teardown. A resource may discover a failed handover only while parked.
+    void quiesceSubtreeForRemoval() {
+        quiesce();
+        for (uint8_t i = childCount_; i > 0; --i) children_[i - 1]->quiesceSubtreeForRemoval();
+    }
+    /// A child's quiesce may fail in a resource owned by an ancestor.
+    bool prepareSubtreeRemoval() {
+        quiesceSubtreeForRemoval();
+        if (!subtreeRemovalAllowed()) return false;
+        for (const MoonModule* p = parent_; p; p = p->parent_)
+            if (p->blocksAncestorRemoval()) return false;
+        return true;
+    }
 
     /// Park both workers that read the tree, which every structural mutator calls first.
     void quiesceForMutation() {
@@ -530,6 +572,7 @@ private:
     static inline SchemaChangedFn schemaChangedHook_ = nullptr;
     static inline ValuesChangedFn valuesChangedHook_ = nullptr;
     static inline QuiesceRenderFn quiesceRenderHook_ = nullptr;
+    static inline QuiesceRenderFn taskSnapshotHook_ = nullptr;
 };
 
 } // namespace mm

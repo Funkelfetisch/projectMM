@@ -17,6 +17,8 @@ Stdlib only, since the ESP32 build runs it with ESP-IDF's Python.
 """
 
 import base64
+import json
+from html.parser import HTMLParser
 import hashlib
 import io
 import os
@@ -72,17 +74,56 @@ def esbuild() -> Path:
     return target
 
 
+class UIEntries(HTMLParser):
+    """The module and stylesheet entry points the actual page loads."""
+    def __init__(self):
+        super().__init__()
+        self.modules = []
+        self.styles = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "script" and attrs.get("type") == "module" and attrs.get("src"):
+            self.modules.append(attrs["src"])
+        if tag == "link" and attrs.get("rel") == "stylesheet" and attrs.get("href"):
+            self.styles.append(attrs["href"])
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     ui, stage = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+    if (ui / "nebulite-profile-data.js").exists():
+        subprocess.run([sys.executable, str(ROOT / "moondeck/build/gen_product_profiles.py"), "--check"], check=True)
     stage.mkdir(parents=True, exist_ok=True)
+    page = UIEntries()
+    page.feed((ui / "index.html").read_text())
+    if not page.modules:
+        sys.exit("bundle_ui: index.html has no module entry point")
+    # Keep stable diagnostic module URLs alongside the page entry point.
+    page.modules = list(dict.fromkeys([*page.modules, "app.js", *(["helio-app.js"] if (ui / "helio-app.js").exists() else [])]))
     tool = str(esbuild())
     common = ["--minify", "--legal-comments=none", "--log-level=warning"]
-    subprocess.run([tool, str(ui / "app.js"), "--bundle", "--format=esm", f"--outfile={stage / 'app.js'}", *common], check=True)
-    subprocess.run([tool, str(ui / "style.css"), f"--outfile={stage / 'style.css'}", *common], check=True)
-    for f in COPIED:
-        shutil.copyfile(ui / f, stage / Path(f).name)
+    meta = stage / "bundle-meta.json"
+    subprocess.run([tool, *[str(ui / name) for name in page.modules], "--bundle", "--splitting",
+                    "--format=esm", "--chunk-names=chunk-[hash]", f"--outdir={stage}",
+                    f"--metafile={meta}", *common], cwd=ROOT, check=True)
+    files = [(ROOT / name).resolve().relative_to(stage).as_posix()
+             for name in json.loads(meta.read_text())["outputs"]]
+    for name in page.styles:
+        target = stage / Path(name).name
+        subprocess.run([tool, str(ui / name), f"--outfile={target}", *common], check=True)
+        files.append(target.name)
+    # Keep the original PNGs in source for editing and development. Firmware
+    # embeds lossless WebP derivatives; old PNG URLs remain aliases there.
+    copied = [ui / f for f in COPIED] + list(ui.glob("*.svg")) + list(ui.glob("products/*.webp"))
+    for source in copied:
+        relative = source.relative_to(ui) if source.parent.name == "products" else Path(source.name)
+        target = stage / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        files.append(relative.as_posix())
+    (stage / "served-files.json").write_text(json.dumps(sorted(set(files))))
     return 0
 
 

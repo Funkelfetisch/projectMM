@@ -7,6 +7,25 @@
 #include "platform/platform.h"
 
 #include <cstring>
+#include <string>
+
+TEST_CASE("JsonSink: a sub-512-byte document needs no kilobyte allocation or retained block") {
+    struct Reset { ~Reset() { mm::platform::setTestAllocRefusedFrom(0); } } reset;
+    const auto baseline = mm::platform::allocatedBytes();
+    const std::string expected = "{\"value\":\"" + std::string(400, 'p') + "\"}";
+    REQUIRE(expected.size() < 512);
+    mm::platform::setTestAllocRefusedFrom(1024);
+    {
+        mm::JsonSink sink;
+        sink.append("{\"value\":\"");
+        sink.append(std::string(400, 'p').c_str());
+        sink.append("\"}");
+        REQUIRE_FALSE(sink.overflowed());
+        CHECK(std::string(sink.data(), sink.size()) == expected);
+        CHECK(mm::platform::allocatedBytes() - baseline <= 512);
+    }
+    CHECK(mm::platform::allocatedBytes() == baseline);
+}
 
 TEST_CASE("JsonSink::detach hands over the heap buffer; sink frees nothing after") {
     char* buf = nullptr;

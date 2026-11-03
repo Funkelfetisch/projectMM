@@ -4,6 +4,7 @@
 /// Pins the multicore render↔encode split (Step 2a) on the host, where platform::spawnPinnedTask is a real std::thread, so the cross-core handoff invariants run on an actual second thread and TSan/ASan can catch a race or use-after-free on the shared outputBuffer_. The ESP32 core-1 task relies on exactly these invariants; here a MockDriver stands in for the real drivers (I80/Parlio are inert on the host, lanesAvailable()==0). One rule under test: while `multicore` is on, EVERY driver's tick() runs on core 1 against the finished frame; core 0 returns to rendering immediately.
 
 #include "doctest.h"
+#include "core/system/TasksModule.h"
 #include "light/drivers/Drivers.h"
 #include "light/drivers/ParallelLedDriver.h"
 #include "light/layers/Effects.h"
@@ -419,5 +420,73 @@ TEST_CASE("render-split: the stall warning clears once the worker is healthy aga
     r.drivers.tick();
     CHECK(r.drivers.quiesceEncodeForTest());           // the worker answers
     CHECK(std::strlen(r.drivers.status()) == 0);       // and the card stops crying stall
+    r.drivers.release();
+}
+
+// A task snapshot only waits. Structural quiescence detaches borrowed storage until prepare binds it again.
+TEST_CASE("render-split: structural quiescence detaches identity output until prepare restores fresh frames") {
+    Rig r(16);
+    r.layers.removeChild(&r.layerB);
+    r.layers.applyState();
+    MockDriver output;
+    r.drivers.addChild(&output);
+    r.drivers.setup();
+    r.drivers.prepare();
+    REQUIRE(r.drivers.renderSplitActive());
+    r.layerA.buffer().data()[0] = 17;
+    r.drivers.tick();
+    r.drivers.waitForTaskSnapshot();
+    REQUIRE(r.drivers.renderSplitActive());
+    REQUIRE(output.src_ != nullptr);
+    CHECK(output.src_->data()[0] == 17);
+
+    r.drivers.quiesceRenderSplit();
+    REQUIRE_FALSE(r.drivers.renderSplitActive());
+    CHECK(output.src_ == nullptr);
+    CHECK(output.layer() == nullptr);
+    r.layerA.buffer().data()[0] = 91;
+    r.drivers.tick();
+    CHECK(output.src_ == nullptr);
+    CHECK(output.layer() == nullptr);
+
+    // Rebind through the real prepare path, selecting single-core identity output.
+    r.drivers.multicore = false;
+    r.drivers.prepare();
+    REQUIRE_FALSE(r.drivers.renderSplitActive());
+    REQUIRE(output.src_ != nullptr);
+    CHECK(output.src_ == &r.layerA.buffer());
+    CHECK(output.layer() == &r.layerA);
+    r.drivers.tick();
+    CHECK(output.src_->data()[0] == 91);
+    r.layerA.buffer().data()[0] = 143;
+    r.drivers.tick();
+    CHECK(output.src_->data()[0] == 143);
+    r.drivers.release();
+}
+
+TEST_CASE("render-split: repeated task snapshots preserve the worker and changing frames") {
+    Rig r(16);
+    r.layers.removeChild(&r.layerB);
+    r.layers.applyState();
+    MockDriver output;
+    r.drivers.addChild(&output);
+    r.drivers.setup();
+    r.drivers.prepare();
+    REQUIRE(r.drivers.renderSplitActive());
+    static mm::Drivers* snapshotDrivers = nullptr;
+    struct Cleanup {
+        ~Cleanup() { mm::MoonModule::setTaskSnapshotHook(nullptr); snapshotDrivers = nullptr; }
+    } cleanup;
+    snapshotDrivers = &r.drivers;
+    mm::MoonModule::setTaskSnapshotHook([] { snapshotDrivers->waitForTaskSnapshot(); });
+    mm::TasksModule tasks;
+    for (uint8_t frame = 1; frame <= 5; ++frame) {
+        r.layerA.buffer().data()[0] = frame;
+        r.drivers.tick();
+        tasks.tick1s();
+        CHECK(r.drivers.renderSplitActive());
+        REQUIRE(output.src_ != nullptr);
+        CHECK(output.src_->data()[0] == frame);
+    }
     r.drivers.release();
 }

@@ -35,6 +35,9 @@
 /// Layouts, effects and modifiers are registered alphabetically by display name, matching the picker and the docs so the three orders agree at a glance.
 ///
 #include "module_types.h"
+#include "core/util/build_info.h"
+
+#include <cstring>
 
 #include "core/module/Scheduler.h"
 #include "light/layers/Effects.h"
@@ -45,6 +48,7 @@
 #include "light/layouts/SingleRowLayout.h"
 #include "light/layouts/SingleColumnLayout.h"
 #include "light/layouts/PanelLayout.h"
+#include "light/layouts/PixelMapLayout.h"
 #include "light/layouts/CubeLayout.h"
 #include "light/layouts/TubesLayout.h"
 #include "light/layouts/RingLayout.h"
@@ -56,6 +60,17 @@
 #include "light/layouts/CarLightsLayout.h"
 #include "light/effects/LinesEffect.h"
 #include "light/effects/RainbowEffect.h"
+#include "light/effects/NebuliteRainbowEffect.h"
+#include "light/effects/NebuliteBlinkEffect.h"
+#include "light/effects/NebuliteSolidEffect.h"
+#include "light/effects/NebuliteWashingEffect.h"
+#include "light/effects/NebuliteSineEffect.h"
+#include "light/effects/NebulitePaletteEffect.h"
+#include "light/effects/NebuliteFireflyEffect.h"
+#include "light/effects/NebuliteSnowflakesEffect.h"
+#include "light/effects/NebuliteFlowStripeEffect.h"
+#include "light/effects/NebulitePlasmoidEffect.h"
+#include "light/effects/NebuliteNoisefireEffect.h"
 #include "light/effects/WaveEffect.h"
 #include "light/effects/FluidEffect.h"
 #include "light/effects/NebulaEffect.h"
@@ -66,6 +81,8 @@
 #include "light/effects/PictureEffect.h"
 #include "light/effects/PlasmaEffect.h"
 #include "light/effects/PulseEffect.h"
+#include "light/effects/HelioWledPresetsEffect.h"
+#include "light/effects/HelioFactoryTestEffect.h"
 #include "light/effects/MetaballsEffect.h"
 #include "light/effects/FireEffect.h"
 #include "light/effects/ParticlesEffect.h"
@@ -180,6 +197,9 @@
 #include "core/services/PictureService.h"
 #include "core/services/OscService.h"
 #include "core/system/I2cBusModule.h"
+#include "core/services/Bh1750Service.h"
+#include "core/services/BatteryService.h"
+#include "core/services/BleControlService.h"
 #include "core/system/TasksModule.h"
 #include "core/system/PinsModule.h"
 #include "core/services/AnalogService.h"
@@ -219,6 +239,7 @@ void mm::registerModuleTypes() {
 
     // Wire the core quiesce-render hook to the light domain's encode worker: @xref{why-the-quiesce-render-hook-is-a-function-pointer}.
     mm::MoonModule::setQuiesceRenderHook([] { if (auto* d = mm::Drivers::active()) d->quiesceRenderSplit(); });
+    mm::MoonModule::setTaskSnapshotHook([] { if (auto* d = mm::Drivers::active()) d->waitForTaskSnapshot(); });
     // Concrete modules, layouts first, alphabetical by display name: @xref{what-registertype-captures}.
     mm::ModuleFactory::registerType<mm::CarLightsLayout>("CarLightsLayout", "light/layouts.md#carlights");
     mm::ModuleFactory::registerType<mm::CubeLayout>("CubeLayout", "light/layouts.md#cube");
@@ -230,6 +251,7 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::GridLayout>("GridLayout", "light/layouts.md#grid");
     mm::ModuleFactory::registerType<mm::GridBlacksLayout>("GridBlacksLayout", "light/layouts.md#gridblacks");
     mm::ModuleFactory::registerType<mm::PanelLayout>("PanelLayout", "light/layouts.md#panel");
+    mm::ModuleFactory::registerType<mm::PixelMapLayout>("PixelMapLayout");
     mm::ModuleFactory::registerType<mm::RingLayout>("RingLayout", "light/layouts.md#ring");
     mm::ModuleFactory::registerType<mm::Rings241Layout>("Rings241Layout", "light/layouts.md#rings241");
     mm::ModuleFactory::registerType<mm::SingleColumnLayout>("SingleColumnLayout", "light/layouts.md#singlecolumn");
@@ -270,8 +292,44 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::PraxisEffect>("PraxisEffect", "light/effects.md#praxis");
     mm::ModuleFactory::registerType<mm::PulseEffect>("PulseEffect", "light/effects.md#pulse");
     mm::ModuleFactory::registerType<mm::RainbowEffect>("RainbowEffect", "light/effects.md#rainbow");
+    mm::ModuleFactory::registerType<mm::NebuliteRainbowEffect>("NebuliteRainbowEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteBlinkEffect>("NebuliteBlinkEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteSolidEffect>("NebuliteSolidEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteWashingEffect>("NebuliteWashingEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteSineEffect>("NebuliteSineEffect");
+    mm::ModuleFactory::registerType<mm::NebulitePaletteEffect>("NebulitePaletteEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteFireflyEffect>("NebuliteFireflyEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteSnowflakesEffect>("NebuliteSnowflakesEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteFlowStripeEffect>("NebuliteFlowStripeEffect");
+    mm::ModuleFactory::registerType<mm::NebulitePlasmoidEffect>("NebulitePlasmoidEffect");
+    mm::ModuleFactory::registerType<mm::NebuliteNoisefireEffect>("NebuliteNoisefireEffect");
     mm::ModuleFactory::registerType<mm::RandomEffect>("RandomEffect", "light/effects.md#random");
     mm::ModuleFactory::registerType<mm::RingsEffect>("RingsEffect", "light/effects.md#rings");
+    if (mm::isProductFirmware(mm::kFirmwareName)) {
+        constexpr const char* doc = "light/effects.md#heliowledpresets";
+        mm::ModuleFactory::registerType<mm::HelioFactoryTestEffect>(
+            "HelioFactoryTestEffect", "light/effects.md#heliofactorytest");
+        mm::ModuleFactory::registerType<mm::HelioWledPresetsEffect>("HelioWledPresetsEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioCandleMultiEffect>("HelioCandleMultiEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioColorTwinklesEffect>("HelioColorTwinklesEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioFreqMapAmberEffect>("HelioFreqMapAmberEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioLakeEffect>("HelioLakeEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioLoadingEffect>("HelioLoadingEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioPinkPaletteEffect>("HelioPinkPaletteEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioPhasedEffect>("HelioPhasedEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioRippleEffect>("HelioRippleEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioRunningEffect>("HelioRunningEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioStarburstEffect>("HelioStarburstEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioGravCenterEffect>("HelioGravCenterEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioJugglesEffect>("HelioJugglesEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioMultiCometEffect>("HelioMultiCometEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioNoiseMeterEffect>("HelioNoiseMeterEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioPlasmoidEffect>("HelioPlasmoidEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioFreqMapWideEffect>("HelioFreqMapWideEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioGEQEffect>("HelioGEQEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioGravFreqEffect>("HelioGravFreqEffect", doc);
+        mm::ModuleFactory::registerType<mm::HelioFreqWaveEffect>("HelioFreqWaveEffect", doc);
+    }
     mm::ModuleFactory::registerType<mm::RipplesEffect>("RipplesEffect", "light/effects.md#ripples");
     mm::ModuleFactory::registerType<mm::RubiksCubeEffect>("RubiksCubeEffect", "light/effects.md#rubikscube");
     mm::ModuleFactory::registerType<mm::SineEffect>("SineEffect", "light/effects.md#sine");
@@ -362,6 +420,10 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::AudioService>("AudioService", "core/services.md#audio");
     mm::ModuleFactory::registerType<mm::PictureService>("PictureService", "core/services.md#picture");
     mm::ModuleFactory::registerType<mm::OscService>("OscService", "core/services.md#osc");
+    mm::ModuleFactory::registerType<mm::Bh1750Service>("Bh1750Service", "core/services.md#bh1750");
+    mm::ModuleFactory::registerType<mm::BatteryService>("BatteryService", "core/services.md#battery");
+    mm::ModuleFactory::registerType<mm::BatteryChannel>("BatteryChannel", "core/services.md#battery-channel");
+    mm::ModuleFactory::registerType<mm::BleControlService>("BleControlService", "core/services.md#ble-control");
     mm::ModuleFactory::registerType<mm::I2cBusModule>("I2cBusModule", "core/system.md#i2c-bus");
     mm::ModuleFactory::registerType<mm::TasksModule>("TasksModule", "core/system.md#tasks");
     mm::ModuleFactory::registerType<mm::PinsModule>("PinsModule", "core/system.md#pins");

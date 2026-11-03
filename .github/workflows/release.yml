@@ -671,6 +671,7 @@ jobs:
               --firmware "$F" \
               --version "$V" \
               --release-url "$BASE" \
+              --artifacts-dir dist \
               "${ARGS[@]}" \
               --out "dist/manifest-$F.json"
           done

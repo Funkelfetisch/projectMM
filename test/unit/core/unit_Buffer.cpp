@@ -100,3 +100,15 @@ TEST_CASE("Buffer allocate with zero returns false") {
     CHECK(buf.count() == 0);
     CHECK(buf.channelsPerLight() == 0);
 }
+
+TEST_CASE("output memory: resizing to the existing byte size reuses the allocation") {
+    struct Restore { ~Restore() { mm::platform::setTestAllocRefusedFrom(0); } } restore;
+    mm::Buffer buffer;
+    REQUIRE(buffer.allocate(222, 4));
+    auto* original = buffer.data();
+    buffer.data()[0] = 91;
+    mm::platform::setTestAllocRefusedFrom(1);
+    REQUIRE(buffer.allocate(222, 4));
+    CHECK(buffer.data() == original);
+    CHECK(buffer.data()[0] == 0);
+}

@@ -266,17 +266,21 @@ TEST_CASE("the access point is open on a first setup and carries the first known
 }
 
 // A client on the access point has not shown it knows the network's password, so a stored password reaches it empty.
-TEST_CASE("a password is written empty while secrets are hidden, and as before once the scope ends") {
+TEST_CASE("a password reports only its configured flag on the LAN and access point") {
     mm::JsonSink shown;
-    mm::writeObfuscatedPassword(shown, "homepassword");
+    mm::writePasswordConfigured(shown, "homepassword");
+    CHECK(std::string(shown.data()) == "true");
+    mm::JsonSink empty;
+    mm::writePasswordConfigured(empty, "");
+    CHECK(std::string(empty.data()) == "false");
     {
         const mm::SecretsHidden hide(true);
         mm::JsonSink hidden;
-        mm::writeObfuscatedPassword(hidden, "homepassword");
-        CHECK(std::string(hidden.data()) == "\"\"");
+        mm::writePasswordConfigured(hidden, "homepassword");
+        CHECK(std::string(hidden.data()) == "true");
         const mm::SecretsHidden home(false);   // a home-network request inside it still sees its own
         mm::JsonSink nested;
-        mm::writeObfuscatedPassword(nested, "homepassword");
+        mm::writePasswordConfigured(nested, "homepassword");
         CHECK(std::string(nested.data()) == std::string(shown.data()));
     }
     CHECK_FALSE(mm::SecretsHidden::active());

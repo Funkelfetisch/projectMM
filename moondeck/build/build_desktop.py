@@ -93,6 +93,8 @@ def main():
                     help="compile the test binaries (mm_tests + mm_scenarios) instead of the firmware. "
                          "The default build makes only MoonLight; the ~130 test units are a separate, "
                          "slower compile, run afterwards by test_desktop.py / run_scenario.py.")
+    ap.add_argument("--product", choices=("helio1", "nebulite-s3", "nebulite-esp32"),
+                    help="exercise product boot defaults on the desktop, without physical I/O")
     ap.add_argument("--configure", action="store_true",
                     help="configure the tree and generate build_id.h, without compiling: what check_code and "
                          "check_docgen read, as CI's findings job runs them")
@@ -117,6 +119,9 @@ def main():
         bdir = "build/nojit"
         extra += ["-DMM_MOONLIVE_NO_HOST_JIT=ON"]
         print("Forcing MM_MOONLIVE_HAS_HOST_JIT=0 — the x86-64 desktop's view.")
+    if args.product:
+        bdir += "-" + args.product
+        extra += [f'-DMM_FIRMWARE_NAME="{args.product}"']
     what = "test binaries" if args.tests else "desktop target"
     print(f"Configuring {bdir}/ and generating build_id.h ..." if args.configure else f"Building {what} into {bdir}/ ...")
     # CMAKE_BUILD_TYPE is honoured by single-config generators (Ninja, Make).

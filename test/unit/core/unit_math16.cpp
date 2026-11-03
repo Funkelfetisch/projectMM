@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <numbers>
+#include <utility>
 
 using namespace mm;
 
@@ -198,6 +200,48 @@ TEST_CASE("dist16 is a true radius, where dist8 approximates an octagon") {
 TEST_CASE("dist16 does not saturate past the 8-bit ceiling") {
     CHECK(dist16(5000, 0) == 5000);                          // dist8 would clamp to 255
     CHECK(dist16(0, 12000) == 12000);
+}
+
+TEST_CASE("dist16 keeps exact floor and sign symmetry across the 32-bit squared-distance boundary") {
+    CHECK(dist16(65535, 0) == 65535);
+    CHECK(dist16(65536, 0) == 65536);
+    // These norms straddle UINT32_MAX by 26 below and 699 above.
+    CHECK(dist16(65535, 362) == 65535);
+    CHECK(dist16(65535, 363) == 65536);
+    CHECK(dist16(-65535, 362) == 65535);
+    CHECK(dist16(65535, -363) == 65536);
+    CHECK(dist16(-363, -65535) == 65536);
+    for (int32_t scale : {1, 10000, 13107, 13108}) {
+        const int32_t x = 3 * scale, y = 4 * scale;
+        const uint32_t radius = static_cast<uint32_t>(5 * scale);
+        CHECK(dist16(x, y) == radius);
+        CHECK(dist16(-x, -y) == radius);
+        CHECK(dist16(x, y - 1) == radius - 1);
+        CHECK(dist16(x, y + 1) == radius);
+    }
+    CHECK(dist16(INT32_MIN, INT32_MIN) == 3037000499u);
+    CHECK(dist16(INT32_MAX, INT32_MAX) == 3037000498u);
+    const auto exactFloor = [](int32_t x, int32_t y) {
+        const int64_t xx = x, yy = y;
+        const uint64_t norm = static_cast<uint64_t>(xx * xx) + static_cast<uint64_t>(yy * yy);
+        const uint64_t radius = dist16(x, y);
+        CHECK(radius * radius <= norm);
+        CHECK((radius + 1) * (radius + 1) > norm);
+    };
+    for (int32_t x = -255; x <= 255; x += 17)
+        for (int32_t y = -255; y <= 255; y += 17) exactFloor(x, y);
+    for (const auto& point : {std::pair{65535, 362}, std::pair{65535, 363},
+                              std::pair{INT32_MIN, INT32_MAX}, std::pair{INT32_MIN, INT32_MIN}})
+        exactFloor(point.first, point.second);
+}
+
+TEST_CASE("isqrt preserves floor immediately beside representative perfect squares in its 32-bit range") {
+    for (uint32_t root : {1u, 2u, 3u, 255u, 256u, 1023u, 32768u, 46340u, 65535u}) {
+        const uint32_t square = static_cast<uint32_t>(static_cast<uint64_t>(root) * root);
+        CHECK(isqrt(square - 1) == root - 1);
+        CHECK(isqrt(square) == root);
+        CHECK(isqrt(square + 1) == root);
+    }
 }
 
 // --- Easing, followers, position-addressable randomness --------------------------------------

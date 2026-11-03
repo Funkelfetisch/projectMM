@@ -173,6 +173,29 @@ TEST_CASE("Correction whiteMode None: white channel forced to 0, RGB intact") {
     CHECK(out[3] == 0);
 }
 
+TEST_CASE("Correction keeps an explicit GRBW white channel in every white mode") {
+    Correction c;
+    c.curve = Correction::Curve::Linear;
+    mm::test::rebuildFromPreset(c, 255, mm::test::PresetOrder::GRBW);
+    const uint8_t src[4] = {100, 80, 60, 42};
+    uint8_t out[4] = {};
+    for (WhiteMode mode : {WhiteMode::None, WhiteMode::Min, WhiteMode::Accurate}) {
+        c.whiteMode = mode;
+        c.apply(src, out, 4);
+        CHECK(out[0] == 80);
+        CHECK(out[1] == 100);
+        CHECK(out[2] == 60);
+        CHECK(out[3] == 42);
+    }
+    c.whiteMode = WhiteMode::Accurate;
+    const uint8_t rgbOnly[4] = {100, 80, 60, 0};
+    c.apply(rgbOnly, out, 4);
+    CHECK(out[0] == 20);
+    CHECK(out[1] == 40);
+    CHECK(out[2] == 0);
+    CHECK(out[3] == 60);
+}
+
 // whiteMode = Accurate pulls the common white component OUT of RGB (so the white LED carries it) rather than adding it on top, R,G,B each drop by min(R,G,B).
 TEST_CASE("Correction whiteMode Accurate: white subtracted from RGB") {
     Correction c;
@@ -601,6 +624,87 @@ TEST_CASE("A 16-bit RGBW strip derives its white and writes it to 16 bits") {
     c.apply(src, out, 3);
     CHECK(out[6] * 256 + out[7] == 50 * 257);    // white = min(r, g, b)
     CHECK(out[0] * 256 + out[1] == 150 * 257);   // red with the white pulled out
+}
+
+TEST_CASE("Correction explicit cold white and derived warm white agree across byte wide and fine outputs") {
+    const R coarseRoles[] = {R::Red, R::Green, R::Blue, R::White, R::WarmWhite};
+    const R fineRoles[] = {R::Red, R::RedFine, R::Green, R::GreenFine, R::Blue, R::BlueFine,
+                           R::White, R::WhiteFine, R::WarmWhite, R::WarmWhiteFine};
+    const uint8_t samples[][4] = {{200, 100, 60, 42}, {40, 60, 80, 180}, {0, 0, 0, 77}, {0, 0, 0, 0}};
+    const uint8_t warmBases[] = {60, 40, 0, 0};
+    for (const auto mode : {WhiteMode::None, WhiteMode::Min, WhiteMode::Accurate}) {
+        CAPTURE(static_cast<int>(mode));
+        Correction narrow, wide, fine;
+        std::vector<uint16_t> wideTable(256), fineTable(256);
+        narrow.curve = wide.curve = fine.curve = Correction::Curve::Linear;
+        narrow.whiteMode = wide.whiteMode = fine.whiteMode = mode;
+        wide.wide = true;
+        wide.lut16 = wideTable.data();
+        fine.lut16 = fineTable.data();
+        narrow.rebuild(255, coarseRoles, 5);
+        wide.rebuild(255, coarseRoles, 5);
+        fine.rebuild(255, fineRoles, 10);
+        for (size_t sample = 0; sample < 4; ++sample) {
+            CAPTURE(sample);
+            uint8_t byteOut[5] = {255, 255, 255, 255, 255};
+            uint16_t wideOut[5] = {65535, 65535, 65535, 65535, 65535};
+            uint8_t fineOut[10] = {255, 255, 255, 255, 255, 255, 255, 255, 255, 255};
+            narrow.apply(samples[sample], byteOut, 4);
+            wide.applyWide(samples[sample], wideOut, 4);
+            fine.apply(samples[sample], fineOut, 4);
+            const uint8_t expected[5] = {samples[sample][0], samples[sample][1], samples[sample][2],
+                samples[sample][3], static_cast<uint8_t>(mode == WhiteMode::None ? 0 : warmBases[sample])};
+            for (size_t channel = 0; channel < 5; ++channel) {
+                CHECK(byteOut[channel] == expected[channel]);
+                CHECK(wideOut[channel] == expected[channel] * 257);
+                CHECK(fineOut[channel * 2] * 256 + fineOut[channel * 2 + 1] == wideOut[channel]);
+            }
+        }
+    }
+}
+
+TEST_CASE("Correction fine whites apply brightness and curve once to their separate bases") {
+    const R fineRoles[] = {R::White, R::WhiteFine, R::WarmWhite, R::WarmWhiteFine};
+    const R referenceRoles[] = {R::Red, R::Green, R::Blue};
+    const uint8_t source[] = {200, 100, 60, 42};
+    const uint8_t referenceSource[] = {42, 60, 0};
+    Correction reference;
+    std::vector<uint16_t> referenceTable(256);
+    reference.curve = Correction::Curve::Gamma22;
+    reference.wide = true;
+    reference.lut16 = referenceTable.data();
+    reference.rebuild(128, referenceRoles, 3);
+    uint16_t expected[3] = {};
+    reference.applyWide(referenceSource, expected, 3);
+    for (const auto mode : {WhiteMode::None, WhiteMode::Min, WhiteMode::Accurate}) {
+        Correction fine;
+        std::vector<uint16_t> table(256);
+        fine.curve = Correction::Curve::Gamma22;
+        fine.whiteMode = mode;
+        fine.lut16 = table.data();
+        fine.rebuild(128, fineRoles, 4);
+        uint8_t out[4] = {255, 255, 255, 255};
+        fine.apply(source, out, 4);
+        CHECK(out[0] * 256 + out[1] == expected[0]);
+        CHECK(out[2] * 256 + out[3] == (mode == WhiteMode::None ? 0 : expected[1]));
+    }
+}
+
+TEST_CASE("Correction missing fine table preserves explicit cold white while None keeps warm white dark") {
+    const R roles[] = {R::White, R::WhiteFine, R::WarmWhite, R::WarmWhiteFine};
+    const uint8_t source[] = {200, 100, 60, 42};
+    for (const auto mode : {WhiteMode::None, WhiteMode::Min, WhiteMode::Accurate}) {
+        Correction correction;
+        correction.curve = Correction::Curve::Linear;
+        correction.whiteMode = mode;
+        correction.rebuild(255, roles, 4);
+        uint8_t out[4] = {255, 255, 255, 255};
+        correction.apply(source, out, 4);
+        CHECK(out[0] == 42);
+        CHECK(out[1] == 0);
+        CHECK(out[2] == (mode == WhiteMode::None ? 0 : 60));
+        CHECK(out[3] == 0);
+    }
 }
 
 // An 8-bit profile never enters the 16-bit path, and a 16-bit one whose table is missing degrades to 8 bits rather than writing stale bytes.

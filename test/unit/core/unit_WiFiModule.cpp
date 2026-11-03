@@ -355,8 +355,8 @@ TEST_CASE("a scan the radio refuses for a scan's whole time ends with a reason")
     CHECK(std::string(w.status()) == "the radio cannot scan now: press scan to try again");   // the ended request does not start on its own
 }
 
-// The list shows a known network's password as the API shows a Password control's: obfuscated, never as typed, while the saved file keeps it as it is.
-TEST_CASE("a known network's password reaches the page obfuscated") {
+// The list exposes only a configured flag, while the saved file retains the credential.
+TEST_CASE("a known network's password reaches the page only as a configured flag") {
     mm::WiFiModule w;
     w.rebuildControls();
     uint32_t a = 0;
@@ -367,6 +367,6 @@ TEST_CASE("a known network's password reaches the page obfuscated") {
     w.writeListRowDetail(detail, 0);
     const std::string shown(detail.data(), detail.size());
     CHECK(shown.find("pw1") == std::string::npos);
-    CHECK(shown.find("\"type\":\"password\",\"value\":\"Ki1r\"") != std::string::npos);   // "pw1" XOR 0x5A, base64
+    CHECK(shown.find("\"type\":\"password\",\"value\":true") != std::string::npos);   // no recoverable credential
     CHECK(saved(w).find("pw1") != std::string::npos);
 }

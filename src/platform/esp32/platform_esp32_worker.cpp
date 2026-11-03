@@ -155,7 +155,7 @@ void stopPinnedTask(WorkerTask& t) {
             t.impl = nullptr;
             return;
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(1);
     }
     // NORMAL path frees through the SAME exchange as the timeout path, not a bare delete. The trampoline touches `w->detached` AFTER storing `finished` (see workerTrampoline), so once we observe finished the trampoline may still be mid-exchange on `w`; a bare delete here would free it under that access. The exchange makes exactly one side win the free, whichever runs the store last.
     if (w->detached.exchange(true, std::memory_order_acq_rel)) delete w;

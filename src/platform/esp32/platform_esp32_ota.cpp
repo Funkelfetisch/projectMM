@@ -89,6 +89,9 @@
 #include "platform/platform.h"
 
 #include "core/util/FirmwareImage.h"  // identify, the image names and the stall limit: vetting what arrives
+#include "core/util/FirmwareUpdateGate.h"
+#include <utility>
+#include "core/util/build_info.h"
 
 #include "esp_https_ota.h"
 #include "esp_ota_ops.h"
@@ -126,6 +129,10 @@ const esp_partition_t* moonBasePartition() {
 
 namespace {
 
+FirmwareUpdateGate updateGate;
+// A selected app slot stays reserved until reboot, even after its writer is freed.
+FirmwareUpdateLease committedAppLease{updateGate};
+
 // Heap-allocated task parameters. Task owns this and frees it on exit.
 struct OtaTaskParams {
     char url[512];
@@ -134,6 +141,7 @@ struct OtaTaskParams {
     size_t statusBufLen;
     uint32_t* bytesReadOut;   // current bytes downloaded
     uint32_t* bytesTotalOut;  // image size; 0 until esp_https_ota reports it
+    FirmwareUpdateLease lease{updateGate};
 };
 
 // One bounded status writer for the file: @xref{one-bounded-status-writer|why a plain variadic beats a template}.
@@ -154,6 +162,16 @@ void otaSetStatus(OtaTaskParams* p, const char* fmt, ...) {
     va_start(args, fmt);
     std::vsnprintf(p->statusBuf, p->statusBufLen, fmt, args);
     va_end(args);
+}
+
+void abortHttpsOta(OtaTaskParams* p, esp_https_ota_handle_t handle) {
+    const esp_err_t err = esp_https_ota_abort(handle);
+    if (err != ESP_OK) {
+        // The HTTPS helper reports its underlying app-abort result. Keep the
+        // shared reservation if cleanup failed, just as the upload path does.
+        otaSetStatus(p, "error: ota abort %s; restart required", esp_err_to_name(err));
+        if (p->lease.held()) committedAppLease = std::move(p->lease);
+    }
 }
 
 void otaTask(void* arg) {
@@ -202,7 +220,7 @@ void otaTask(void* arg) {
     const bool haveDesc = esp_https_ota_get_img_desc(handle, &incoming) == ESP_OK;
     if (haveDesc && firmware::isMoonBaseImage(incoming.project_name, sizeof(incoming.project_name))) {
         otaSetStatus(p, "error: that is a MoonBase image, not an app");
-        esp_https_ota_abort(handle);
+        abortHttpsOta(p, handle);
         delete p;
         vTaskDelete(nullptr);
         return;
@@ -211,7 +229,7 @@ void otaTask(void* arg) {
     if (haveDesc && !firmware::isAppImage(incoming.project_name, sizeof(incoming.project_name))) {
         otaSetStatus(p, "error: that image is %.*s, not this project",
                      static_cast<int>(sizeof(incoming.project_name)), incoming.project_name);
-        esp_https_ota_abort(handle);
+        abortHttpsOta(p, handle);
         delete p;
         vTaskDelete(nullptr);
         return;
@@ -235,7 +253,7 @@ void otaTask(void* arg) {
             movedAt = xTaskGetTickCount();
         } else if (pdTICKS_TO_MS(xTaskGetTickCount() - movedAt) > firmware::kDownloadStallMs) {
             otaSetStatus(p, "error: the download stalled");
-            esp_https_ota_abort(handle);
+            abortHttpsOta(p, handle);
             delete p;
             vTaskDelete(nullptr);
             return;
@@ -248,7 +266,7 @@ void otaTask(void* arg) {
     }
     if (err != ESP_OK) {
         otaSetStatus(p, "error: ota perform %s", esp_err_to_name(err));
-        esp_https_ota_abort(handle);
+        abortHttpsOta(p, handle);
         delete p;
         vTaskDelete(nullptr);
         return;
@@ -256,10 +274,35 @@ void otaTask(void* arg) {
 
     if (!esp_https_ota_is_complete_data_received(handle)) {
         otaSetStatus(p, "error: incomplete download");
-        esp_https_ota_abort(handle);
+        abortHttpsOta(p, handle);
         delete p;
         vTaskDelete(nullptr);
         return;
+    }
+
+    // ESP-IDF's HTTPS helper exposes only the standard app descriptor. Read
+    // our optional extension from the inactive slot before finish() can
+    // select it for boot. Untagged historical images remain compatible.
+    if (isProductFirmware(kFirmwareName)) {
+        const auto* running = esp_ota_get_running_partition();
+        const auto* target = esp_ota_get_next_update_partition(nullptr);
+        const int written = esp_https_ota_get_image_len_read(handle);
+        uint8_t head[firmware::kVariantOffset + firmware::kVariantBytes] = {};
+        const size_t available = written > static_cast<int>(firmware::kVariantOffset)
+            ? std::min(static_cast<size_t>(written) - firmware::kVariantOffset, firmware::kVariantBytes) : 0;
+        const bool readable = running && target && target != running && written >= 0 &&
+            (!available || esp_partition_read(target, firmware::kVariantOffset,
+                                               head + firmware::kVariantOffset, available) == ESP_OK);
+        const char* error = readable
+            ? firmware::variantRejection(firmware::identifyVariant(head, firmware::kVariantOffset + available), kFirmwareName)
+            : "firmware variant read failed";
+        if (error) {
+            otaSetStatus(p, "error: %s", error);
+            abortHttpsOta(p, handle);
+            delete p;
+            vTaskDelete(nullptr);
+            return;
+        }
     }
 
     err = esp_https_ota_finish(handle);
@@ -274,13 +317,16 @@ void otaTask(void* arg) {
     // Final byte count match, pull from the OTA handle one last time so the UI's last frame before reboot shows a clean "Y KB / Y KB".
     if (*p->bytesTotalOut > 0) *p->bytesReadOut = *p->bytesTotalOut;
     otaSetStatus(p, "rebooting");
-    delete p;
     // 600 ms delay gives the HTTP response time to make it back to the browser before the device drops the socket on restart.
     vTaskDelay(pdMS_TO_TICKS(600));
     esp_restart();
+    delete p; // Defensive cleanup if a platform restart ever returns.
+    vTaskDelete(nullptr);
 }
 
 }  // anonymous namespace
+
+bool otaBusy() { return updateGate.busy(); }
 
 bool http_fetch_to_ota(const char* url,
                        char* statusBuf, size_t statusBufLen,
@@ -303,6 +349,11 @@ bool http_fetch_to_ota(const char* url,
     auto* p = new (std::nothrow) OtaTaskParams{};
     if (!p) {
         std::snprintf(statusBuf, statusBufLen, "error: out of memory");
+        return false;
+    }
+    if (!p->lease.acquire()) {
+        std::snprintf(statusBuf, statusBufLen, "error: ota already in progress");
+        delete p;
         return false;
     }
     std::memcpy(p->url, url, urlLen + 1);   // includes NUL; size already verified
@@ -362,13 +413,31 @@ struct Image {
     char* status = nullptr;
     size_t statusLen = 0;
     uint32_t* bytesOut = nullptr;
+    FirmwareUpdateLease lease{updateGate};
 };
 
 // A macro, not a lambda: the format reaches statusf as a literal. Through a lambda it arrives as a runtime pointer, which defeats the format check.
 #define imageStatus(img, ...) statusf((img)->status, (img)->statusLen, __VA_ARGS__)
 
+void retainAppLease(Image& image) {
+    if (image.lease.held()) committedAppLease = std::move(image.lease);
+}
+
+bool abortImage(Image& image) {
+    if (image.target != OtaTarget::App || !image.handle) return false;
+    const esp_err_t err = esp_ota_abort(image.handle);
+    image.handle = 0;
+    if (err != ESP_OK) {
+        imageStatus(&image, "error: ota abort %s", esp_err_to_name(err));
+        // The handle state is uncertain. Block every update path until reboot.
+        retainAppLease(image);
+        return false;
+    }
+    return true;
+}
+
 void freeImage(OtaWrite& w, Image* img) {
-    if (img->target == OtaTarget::App && img->handle) esp_ota_abort(img->handle);
+    if (img->target == OtaTarget::App && img->handle) abortImage(*img);
     heap_caps_free(img->buf);
     delete img;
     w.impl = nullptr;
@@ -386,8 +455,15 @@ bool flushImage(Image* img) {
             // A full chunk is far past the descriptor, so only an image ending sooner is too short to identify.
             if (n < firmware::kIdentifyBytes) { imageStatus(img, "error: too short to be a firmware image"); return false; }
             const auto info = firmware::identify(img->buf, n);
+            if (!firmware::appImageChipMatches(info, static_cast<firmware::ChipId>(CONFIG_IDF_FIRMWARE_CHIP_ID))) {
+                imageStatus(img, "error: invalid image or image is for another chip"); return false;
+            }
             if (info.described && firmware::isMoonBaseImage(info.project)) { imageStatus(img, "error: that is a MoonBase image, not an app"); return false; }
             if (!info.described || !firmware::isAppImage(info.project)) { imageStatus(img, "error: that image is not this project"); return false; }
+            const auto variant = firmware::identifyVariant(img->buf, n);
+            if (const char* error = firmware::variantRejection(variant, isProductFirmware(kFirmwareName) ? kFirmwareName : nullptr)) {
+                imageStatus(img, "error: %s", error); return false;
+            }
         }
     }
     if (img->target == OtaTarget::MoonBase) {
@@ -413,8 +489,12 @@ bool flushImage(Image* img) {
 }
 }  // namespace
 
-bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut) {
+static bool otaBeginOwned(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen,
+                          uint32_t* bytesOut, FirmwareUpdateLease* inherited) {
     if (!statusBuf || statusBufLen == 0 || !bytesOut) return false;
+    if (w.impl || (inherited && !inherited->held())) {
+        statusf(statusBuf, statusBufLen, "error: invalid ota ownership"); return false;
+    }
     const bool app = target == OtaTarget::App;
     const esp_partition_t* part = app ? esp_ota_get_next_update_partition(nullptr) : moonBasePartition();
     if (!part) {
@@ -438,6 +518,10 @@ bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf,
         delete img;
         return false;
     }
+    if (!inherited && !img->lease.acquire()) {
+        statusf(statusBuf, statusBufLen, "error: ota already in progress");
+        heap_caps_free(img->buf); delete img; return false;
+    }
     w.impl = img;
     if (app) {
         // Each sector is erased as the write reaches it: OTA_SIZE_UNKNOWN would erase the whole slot in one call.
@@ -454,9 +538,25 @@ bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf,
     return true;
 }
 
+size_t otaNextAppCapacity() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+    return running && next && next != running ? next->size : 0;
+}
+
+bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut) {
+    return otaBeginOwned(w, target, contentLen, statusBuf, statusBufLen, bytesOut, nullptr);
+}
+
 bool otaWrite(OtaWrite& w, const uint8_t* data, size_t len) {
     auto* img = static_cast<Image*>(w.impl);
     if (!img) return false;
+    if (!firmware::uploadFits(img->written, img->held, len, img->part->size, img->contentLen)) {
+        imageStatus(img, "error: upload exceeds declared length or slot%s",
+                    img->target == OtaTarget::MoonBase && img->erased ? ", MoonBase is incomplete" : "");
+        freeImage(w, img);
+        return false;
+    }
     while (len) {
         const size_t n = std::min(len, kOtaChunkBytes - img->held);
         std::memcpy(img->buf + img->held, data, n);
@@ -474,12 +574,13 @@ bool otaEnd(OtaWrite& w, bool commit) {
     // Past the first MoonBase erase the device has no recovery image until the write completes: @xref{updating-the-recovery-image-itself|why one pass}.
     const char* incomplete = img->target == OtaTarget::MoonBase && img->erased ? ", MoonBase is incomplete" : "";
     if (!commit) { imageStatus(img, "error: transfer aborted%s", incomplete); freeImage(w, img); return false; }
-    if (!flushImage(img)) { freeImage(w, img); return false; }
-    if (img->contentLen && img->written < img->contentLen) {
-        imageStatus(img, "error: incomplete upload (%u/%u)%s", static_cast<unsigned>(img->written), static_cast<unsigned>(img->contentLen), incomplete);
+    if (!firmware::uploadComplete(img->written, img->held, img->contentLen)) {
+        imageStatus(img, "error: incomplete upload (%u/%u)%s", static_cast<unsigned>(img->written + img->held),
+                    static_cast<unsigned>(img->contentLen), incomplete);
         freeImage(w, img);
         return false;
     }
+    if (!flushImage(img)) { freeImage(w, img); return false; }
     bool ok = true;
     if (img->target == OtaTarget::App) {
         esp_err_t err = esp_ota_end(img->handle);   // validates the image and consumes the handle
@@ -496,6 +597,16 @@ bool otaEnd(OtaWrite& w, bool commit) {
         // No reboot and no boot-partition change: the app keeps running, and the new MoonBase is what the device falls back to from now on.
         else imageStatus(img, "idle");
     }
+    if (ok && img->target == OtaTarget::App) retainAppLease(*img);
+    freeImage(w, img);
+    return ok;
+}
+
+bool otaAbortApp(OtaWrite& w) {
+    auto* img = static_cast<Image*>(w.impl);
+    if (!img || img->target != OtaTarget::App) return false;
+    const bool ok = abortImage(*img);
+    if (ok) imageStatus(img, "error: transfer aborted");
     freeImage(w, img);
     return ok;
 }
@@ -503,7 +614,7 @@ bool otaEnd(OtaWrite& w, bool commit) {
 #undef imageStatus
 
 bool moonBaseFetchUrlSync(const char* url, char* statusBuf, size_t statusBufLen,
-                          uint32_t* bytesReadOut, uint32_t* bytesTotalOut) {
+                          uint32_t* bytesReadOut, uint32_t* bytesTotalOut, FirmwareUpdateLease& lease) {
     // A macro, not a lambda: the format reaches statusf as a literal. Through a lambda it arrives as a runtime pointer, which defeats the format check.
     #define setStatus(...) statusf(statusBuf, statusBufLen, __VA_ARGS__)
     esp_http_client_config_t cfg = {};
@@ -545,7 +656,7 @@ bool moonBaseFetchUrlSync(const char* url, char* statusBuf, size_t statusBufLen,
 
     // The download pushes into the writer the upload uses: @xref{a-url-pull-reuses-the-upload-writer|one writer, two sources}.
     OtaWrite w;
-    bool ok = otaBegin(w, OtaTarget::MoonBase, len > 0 ? static_cast<size_t>(len) : 0, statusBuf, statusBufLen, bytesReadOut);
+    bool ok = otaBeginOwned(w, OtaTarget::MoonBase, len > 0 ? static_cast<size_t>(len) : 0, statusBuf, statusBufLen, bytesReadOut, &lease);
     bool interrupted = false;
     char chunk[1024];
     while (ok) {
@@ -564,7 +675,7 @@ bool moonBaseFetchUrlSync(const char* url, char* statusBuf, size_t statusBufLen,
 // Its own task, so the HTTP request answers 202 at once: @xref{why-the-install-runs-on-its-own-task|what a synchronous install costs}.
 void moonBaseUrlTask(void* arg) {
     auto* p = static_cast<OtaTaskParams*>(arg);
-    moonBaseFetchUrlSync(p->url, p->statusBuf, p->statusBufLen, p->bytesReadOut, p->bytesTotalOut);
+    moonBaseFetchUrlSync(p->url, p->statusBuf, p->statusBufLen, p->bytesReadOut, p->bytesTotalOut, p->lease);
     // No reboot on either outcome: the app is running from the other partition and is untouched. On failure the status already says what went wrong, and it stays there for the UI to read.
     delete p;
     vTaskDelete(nullptr);
@@ -581,6 +692,11 @@ bool otaFetchMoonBaseUrl(const char* url, char* statusBuf, size_t statusBufLen,
     }
     if (urlLen >= sizeof(p->url)) {
         std::snprintf(statusBuf, statusBufLen, "error: url too long");
+        delete p;
+        return false;
+    }
+    if (!p->lease.acquire()) {
+        std::snprintf(statusBuf, statusBufLen, "error: ota already in progress");
         delete p;
         return false;
     }

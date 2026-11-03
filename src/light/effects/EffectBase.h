@@ -4,6 +4,7 @@
 #include "light/util/light_types.h" // lengthType, nrOfLightsType, Dim
 
 #include <cstdint>
+#include <cstddef>
 
 namespace mm::draw { struct Canvas; }   // draw.h comes in at the bottom, so the accessor's return type is declared here
 
@@ -38,10 +39,17 @@ public:
     /// Which axes the effect iterates, read at frame time: a hardcoded bound is a buffer overrun.
     virtual Dim dimensions() const { return Dim::D3; }
 
+    /// Cold-path working set and largest contiguous block, separate from the layer's pixel buffer.
+    struct WorkingMemory { size_t bytes = 0; size_t largestBlock = 0; };
+    /// Scratch required at a proposed raster size, so adaptive allocation preserves the shared heap reserve.
+    virtual WorkingMemory workingMemory(Coord3D /*size*/, uint8_t /*channels*/) const { return {}; }
+
     /// Whether the frame arrives in the order the lights are wired, so a layer showing it alone hands it to the output unmapped.
     virtual bool deliversWiringOrder() const MM_NONBLOCKING { return false; }
     /// Copy that wiring-order frame into the output, all of it when `force` says the output holds something else.
     virtual void copyWiringFrame(uint8_t* /*out*/, size_t /*bytes*/, bool /*force*/) {}
+    /// A strip-native effect indexes the real lights directly rather than the layout's bounding box.
+    virtual bool usesPhysicalLightOrder() const { return false; }
 
     /// The parent, always a Layer, defined in Layer.h once Layer is complete.
     Layer* layer() const;

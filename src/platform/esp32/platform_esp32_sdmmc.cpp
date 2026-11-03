@@ -518,7 +518,7 @@ bool sdCardWriteAtomic(const char* apiPath, const char* data, size_t len) {
     return sdCommitTmp(tmp, full);
 }
 
-void sdCardList(const char* apiDir, FsListCb cb, void* user) {
+void sdCardList(const char* apiDir, FsListCb cb, void* user, FsListMode mode) {
     if (!g_mounted || !cb) return;
     char full[128];
     if (!sdTranslate(apiDir, full, sizeof(full))) return;
@@ -527,7 +527,7 @@ void sdCardList(const char* apiDir, FsListCb cb, void* user) {
     FILINFO fno;
     while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0]) {
         const bool isDir = (fno.fattrib & AM_DIR) != 0;
-        const uint32_t size = isDir ? 0 : static_cast<uint32_t>(fno.fsize);
+        const uint32_t size = (isDir || mode == FsListMode::NamesOnly) ? 0 : static_cast<uint32_t>(fno.fsize);
         cb(fno.fname, isDir, size, user);
     }
     f_closedir(&dir);
@@ -618,7 +618,7 @@ bool sdCardRemove(const char*) { return false; }
 int  sdCardRead(const char*, char*, size_t) { return -1; }
 int64_t sdCardSize(const char*) { return -1; }
 bool sdCardWriteAtomic(const char*, const char*, size_t) { return false; }
-void sdCardList(const char*, FsListCb, void*) {}
+void sdCardList(const char*, FsListCb, void*, FsListMode) {}
 bool sdCardReadStreamOpen(void*&, const char*) { return false; }
 int  sdCardReadStreamRead(void*, char*, size_t) { return -1; }
 void sdCardReadStreamClose(void*) {}

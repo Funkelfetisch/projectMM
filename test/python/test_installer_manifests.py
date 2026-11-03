@@ -23,6 +23,7 @@ A Teensy firmware's manifest needs no build input: it is the flat image at offse
 import fnmatch
 import json
 import subprocess
+import struct
 import sys
 from pathlib import Path
 
@@ -79,6 +80,21 @@ def _generate(firmware, tmp_path):
         flasher = tmp_path / f"flasher-{firmware}.json"
         flasher.write_text(json.dumps(FLASHER_ARGS))
         args = ["--flasher-args", str(flasher)]
+        sys.path.insert(0, str(ROOT / 'moondeck' / 'build'))
+        import build_esp32 as build
+        spec = build.FIRMWARES[firmware]
+        if spec.get('moonbase'):
+            layout = build._moonbase_partition_layout(build.moonbase_table_csv(firmware))
+            numbers = {('app','factory'):(0,0), ('app','ota_0'):(0,16), ('data','ota'):(1,0)}
+            rows = [struct.pack('<HBBII16sI', 0x50aa, *numbers[key], offset, size, b'', 0)
+                    for key, (offset, size) in layout.items()]
+            prefix = f'firmware-{firmware}-v{VERSION}'
+            (tmp_path / f'{prefix}-partition-table.bin').write_bytes(b''.join(rows) + b'\xff' * 32)
+            (tmp_path / f'{prefix}-bootloader.bin').write_bytes(b'bootloader')
+            (tmp_path / f'{prefix}.bin').write_bytes(b'application')
+            (tmp_path / f"shared-moonbase-{spec['chip']}.bin").write_bytes(b'recovery')
+            (tmp_path / 'shared-ota-data-slot0.bin').write_bytes(build.otadata_slot0_bytes())
+            args.extend(['--artifacts-dir', str(tmp_path)])
     out = tmp_path / f"manifest-{firmware}.json"
     res = subprocess.run(
         [sys.executable, str(GENERATE),
@@ -103,6 +119,34 @@ def test_every_shipping_firmware_has_a_manifest_with_parts(tmp_path):
         build = manifest["builds"][0]
         assert build.get("chipFamily"), f"{fw}: build missing chipFamily"
         assert build.get("parts"), f"{fw}: build has no parts[] (nothing to flash)"
+
+
+def test_moonbase_manifest_rejects_changed_staged_artifacts(tmp_path):
+    """A correct source CSV alone cannot validate a release's actual flash images."""
+    fw = 'esp32'
+    prefix = f'firmware-{fw}-v{VERSION}'
+    def run():
+        out = tmp_path / 'unsafe-manifest.json'
+        out.unlink(missing_ok=True)
+        result = subprocess.run([sys.executable, str(GENERATE), '--firmware', fw,
+            '--version', VERSION, '--release-url', '.', '--flasher-args', str(tmp_path / f'flasher-{fw}.json'),
+            '--artifacts-dir', str(tmp_path), '--out', str(out)], capture_output=True, text=True)
+        assert result.returncode != 0, result.stdout
+        assert not out.exists()
+        return result.stdout
+    _generate(fw, tmp_path)
+    path = tmp_path / f'{prefix}-partition-table.bin'
+    data = bytearray(path.read_bytes()); struct.pack_into('<I', data, 64 + 4, 0x100000); path.write_bytes(data)
+    assert 'differs' in run()
+    _generate(fw, tmp_path)
+    (tmp_path / f'{prefix}.bin').write_bytes(b'x' * (0x270000 + 1))
+    assert 'does not fit' in run()
+    _generate(fw, tmp_path)
+    (tmp_path / 'shared-ota-data-slot0.bin').write_bytes(b'bad')
+    assert 'otadata is invalid' in run()
+    _generate(fw, tmp_path)
+    (tmp_path / 'shared-moonbase-esp32.bin').unlink()
+    assert 'missing MoonBase' in run()
 
 
 def test_manifest_parts_match_staged_file_globs(tmp_path):

@@ -89,7 +89,7 @@ def _moonbase_flash_cmd(build_dir, firmware: str, port: str, baud: int, env: dic
     from build_esp32 import moonbase_flash_files
     try:
         writes = moonbase_flash_files(firmware, build_dir)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"MoonBase flash: {e}")
         sys.exit(1)
     chip_m = re.search(r'CONFIG_IDF_TARGET="([^"]+)"', (build_dir / "sdkconfig").read_text())

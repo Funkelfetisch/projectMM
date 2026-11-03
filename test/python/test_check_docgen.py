@@ -333,6 +333,19 @@ def test_a_documented_public_member_is_accepted():
     assert not [i for i in _hdr(src) if "has no ///" in i[1]]
 
 
+def test_static_assert_is_not_a_public_function_and_methods_remain_checked():
+    src = ("struct Probe {\n"
+           "  static_assert(kMaxPresets == kGridCols * kGridRows);\n"
+           "  static_assert(kMaxPresets > 0, \"slots\");\n"
+           "  static_assert (kMaxPresets > 0);\n"
+           "  Probe();\n"
+           "  void doThing();\n"
+           "};")
+    functions = [key.partition("::")[2] for key, why in _hdr(src)
+                 if why == "public function has no ///"]
+    assert functions == ["Probe/0", "doThing/0"]
+
+
 def test_a_private_member_needs_no_doc():
     """The budget is about the GENERATED page, and a private member never reaches it."""
     src = "class Foo {\nprivate:\n  uint8_t hidden_ = 0;\n};"

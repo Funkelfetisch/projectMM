@@ -2,6 +2,7 @@
 
 #include "core/util/format.h"   // formatTo: nonblocking formatting into a fixed buffer
 #include "light/drivers/DriverBase.h"
+#include "light/drivers/PreviewFrameSnapshot.h"
 
 #include "light/util/light_types.h"  // lengthType, nrOfLightsType
 #include "core/util/BinaryBroadcaster.h"
@@ -62,6 +63,13 @@ public:
 
     /// The rate the preview aims for: lower for detail, raise for smoothness.
     uint8_t targetFps = 24;
+
+    PreviewFrameSnapshot& bleFrame() { return bleFrame_; }
+
+    /// RGB appearance of a full-scale physical white emitter in the browser preview.
+    void setPreviewWhitePoint(uint8_t red, uint8_t green, uint8_t blue) {
+        whitePoint_[0] = red; whitePoint_[1] = green; whitePoint_[2] = blue;
+    }
 
     /// Set the sink each message is pushed to, and register as its inbound-message sink.
     void setBroadcaster(BinaryBroadcaster* b) {
@@ -141,10 +149,12 @@ public:
     /// Point the driver at the same sparse buffer the other drivers read, with no copy.
     void setSourceBuffer(Buffer* buf) override {
         sourceBuffer_ = buf;
+        bleFrame_.invalidate();
     }
 
     /// Rebuild the coordinate table for the new geometry and start a fresh epoch, canceling any in-flight send first since a resize reallocs the buffer a half-sent frame reads.
     void prepare() override {
+        bleFrame_.invalidate();
         // Cancel BEFORE the rebuild: an in-flight send holds a pointer about to dangle.
         if (broadcaster_) broadcaster_->cancelBufferedSend();
         else freePreviewBuffers();            // no broadcaster wired: nothing streams, release the buffers
@@ -190,6 +200,7 @@ public:
 
     /// Serve a requested table, then stream one frame on @xref{its-own-channel-and-why|its own channel} if the previous one finished draining; blocking, since the socket write and the resize are real.
     void tick() MM_NONBLOCKING override {
+        bleFrame_.captureIfRequested(sourceBuffer_, whitePoint_, platform::millis());
         // The PULL model: no standing request means no gather, no send, nothing at all.
         if (!broadcaster_) return;
         nrOfLightsType wantStride = 0;
@@ -474,14 +485,18 @@ public:
         if (!staging_ || stagingCap_ < bodyBytes) return false;   // alloc miss: skip, lossy channel
         struct ColCtx {
             uint8_t* out; size_t at; const uint8_t* src; nrOfLightsType n; uint8_t cpl;
+            const uint8_t* whitePoint;
             void emit(nrOfLightsType idx) {
                 const uint8_t* px = (idx < n) ? src + static_cast<size_t>(idx) * cpl : nullptr;
-                out[at++] = px ? px[0] : 0;
-                out[at++] = (px && cpl >= 2) ? px[1] : 0;
-                out[at++] = (px && cpl >= 3) ? px[2] : 0;
+                const uint8_t white = px && cpl >= 4 ? px[3] : 0;
+                for (uint8_t channel = 0; channel < 3; channel++) {
+                    const uint16_t rgb = px && cpl > channel ? px[channel] : 0;
+                    const uint16_t lit = rgb + (static_cast<uint16_t>(white) * whitePoint[channel] + 127) / 255;
+                    out[at++] = static_cast<uint8_t>(lit > 255 ? 255 : lit);
+                }
             }
         };
-        ColCtx col{staging_, 0, src, n, cpl};
+        ColCtx col{staging_, 0, src, n, cpl, whitePoint_};
         if (denseGrid()) {
             const lengthType W = layer_->physicalWidth(), H = layer_->physicalHeight();
             const lengthType az = layer_->physicalDepth() > 0 ? layer_->physicalDepth() : 1;
@@ -510,7 +525,8 @@ public:
     }
 
 private:
-    /// Free the preview buffers, canceling any in-flight send so no drain outlives its buffer.
+    uint8_t whitePoint_[3] = {255, 255, 255};
+    /// Free the preview buffers, cancelling any in-flight send so no drain outlives its buffer.
     void freePreviewBuffers() {
         if (broadcaster_) broadcaster_->cancelBufferedSend();
         freeKeptIndex();
@@ -587,8 +603,13 @@ protected:
 
 private:
 
-    /// Whether the source is a dense grid in natural order, which needs no placeLights walk: no LUT means Drivers passed the dense box buffer.
-    bool denseGrid() const { return layer_ && !layer_->lut().hasLUT(); }
+    /// Whether the LUT-free source matches its dense box, allowing closed-form preview traversal.
+    bool denseGrid() const {
+        if (!layer_ || !sourceBuffer_ || layer_->lut().hasLUT()) return false;
+        const size_t boxCount = static_cast<size_t>(layer_->physicalWidth()) *
+                                layer_->physicalHeight() * layer_->physicalDepth();
+        return layer_->physicalLightCount() == boxCount && sourceBuffer_->count() == boxCount;
+    }
 
     /// How many points the table may hold: memory is the only bound, with a floor so any board previews something.
     nrOfLightsType maxPreviewPoints() const {
@@ -614,6 +635,7 @@ private:
         return s > 255 ? 255 : static_cast<uint8_t>(s);
     }
 
+    PreviewFrameSnapshot bleFrame_;
     Buffer* sourceBuffer_ = nullptr;
     BinaryBroadcaster* broadcaster_ = nullptr;
     bool aimTurn_ = false;          ///< alternates color/aim so each gets its own send slot

@@ -47,7 +47,7 @@ public:
         LightEmitter e{&sink};
         RingLayout ring;
         // The shared center, the outer ring's own, truncated to an integer as the source does.
-        ring.centerX = ring.centerY = static_cast<lengthType>(1.1f * RingLayout::radius(60));
+        ring.centerX = ring.centerY = static_cast<lengthType>(1.1f * RingLayout::getRadius(60));
         ring.scale = scale;
         ring.angleFirst = angleFirst;
         // Rings run smallest first, or largest first when wired from the outside in.

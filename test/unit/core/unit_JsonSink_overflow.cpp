@@ -9,6 +9,7 @@
 #include "platform/platform.h"
 
 #include <cstring>
+#include <cstdint>
 #include <string>
 
 TEST_CASE("a heap sink that runs out of memory says so instead of truncating silently") {
@@ -47,4 +48,50 @@ TEST_CASE("a document larger than one doubling still serializes whole") {
     REQUIRE(sink.size() == expect.size());
     CHECK(std::memcmp(sink.data(), expect.data(), expect.size()) == 0);
     CHECK(sink.data()[sink.size()] == '\0');   // still a valid C string at the far end
+}
+
+TEST_CASE("a socket JsonSink keeps write failure sticky after its connection becomes writable again") {
+    struct AllocationReset { ~AllocationReset() { mm::platform::setTestAllocRefusedFrom(0); } } reset;
+    bool direct = false;
+    SUBCASE("staged socket") {}
+    SUBCASE("socket without a staging allocation") { direct = true; }
+    mm::platform::TcpConnection client;
+    if (direct) mm::platform::setTestAllocRefusedFrom(1);
+    mm::JsonSink sink(client);
+    mm::platform::setTestAllocRefusedFrom(0);
+    sink.append("first");
+    sink.flush();
+    REQUIRE(sink.overflowed());
+    const size_t failedWritten = sink.written();
+    mm::platform::TcpServer server;
+    uint16_t port = 0;
+    for (uint16_t candidate = 34800; candidate < 34840; ++candidate)
+        if (server.open(candidate)) { port = candidate; break; }
+    REQUIRE(port != 0);
+    REQUIRE(client.connectStart("127.0.0.1", port));
+    mm::platform::TcpConnection accepted;
+    auto connected = mm::platform::TcpConnection::ConnectResult::Pending;
+    for (int i = 0; i < 200 && connected == mm::platform::TcpConnection::ConnectResult::Pending; ++i) {
+        if (!accepted.valid()) accepted = server.accept();
+        connected = client.connectPoll();
+        if (connected == mm::platform::TcpConnection::ConnectResult::Pending) mm::platform::delayMs(1);
+    }
+    REQUIRE(connected == mm::platform::TcpConnection::ConnectResult::Connected);
+    for (int i = 0; i < 100 && !accepted.valid(); ++i) { accepted = server.accept(); mm::platform::delayMs(1); }
+    REQUIRE(accepted.valid());
+    sink.append("must not arrive");
+    sink.appendf("nor %s", "formatted bytes");
+    sink.flush();
+    sink.clear();
+    sink.append("nor after clear");
+    sink.flush();
+    CHECK(sink.overflowed());
+    CHECK(sink.written() == failedWritten);
+    uint8_t buffer[64];
+    int received = -1;
+    for (int i = 0; i < 50 && received < 0; ++i) {
+        received = accepted.read(buffer, sizeof(buffer));
+        if (received < 0) mm::platform::delayMs(1);
+    }
+    CHECK(received == -1);
 }

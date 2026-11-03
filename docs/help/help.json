@@ -40,7 +40,7 @@
     },
     {
      "title": "The status line",
-     "text": "The status shows the logical box the effects render into. A mirror modifier folds a 128 by 128 layout into a 64 by 64 box. A warning replaces it when the layer does not fit in memory."
+     "text": "The status shows the logical box the effects render into. A mirror modifier folds a 128 by 128 layout into a 64 by 64 box. A memory warning includes the reduced rendering dimensions."
     }
    ],
    "image": "https://moonmodules.org/MoonLight/assets/light/Layer.png",
@@ -496,6 +496,9 @@
     "nrOfLEDs": {
      "line": "How many lights go around the ring."
     },
+    "radius": {
+     "line": "explicit radius, or zero for spacing derived from the light count"
+    },
     "angleFirst": {
      "line": "The angle the first light sits at, in degrees."
     },
@@ -519,7 +522,8 @@
    "tags": "💫",
    "dim": 2,
    "doc": "light/layouts.md#ring",
-   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/layouts/RingLayout.h"
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/layouts/RingLayout.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#ringlayout"
   },
   "Rings241Layout": {
    "line": "The classic 241-light disc: nine concentric rings of 1, 8, 12, 16, 24, 32, 40, 48 and 60 lights sharing a center.",
@@ -1634,7 +1638,197 @@
    "tags": "💫🦅🖌️🎡",
    "dim": 2,
    "doc": "light/effects.md#rings",
-   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/RingsEffect.h"
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/RingsEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#ringseffect"
+  },
+  "HelioFactoryTestEffect": {
+   "line": "Deliberately selected production pattern for an assembled HELIO RGBW ring.\nIt is registered only in helio1 and is never part of the boot scene.\nThe operator must set the RingLayout and RMT lengths to the physical ring\ncount (156/258/360) and run this as the only enabled effect on its layer.",
+   "controls": {
+    "phase": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "doc": "light/effects.md#heliofactorytest",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioFactoryTestEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#heliofactorytesteffect"
+  },
+  "HelioWledPresetsEffect": {
+   "controls": {
+    "playlist": {
+     "line": ""
+    },
+    "preset": {
+     "line": ""
+    },
+    "autoPlay": {
+     "line": ""
+    },
+    "idleBeat": {
+     "line": ""
+    },
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "custom 1": {
+     "line": ""
+    },
+    "custom 2": {
+     "line": ""
+    },
+    "custom 3": {
+     "line": ""
+    },
+    "palette": {
+     "line": ""
+    },
+    "red": {
+     "line": ""
+    },
+    "green": {
+     "line": ""
+    },
+    "blue": {
+     "line": ""
+    },
+    "white": {
+     "line": ""
+    },
+    "secondary red": {
+     "line": ""
+    },
+    "secondary green": {
+     "line": ""
+    },
+    "secondary blue": {
+     "line": ""
+    },
+    "option 1": {
+     "line": ""
+    },
+    "option 2": {
+     "line": ""
+    },
+    "option 3": {
+     "line": ""
+    },
+    "sound simulation": {
+     "line": ""
+    },
+    "audio map": {
+     "line": ""
+    },
+    "output": {
+     "line": ""
+    },
+    "source defaults": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#heliowledpresetseffect"
+  },
+  "HelioCandleMultiEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioColorTwinklesEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioFreqMapAmberEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioLakeEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioLoadingEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioPinkPaletteEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioPhasedEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioRippleEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioRunningEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioStarburstEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioGravCenterEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioJugglesEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioMultiCometEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioNoiseMeterEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioPlasmoidEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioFreqMapWideEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioGEQEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioGravFreqEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "HelioFreqWaveEffect": {
+   "role": "generic",
+   "dim": 0,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "RipplesEffect": {
    "line": "Distance from the center sets a per-column wave phase, so the lit surface ripples like water.",
@@ -3884,6 +4078,9 @@
     "bootReason": {
      "line": "Why the device last restarted."
     },
+    "lastPanic": {
+     "line": "Retained exception and code addresses, correlated with the image fingerprint."
+    },
     "mode": {
      "line": "How much of the UI is shown, cumulative.",
      "more": "User shows the essentials, expert adds the 🎚️ controls, developer the 🔧 ones. Only the UI reads it."
@@ -4163,6 +4360,135 @@
    "doc": "core/services.md#osc",
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/OscService.h",
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#oscservice"
+  },
+  "Bh1750Service": {
+   "line": "Continuous BH1750 illuminance, sampled on a worker so I²C never blocks rendering.\nPrior art: ROHM BH1750FVI Technical Note Rev.D, H-resolution mode and raw / 1.2 lux.",
+   "controls": {
+    "automatic": {
+     "line": ""
+    },
+    "lux": {
+     "line": ""
+    },
+    "target": {
+     "line": ""
+    },
+    "darkLux": {
+     "line": ""
+    },
+    "darkBrightness": {
+     "line": ""
+    },
+    "brightLux": {
+     "line": ""
+    },
+    "brightBrightness": {
+     "line": ""
+    },
+    "hysteresisLux": {
+     "line": ""
+    },
+    "bus": {
+     "line": ""
+    },
+    "sda": {
+     "line": ""
+    },
+    "scl": {
+     "line": ""
+    },
+    "address": {
+     "line": ""
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#bh1750",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/Bh1750Service.h",
+   "tests": "https://github.com/MoonModules/MoonLight/blob/main/test/unit/core/unit_Bh1750Service.cpp"
+  },
+  "BatteryService": {
+   "line": "One background sampler for up to two independent, explicitly configured BatteryChannel children.\n@guide A mains-only product has no battery children. Sampling never runs on the render thread, and charging remains unknown without a qualified detector.",
+   "controls": {
+    "pollSeconds": {
+     "line": "Seconds between measurement batches; stale lifetime is configured independently per battery."
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#battery",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/BatteryService.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#batteryservice"
+  },
+  "BatteryChannel": {
+   "line": "One explicitly configured battery channel, sampled by its BatteryService parent.\n@guide Unset pins and divider values leave the reading unknown. Presence is declared independently of voltage. Charge percentage is an optional linear voltage estimate with explicit endpoints, not a capacity measurement.",
+   "controls": {
+    "slot": {
+     "line": "Stable physical battery identity, first or second, independent of the module's display name."
+    },
+    "sample": {
+     "line": "Pack identity, validity, sample age and optional voltage estimate in the shared transport JSON format."
+    },
+    "presence": {
+     "line": "Declared battery installation: unknown, present or absent; ADC voltage alone proves none of these."
+    },
+    "adcPin": {
+     "line": "Calibrated ADC input from this board's battery divider, unset until the board profile declares it."
+    },
+    "gainNumerator": {
+     "line": "Numerator of the explicit battery-voltage to ADC-voltage ratio."
+    },
+    "gainDenominator": {
+     "line": "Denominator of that ratio; zero leaves sampling disabled."
+    },
+    "offsetMv": {
+     "line": "Calibration offset in millivolts, applied after divider scaling."
+    },
+    "estimate": {
+     "line": "Explicit opt-in to the configured linear voltage estimate."
+    },
+    "emptyMv": {
+     "line": "Measured/modelled voltage at the discharged endpoint; zero leaves percentage unknown."
+    },
+    "fullMv": {
+     "line": "Measured/modelled voltage at the charged endpoint; it must exceed emptyMv."
+    },
+    "staleSeconds": {
+     "line": "How long a last successful sample remains current after read failures."
+    },
+    "senseGate": {
+     "line": "Optional divider switch, unset for a permanently connected divider."
+    },
+    "gateHigh": {
+     "line": "The switch's active level; the board profile owns its polarity."
+    },
+    "settleMs": {
+     "line": "Qualified settling delay after enabling the divider; zero with a gate leaves sampling disabled."
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#battery-channel",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/BatteryChannel.h"
+  },
+  "BleControlService": {
+   "line": "Encrypted, epoch-scoped BLE requests with explicit live state and named scheduled operations.\n@technical The framing, session and complete-scene contract lives in reference/product-ble.md.",
+   "controls": {
+    "group": {
+     "line": "Persisted group membership; empty leaves the group."
+    },
+    "connection": {
+     "line": "Radio state, independent of Wi-Fi association."
+    },
+    "batteryServices": {
+     "line": "BAS declarations remain fixed until the next real service startup."
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#ble-control",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/BleControlService.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#blecontrolservice"
   },
   "I2cBusModule": {
    "line": "The board's I2C bus: its two pins, opened once and shared by every device on it, with a scan that detects them.",
@@ -4922,6 +5248,9 @@
        "url": "https://moonmodules.org/MoonLight/reference/tests.html#firmwareupdatemodule:live:scenario_Firmware_MoonBase_joins_the_apps_network"
       }
      ]
+    },
+    "wifiEnabled": {
+     "line": "Persisted product choice; BLE stays independent of this IP-interface flag."
     },
     "mDNS": {
      "line": "The `<name>.local` hostname, on IPv4 and IPv6.",

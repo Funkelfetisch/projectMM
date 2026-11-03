@@ -1,0 +1,9 @@
+# Product documentation release gate
+
+The combined product preset candidate builds for HELIO and NEBULITE and passes its functional tests. The full documentation gate remains a release blocker: 130 errors and 2,053 warnings. Help generation and the 144 module specifications pass separately. Their success does not imply a passing full documentation gate.
+
+The recorded gate identifies 67 product module errors: missing help for BH1750 and WLED controls/classes, absent card images for five modules and overlong battery control summaries. Other findings include hard wraps, declaration comments and public API documentation in the product port and upstream files. The warning total exceeds the committed ratchet by two; multi-line block warnings increase by four. Resolve the reported causes rather than raising ratchet limits.
+
+`ControlModule` exposes one detector false positive: `static_assert(kMaxPresets == kGridCols * kGridRows)` is classified as an undocumented public function. Keep the assertion and correct the declaration detector, with a targeted test preserving detection of genuinely undocumented methods. New preset/template/usage utility files have no findings in this run; that does not establish complete public API coverage for utilities outside generated module cards.
+
+Keep the immutable candidate's functional source frozen during its device acceptance. Apply documentation corrections to the next source snapshot, generate help and run the corresponding documentation/specification gates before release. Use genuine applicable card assets and describe source-only versus physically qualified capabilities accurately. The private `preset-docgate-review.json` and `native-presets-docs-qualified.log` under the dated firmware backup root retain exact files, lines and rule counts.

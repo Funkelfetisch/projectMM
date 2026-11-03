@@ -460,14 +460,26 @@ size_t allocatedBytes() { return g_allocatedBytes.load(std::memory_order_relaxed
 size_t allocatedPeak()  { return g_allocatedPeak.load(std::memory_order_relaxed); }
 uint32_t allocatedCount() { return g_allocCount.load(std::memory_order_relaxed); }
 
+static std::atomic<size_t> testFreeHeap{0};
+static std::atomic<size_t> testHeapCapacity{0};
+void setTestFreeHeap(size_t bytes) { testFreeHeap.store(bytes, std::memory_order_relaxed); }
+void setTestHeapCapacity(size_t bytes) { testHeapCapacity.store(bytes, std::memory_order_relaxed); }
+static size_t trackedHeapHeadroom(size_t capacity) {
+    const size_t used = allocatedBytes();
+    return capacity > used ? capacity - used : 1; // zero means unreported, so exhaustion stays positive
+}
 size_t freeHeap() {
-    return 0; // Not meaningful on desktop (0 = unlimited)
+    const size_t capacity = testHeapCapacity.load(std::memory_order_relaxed);
+    if (capacity) return trackedHeapHeadroom(capacity);
+    return testFreeHeap.load(std::memory_order_relaxed);
 }
 
 static std::atomic<size_t> testFreeInternal{0};
 void setTestFreeInternalHeap(size_t bytes) { testFreeInternal.store(bytes, std::memory_order_relaxed); }
 
 size_t freeInternalHeap() {
+    const size_t capacity = testHeapCapacity.load(std::memory_order_relaxed);
+    if (capacity) return trackedHeapHeadroom(capacity);
     return testFreeInternal.load(std::memory_order_relaxed);   // 0 = not meaningful on desktop (unlimited), unless a test sets it
 }
 
@@ -909,6 +921,7 @@ const char* resetReason() {
     // Desktop has no reset-reason concept; report a benign value the UI treats as "not crashed".
     return "OK";
 }
+const char* lastPanicSummary() { return ""; }
 
 static BootRecord testBootRecord_;
 void setTestBootRecord(const BootRecord& r) { testBootRecord_ = r; }
@@ -1203,15 +1216,15 @@ bool fsWriteStreamClose(FsWriteStream& h, bool commit) {
 
 namespace {
 // One directory entry to the callback, with its size; the filename round-trips through a string, since its native character type differs per platform.
-void listEntry(const std::filesystem::directory_entry& entry, const std::string& name, FsListCb cb, void* user) {
+void listEntry(const std::filesystem::directory_entry& entry, const std::string& name, FsListCb cb, void* user, FsListMode mode) {
     std::error_code ec;
     const bool isDir = entry.is_directory(ec);
-    const auto sz = isDir ? 0u : static_cast<uint32_t>(std::filesystem::file_size(entry.path(), ec));
+    const auto sz = (isDir || mode == FsListMode::NamesOnly) ? 0u : static_cast<uint32_t>(std::filesystem::file_size(entry.path(), ec));
     cb(name.c_str(), isDir, ec ? 0u : sz, user);
 }
 }  // namespace
 
-void fsList(const char* dir, FsListCb cb, void* user) {
+void fsList(const char* dir, FsListCb cb, void* user, FsListMode mode) {
     if (!cb) return;
     // On the desktop the card is a real subdirectory, listed by hand while mounted and skipped below as its backing folder.
     const bool sdHere = isFsRoot(dir) && hasSdCard;
@@ -1222,7 +1235,7 @@ void fsList(const char* dir, FsListCb cb, void* user) {
     for (auto& entry : std::filesystem::directory_iterator(p, ec)) {
         if (ec) break;
         const std::string name = entry.path().filename().string();
-        if (!(sdHere && name == "sd")) listEntry(entry, name, cb, user);
+        if (!(sdHere && name == "sd")) listEntry(entry, name, cb, user, mode);
     }
 }
 
@@ -1882,6 +1895,9 @@ void ethGetIPv4(uint8_t out[4]) MM_NONBLOCKING {
 
 // Test seam: no radio here, so the init reports none unless a test fakes one to drive the waiting path.
 static std::atomic<bool> testWifiStaAvailable{false};
+static bool testMdnsStackLive_ = false;
+static bool testWifiStopHadLiveMdns_ = false;
+bool testWifiStopHadLiveMdns() { return testWifiStopHadLiveMdns_; }
 void setTestWifiStaAvailable(bool available) { testWifiStaAvailable.store(available, std::memory_order_relaxed); }
 static char testLastStaSsid_[33] = {};
 const char* testLastStaSsid() { return testLastStaSsid_; }
@@ -1920,7 +1936,7 @@ void netGetIPv4(NetIface iface, uint8_t ip[4], uint8_t gw[4], uint8_t mask[4], u
     for (int k = 0; k < 3; k++) for (int i = 0; i < 4; i++) outs[k][i] = testLease_[k][i];
 }
 void setHostname(const char* /*name*/) {}   // no DHCP client on desktop
-void wifiStaStop() {}
+void wifiStaStop() { if (testMdnsStackLive_) testWifiStopHadLiveMdns_ = true; }
 int wifiStaRssi() { return 0; }
 // The scan and the join outcome are test seams here, the desktop having no radio of its own.
 static WifiNetwork testScan_[16] = {};
@@ -1969,7 +1985,7 @@ bool wifiApInit(const WifiApConfig& cfg) {
     return testApUp_;
 }
 bool wifiApConnected() { return testApUp_; }
-void wifiApStop() { testApUp_ = false; }
+void wifiApStop() { if (testMdnsStackLive_) testWifiStopHadLiveMdns_ = true; testApUp_ = false; }
 uint32_t wifiApClientCount() { return testApUp_ ? testApClients_ : 0; }
 
 // Host sockets work whatever the link predicates above say, and there is no initialization race, so this is always safe.
@@ -1985,9 +2001,9 @@ bool wifiSetTxPower(int8_t quarterDbm) {
 
 static bool testMdns_ = false;      // the host has no mDNS responder of ours, so a test opts in
 static uint32_t testMdnsInits_ = 0;
-void setTestMdnsAvailable(bool available) { testMdns_ = available; testMdnsInits_ = 0; }
+void setTestMdnsAvailable(bool available) { testMdns_ = available; testMdnsInits_ = 0; testMdnsStackLive_ = false; testWifiStopHadLiveMdns_ = false; }
 uint32_t testMdnsInitCount() { return testMdnsInits_; }
-bool mdnsInit(const char* /*deviceName*/) { return testMdns_ && ++testMdnsInits_; }
+bool mdnsInit(const char* /*deviceName*/) { if (!testMdns_) return false; testMdnsStackLive_ = true; return ++testMdnsInits_; }
 void mdnsStop() {}
 // The host announces nothing over mDNS, so the services are only remembered, which is what a test reads back.
 static std::map<std::string, uint16_t> mdnsServices_;
@@ -1997,7 +2013,7 @@ uint16_t mdnsAdvertisedPort(const char* type, const char* proto) {
     const auto it = mdnsServices_.find(std::string(type) + "." + proto);
     return it == mdnsServices_.end() ? 0 : it->second;
 }
-void mdnsShutdown() {}
+void mdnsShutdown() { testMdnsStackLive_ = false; }
 
 // The system resolver answers `.local` too on macOS and Windows, and on Linux with nss-mdns, so one call covers both kinds of name.
 bool resolveHost(const char* name, uint8_t ip[4]) {
@@ -2029,6 +2045,9 @@ bool http_fetch_to_ota(const char* /*url*/,
 }
 
 // No OTA partition on desktop, call sites guard with `if constexpr (mm::platform::hasOta)`.
+static bool testOtaBusy_ = false;
+void setTestOtaBusy(bool busy) { testOtaBusy_ = busy; }
+bool otaBusy() { return testOtaBusy_; }
 bool otaBegin(OtaWrite&, OtaTarget, size_t, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut) {
     if (statusBuf && statusBufLen > 0) std::snprintf(statusBuf, statusBufLen, "unsupported on desktop");
     if (bytesOut) *bytesOut = 0;
@@ -2036,11 +2055,15 @@ bool otaBegin(OtaWrite&, OtaTarget, size_t, char* statusBuf, size_t statusBufLen
 }
 bool otaWrite(OtaWrite&, const uint8_t*, size_t) { return false; }
 bool otaEnd(OtaWrite&, bool) { return false; }
+bool otaAbortApp(OtaWrite& w) { otaEnd(w, false); return false; }
 
 // No partitions on desktop: there is no recovery image and nothing to boot into, unless a host test gives it one to read.
 static const char* testMoonBaseVersion_ = nullptr;
 static const char* testMoonBaseBuilt_ = nullptr;
 void setTestMoonBase(const char* version, const char* built) { testMoonBaseVersion_ = version; testMoonBaseBuilt_ = built; }
+static size_t testOtaNextAppCapacity_ = 0;
+void setTestOtaNextAppCapacity(size_t capacity) { testOtaNextAppCapacity_ = capacity; }
+size_t otaNextAppCapacity() { return testOtaNextAppCapacity_; }
 bool otaHasMoonBase() { return testMoonBaseVersion_ != nullptr; }
 bool otaBootMoonBase() { return false; }
 bool otaRunningMoonBase() { return false; }
@@ -2544,35 +2567,57 @@ uint32_t pwmPhaseForTest(int channel) {
 
 // The symbol-based output on the host is accepted and counted, since refusing left that driver inert off device. The resolution is echoed so its timing arithmetic works on real numbers.
 namespace {
-struct HostRmt { uint32_t resolutionHz = 0; };
+struct HostRmt { uint32_t resolutionHz = 0; int pin = -1; };
+bool hostRmtStartFails = false;
+bool hostRmtWaitFails = false;
+bool hostRmtDetachFails = false;
+int hostRmtFailurePin = -1;
+uint32_t hostRmtTransmitCount = 0;
 HostRmt* hostRmt(void*& impl) {
     if (!impl) impl = new HostRmt();
     return static_cast<HostRmt*>(impl);
 }
 }  // namespace
 
-bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t /*gpio*/, uint32_t resolutionHz,
+bool rmtWs2812Init(RmtWs2812Handle& h, uint8_t gpio, uint32_t resolutionHz,
                    bool /*invert*/) {
     // A zero resolution would make the driver divide by zero, so refuse it rather than hand back an unusable channel.
     if (resolutionHz == 0) return false;
     hostRmt(h.impl)->resolutionHz = resolutionHz;
+    hostRmt(h.impl)->pin = gpio;
     return true;
 }
 uint32_t rmtWs2812Resolution(const RmtWs2812Handle& h) MM_NONBLOCKING {
     return h.impl ? static_cast<HostRmt*>(h.impl)->resolutionHz : 0;
 }
 bool rmtWs2812Transmit(RmtWs2812Handle& h, const uint8_t* wire, size_t byteCount) {
-    if (!h.impl || !wire || byteCount == 0) return false;
+    if (hostRmtStartFails || !h.impl || !wire || byteCount == 0 ||
+        static_cast<HostRmt*>(h.impl)->pin == hostRmtFailurePin) return false;
+    ++hostRmtTransmitCount;
     return true;
 }
 
 bool rmtWs2812SetBitTiming(RmtWs2812Handle& h, uint32_t /*sym0*/, uint32_t /*sym1*/) {
     return h.impl != nullptr;   // no peripheral to program off-target
 }
-bool rmtWs2812Wait(RmtWs2812Handle& /*h*/, uint32_t /*timeoutMs*/) { return true; }
+bool rmtWs2812Wait(RmtWs2812Handle& /*h*/, uint32_t /*timeoutMs*/) { return !hostRmtWaitFails; }
+void setTestRmtFailures(bool startFails, bool waitFails) {
+    hostRmtStartFails = startFails;
+    hostRmtWaitFails = waitFails;
+}
+void setTestRmtFailurePin(int pin) { hostRmtFailurePin = pin; }
+void setTestRmtDetachFailure(bool fail) { hostRmtDetachFails = fail; }
+void resetTestRmtTransmitCount() { hostRmtTransmitCount = 0; }
+uint32_t testRmtTransmitCount() { return hostRmtTransmitCount; }
 void rmtWs2812Deinit(RmtWs2812Handle& h) {
     delete static_cast<HostRmt*>(h.impl);
     h.impl = nullptr;
+}
+bool rmtWs2812DetachChecked(RmtWs2812Handle& h) {
+    if (!h.impl) return true;
+    if (!rmtWs2812Wait(h, 0) || hostRmtDetachFails) return false;
+    rmtWs2812Deinit(h);
+    return true;
 }
 size_t rmtWs2812RxCapture(uint8_t /*gpio*/, uint32_t /*resolutionHz*/,
                           uint32_t* /*outSymbols*/, size_t /*maxSymbols*/,
@@ -2852,11 +2897,20 @@ size_t i2cScan(uint8_t* out, size_t maxOut) {
     return n;
 }
 
-// No receiver or pins here, so the seam is a no-op and reads come from what a test injected. The button logic is ordinary code, leaving only the electrical half for the bench.
+bool i2cDeviceInit(I2cDeviceHandle&, uint8_t, uint16_t, uint16_t, uint8_t, uint32_t) {
+    return false;
+}
+bool i2cDeviceWrite(I2cDeviceHandle&, const uint8_t*, size_t, uint32_t) { return false; }
+bool i2cDeviceRead(I2cDeviceHandle&, uint8_t*, size_t, uint32_t) { return false; }
+void i2cDeviceDeinit(I2cDeviceHandle& handle) { handle = {}; }
+
+// No receiver here, so the seam is a no-op and the service still runs with its buttons working through the control path.
+// A host has no pins either, so reads come from what a test injected.
+// The button logic is ordinary code and gets tested here, leaving only the electrical half for the bench.
 namespace {
 // A flat table rather than a map: a pin number IS the index, there are at most 48 of them, and this allocates nothing.
 constexpr uint8_t kMaxGpio = 48;
-bool g_gpioLevel[kMaxGpio] = {};
+std::atomic<bool> g_gpioLevel[kMaxGpio] = {};   // a sensor worker and a render-side input may share the pin
 }
 
 bool gpioInputBegin(uint8_t gpio, GpioPull pull) {
@@ -2875,15 +2929,23 @@ bool gpioWrite(uint8_t gpio, bool high) {
     return true;
 }
 
+bool gpioPreloadOutput(uint8_t gpio, bool high) {
+    const auto cap = gpioCapability(gpio);
+    if (!cap.validGpio || !cap.outputCapable || cap.reserved) return false;
+    return gpioWrite(gpio, high);
+}
+
+bool gpioPreloadLowOutput(uint8_t gpio) { return gpioPreloadOutput(gpio, false); }
+
 void setTestGpioLevel(uint8_t gpio, bool level) { if (gpio < kMaxGpio) g_gpioLevel[gpio] = level; }
-void clearTestGpioLevel() { for (bool& b : g_gpioLevel) b = false; }
+void clearTestGpioLevel() { for (auto& b : g_gpioLevel) b = false; }
 
 // --- ADC ---
 // The desktop has no converter, so a read reports what a test injected, as with the GPIO level. That pins a pedal's mapping, min/max/invert and smoothing on the host.
 namespace {
-uint16_t g_adcValue[kMaxGpio] = {};
+std::atomic<uint16_t> g_adcValue[kMaxGpio] = {};
 // Millivolts are injected SEPARATELY from the raw count. The chip's eFuse curve relates them on a board, and deriving one here would pass against a relation hardware lacks.
-uint16_t g_adcMv[kMaxGpio] = {};
+std::atomic<uint16_t> g_adcMv[kMaxGpio] = {};
 }
 
 bool adcRead(uint8_t gpio, uint16_t& raw) {
@@ -2896,7 +2958,7 @@ bool adcRead(uint8_t gpio, uint16_t& raw) {
 uint16_t adcMaxCount() { return 4095; }
 
 void setTestAdcValue(uint8_t gpio, uint16_t raw) { if (gpio < kMaxGpio) g_adcValue[gpio] = raw; }
-void clearTestAdcValue() { for (uint16_t& v : g_adcValue) v = 0; for (uint16_t& v : g_adcMv) v = 0; }
+void clearTestAdcValue() { for (auto& v : g_adcValue) v = 0; for (auto& v : g_adcMv) v = 0; }
 
 bool adcReadMv(uint8_t gpio, uint16_t& mv) {
     if (gpio >= kMaxGpio) return false;
@@ -3830,3 +3892,5 @@ const char* rawInterfaceName(size_t i) {
 }
 
 } // namespace mm::platform
+
+#include "platform/ble_control_stub.inc"

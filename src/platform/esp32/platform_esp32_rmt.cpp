@@ -57,6 +57,7 @@
 /// That budget must fit INSIDE the outer ceiling, or the caller frees the capture buffer while this task is still writing into it.
 
 #include "platform/platform.h"
+#include "platform/RmtCheckedDetach.h"
 #include "platform/loopback_verify.h"   // the bit-verify every loopback shares
 
 #include "driver/rmt_tx.h"
@@ -184,6 +185,7 @@ struct RmtTxState {
     rmt_encoder_handle_t encoder = nullptr;
     uint32_t resolutionHz = 0;
     bool     timed = false;       // rmtWs2812SetBitTiming succeeded: a transmit before it would clock all-zero symbols
+    bool     disabled = false;    // checked detach may stop before channel deletion and retry later
     uint32_t sym0 = 0, sym1 = 0;  // bit shapes, set live by rmtWs2812SetBitTiming (every chip:
                                   // the bytes encoder takes them, and so does the level-5 refill)
 #if CONFIG_IDF_TARGET_ESP32
@@ -192,6 +194,10 @@ struct RmtTxState {
 #endif
 };
 
+#if SOC_RMT_SUPPORT_DMA
+// A long RMT frame needs refill headroom while Wi-Fi shares the CPU. DMA-capable chips keep a software buffer large enough that a radio burst cannot form a WS2812 reset gap mid-frame.
+constexpr size_t kTxDmaBufferSymbols = 1024;
+#endif
 
 } // namespace
 
@@ -214,9 +220,22 @@ void rmtInitOnThisCore(void* arg) {
     txCfg.resolution_hz = job->resolutionHz;
     txCfg.trans_queue_depth = 4;
     txCfg.flags.invert_out = job->invert ? 1 : 0;
-    // One memory block per channel at the chip's own size, since a hardcoded one is rejected elsewhere, so every channel stays available to a fully populated board. The block is the refill deadline, and extra blocks only softened a deadline the high-priority refill removes entirely, so they bought nothing and lost pins.
+    // The classic ESP32 uses its level-5 refill path below. DMA-capable chips need enough buffered symbols to cover radio activity during a long frame.
+#if SOC_RMT_SUPPORT_DMA
+    txCfg.mem_block_symbols = kTxDmaBufferSymbols;
+    txCfg.flags.with_dma = 1;
+#else
     txCfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
-    if (rmt_new_tx_channel(&txCfg, &st->channel) != ESP_OK) { job->ok = false; return; }
+#endif
+    esp_err_t channelErr = rmt_new_tx_channel(&txCfg, &st->channel);
+#if SOC_RMT_SUPPORT_DMA
+    if (channelErr != ESP_OK) {
+        txCfg.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;
+        txCfg.flags.with_dma = 0;
+        channelErr = rmt_new_tx_channel(&txCfg, &st->channel);
+    }
+#endif
+    if (channelErr != ESP_OK) { job->ok = false; return; }
 
     // The SDK's own byte encoder, which expands each wire byte as it feeds the peripheral, so the caller keeps only the few bytes per light the correction produces.
     // The copy encoder it replaces made the caller pre-expand every bit first, which is the buffer that outgrew internal memory.
@@ -278,7 +297,7 @@ uint32_t rmtWs2812Resolution(const RmtWs2812Handle& h) MM_NONBLOCKING {
 
 bool rmtWs2812SetBitTiming(RmtWs2812Handle& h, uint32_t sym0, uint32_t sym1) {
     auto* st = static_cast<RmtTxState*>(h.impl);
-    if (!st || !st->encoder) return false;
+    if (!st || st->disabled || !st->encoder) return false;
     // The `timing` control is live (400 kHz WS2811, 800 kHz, custom ns), so the encoder's bit shapes are rewritten rather than fixed at init.
     rmt_bytes_encoder_config_t cfg = {};
     static_assert(sizeof(rmt_symbol_word_t) == sizeof(uint32_t), "symbol word is one 32-bit word");
@@ -293,7 +312,7 @@ bool rmtWs2812SetBitTiming(RmtWs2812Handle& h, uint32_t sym0, uint32_t sym1) {
 
 bool rmtWs2812Transmit(RmtWs2812Handle& h, const uint8_t* wire, size_t byteCount) {
     auto* st = static_cast<RmtTxState*>(h.impl);
-    if (!st || !wire || byteCount == 0 || !st->timed) return false;   // no bit shapes yet: refuse, not garbage
+    if (!st || st->disabled || !wire || byteCount == 0 || !st->timed) return false;   // no bit shapes yet: refuse, not garbage
 
 #if CONFIG_IDF_TARGET_ESP32
     if (st->channelId != 0xFF) {
@@ -328,6 +347,7 @@ bool rmtWs2812Transmit(RmtWs2812Handle& h, const uint8_t* wire, size_t byteCount
 bool rmtWs2812Wait(RmtWs2812Handle& h, uint32_t timeoutMs) {
     auto* st = static_cast<RmtTxState*>(h.impl);
     if (!st) return true;
+    if (st->disabled) return false;
     // A finite timeout, so a wedged transfer cannot hang the render tick forever; even the longest realistic frame clocks out well inside it. A timed-out transfer is deliberately left alone rather than canceled: @xref{a-timed-out-transfer-is-left-alone|why, and what the result costs}.
 #if CONFIG_IDF_TARGET_ESP32
     if (st->channelId != 0xFF) {
@@ -365,6 +385,44 @@ void rmtWs2812Deinit(RmtWs2812Handle& h) {
     if (st->encoder) rmt_del_encoder(st->encoder);
     delete st;
     h.impl = nullptr;
+}
+
+bool rmtWs2812DetachChecked(RmtWs2812Handle& h) {
+    auto* st = static_cast<RmtTxState*>(h.impl);
+    if (!st) return true;
+    struct Ops {
+        RmtWs2812Handle& handle;
+        RmtTxState& state;
+        bool disabled() const { return state.disabled; }
+        bool wait() { return rmtWs2812Wait(handle, 0); }
+        bool disable() { return !state.channel || rmt_disable(state.channel) == ESP_OK; }
+        void markDisabled() {
+            state.disabled = true;
+#if CONFIG_IDF_TARGET_ESP32
+            if (state.channelId != 0xFF) {
+                rmt_ll_enable_interrupt(&RMT, RMT_LL_EVENT_TX_THRES(state.channelId) | RMT_LL_EVENT_TX_DONE(state.channelId), false);
+                s_hi[state.channelId].busy = false;
+                state.channelId = 0xFF;
+            }
+#endif
+        }
+        bool removeChannel() {
+            if (!state.channel) return true;
+            if (rmt_del_channel(state.channel) != ESP_OK) return false;
+            state.channel = nullptr;
+            return true;
+        }
+        bool removeEncoder() {
+            if (!state.encoder) return true;
+            if (rmt_del_encoder(state.encoder) != ESP_OK) return false;
+            state.encoder = nullptr;
+            return true;
+        }
+    } ops{h, *st};
+    if (!rmtCheckedDetachPhases(ops)) return false;
+    delete st;
+    h.impl = nullptr;
+    return true;
 }
 
 // Loopback capture, an on-device test only: a one-shot receive channel on the jumpered pin, returning how many symbols landed for the test to decode and compare.

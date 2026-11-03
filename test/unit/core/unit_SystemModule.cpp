@@ -3,6 +3,7 @@
 #include "doctest.h"
 #include "core/system/SystemModule.h"
 #include "core/util/JsonSink.h"
+#include "core/module/StateDocument.h"
 
 #include <cstring>
 #include <string>
@@ -208,3 +209,33 @@ TEST_CASE("SystemModule accepts back the unset deviceModel a fresh board reports
     CHECK_FALSE(mm::SystemModule::validateDeviceModel("12345678901234567890123456789012"));   // 32 chars
 }
 
+
+
+TEST_CASE("SystemModule physical diameter is explicit persisted metadata with no model-based default") {
+    mm::SystemModule system;
+    system.setName("System"); system.setTypeName("SystemModule");
+    system.setDefaultDeviceModel("HELIO 1"); system.defineControls();
+    const mm::ControlDescriptor* diameter = nullptr;
+    for (uint8_t i = 0; i < system.controls().count(); ++i)
+        if (std::strcmp(system.controls()[i].name, "physicalDiameterCm") == 0) diameter = &system.controls()[i];
+    REQUIRE(diameter != nullptr);
+    CHECK(diameter->type == mm::ControlType::Uint8); CHECK(diameter->min == 0); CHECK(diameter->max == 255);
+    CHECK_FALSE(diameter->readonly); CHECK_FALSE(diameter->live);
+    CHECK(*static_cast<const uint8_t*>(diameter->ptr) == 0);
+    mm::Scheduler scheduler;
+    auto* owned = new mm::SystemModule(); owned->setName("System"); owned->setTypeName("SystemModule"); owned->defineControls();
+    scheduler.addModule(owned);
+    int32_t value = -1;
+    REQUIRE(scheduler.getControlWide("System", "physicalDiameterCm", value)); CHECK(value == 0);
+    REQUIRE(mm::applyStateDocument(scheduler, R"({"System":{"physicalDiameterCm":50}})").ok);
+    REQUIRE(scheduler.getControlWide("System", "physicalDiameterCm", value)); CHECK(value == 50);
+    char saved[8192]; mm::JsonSink sink(saved, sizeof(saved));
+    mm::writeStateMember(sink, *owned);
+    CHECK_FALSE(sink.overflowed()); CHECK(std::strstr(saved, "\"physicalDiameterCm\":50") != nullptr);
+    CHECK_FALSE(mm::applyStateDocument(scheduler, R"({"System":{"physicalDiameterCm":256}})").ok);
+    CHECK_FALSE(mm::applyStateDocument(scheduler, R"({"System":{"physicalDiameterCm":-1}})").ok);
+    REQUIRE(scheduler.getControlWide("System", "physicalDiameterCm", value)); CHECK(value == 50);
+    REQUIRE(mm::applyStateDocument(scheduler, R"({"System":{"physicalDiameterCm":0}})").ok);
+    REQUIRE(scheduler.getControlWide("System", "physicalDiameterCm", value)); CHECK(value == 0);
+    scheduler.release();
+}

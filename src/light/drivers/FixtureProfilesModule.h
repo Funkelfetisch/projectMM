@@ -421,6 +421,7 @@ private:
     static const Builtin* builtins(uint8_t& count) {
         using R = ChannelRole;
         // All six orders of three colors, as FastLED and WLED offer them; GRB is the WS2812B, WS2813 and WS2815.
+        static constexpr R kWhite[]  = {R::White};
         static constexpr R kRGB[]    = {R::Red, R::Green, R::Blue};
         static constexpr R kGRB[]    = {R::Green, R::Red, R::Blue};
         static constexpr R kBGR[]    = {R::Blue, R::Green, R::Red};
@@ -464,6 +465,7 @@ private:
             {"MH BeTopper 32", kMHBeTopper32, 32},
             {"MH 19x15W-24", kMH19x15W24, 24},
             {"MH Mini 10W 11", kMHMini11, 11},
+            {"White", kWhite, 1},
         };
         // Fails LOUD at build time: the fix is a shorter name, not a wider standing buffer.
         constexpr auto namesFit = [](const Builtin* t, size_t n) {

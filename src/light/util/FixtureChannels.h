@@ -6,7 +6,7 @@
 
 namespace mm {
 
-/// Where a fixture's non-color channels live inside one light.
+/// How many color channels a rig needs and where its motion channels live inside one light.
 ///
 /// @technical
 ///
@@ -14,12 +14,13 @@ namespace mm {
 /// The pipeline does not care which, since a wider light simply has more bytes and a driver that cannot use them ignores them.
 /// This says which of those bytes are pan, tilt, zoom and so on, so an effect drives a moving head through the same buffer it paints pixels into.
 ///
-/// ## Why color has no entry
+/// ## Color count and offset
 ///
 /// Color is always at offset 0.
 /// Every effect and every draw primitive writes RGB or RGBW at the start of a light.
+/// `colorChannels` is a count, not an offset: RGB needs three bytes and an explicit white output needs four.
 /// `Correction` places those bytes at the fixture's own color channels on the way out.
-/// The offsets here are the channels an effect could not otherwise reach at all.
+/// The motion offsets here are the channels an effect could not otherwise reach at all.
 ///
 /// ## Why an absent channel is safe
 ///
@@ -41,6 +42,7 @@ struct FixtureChannels {
     /// Where motion starts in a layer light, after the RGBW the effects paint into.
     static constexpr uint8_t kMotionBase = 4;
 
+    uint8_t colorChannels = 3; ///< Color bytes at offset 0: RGB by default, RGBW when an enabled output carries white.
     uint8_t pan    = kAbsent;   ///< the slot carrying pan, or absent
     uint8_t tilt   = kAbsent;   ///< the slot carrying tilt, or absent
     uint8_t zoom   = kAbsent;   ///< the slot carrying zoom, or absent

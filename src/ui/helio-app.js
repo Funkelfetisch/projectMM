@@ -1,0 +1,8904 @@
+// HELIO and NEBULITE dashboard over the MoonLight state model.
+// Loaded as <script type="module"> so it can import the shared install-picker
+// component used by both the device UI (here, OTA flash) and the GitHub Pages
+// installer (first flash via Web Serial). Module loading is deferred by
+// default; entry-point is the WS init at the bottom — no ordering surprises.
+import { preview } from "./helio-preview3d.js";
+import {
+    audioBand,
+    clampByte,
+    controlValue,
+    drawNebuliteOutputPreview,
+    drawNebuliteStripPreview,
+    hash01,
+    helioScenePreviewColor,
+    mix,
+    paletteAt,
+    rgbToRgbw,
+    rgbwToRgb,
+    scaleRgb,
+    strongestBand,
+} from "./helio-preview.js";
+import {
+    HELIO_FACTORY_SCENES,
+    HELIO_DEFAULT_LED_COUNT,
+    HELIO_MODES,
+    HELIO_SCENE_PLAYLISTS,
+    HELIO_SCENE_PRESETS,
+    HELIO_SIZE_PRESETS,
+    helioFactorySceneForType,
+    helioPlaylistUsesAudio,
+    helioPreferredActiveEffect,
+    helioSceneForPresetIndex,
+    helioSceneUsesAudio,
+    isHelioPortEffectType,
+} from "./helio-scenes.js";
+import { helioAudioStartEnabled, helioChoiceIndex, planHelioEffectActivation, planHelioControlDocument } from "./helio-orchestration.js";
+import { batteryReceiptTracker, batteryView, renderBatteryStatus } from "./helio-battery.js";
+import { uploadThroughMoonbase } from "./helio-moonbase-upload.js";
+import { helioSceneControlMetadata } from "./helio-scene-controls.js";
+import { createPresetClient } from "./helio-presets.js";
+import { HelioPresetCards } from "./helio-preset-cards.js";
+import { NEBULITE_SETUP_PROFILES } from "./nebulite-profile-data.js";
+import { nebuliteProductArt, productProfileMatches, productProjection, productProjectionPoints, productProjectionProfile, renderProductSetup } from "./nebulite-setup.js";
+import { drawHistoricalCroptop, whenHistoricalCroptopReady } from "./nebulite-croptop-preview.js";
+import { drawJacketPreview, whenJacketPreviewReady } from "./nebulite-jacket-preview.js";
+import { nebuliteLiveSampler } from "./nebulite-live-preview.js";
+import { recordingForPreset } from "./nebulite-recording.js";
+
+// Sections (top to bottom):
+//   1. State + storage
+//   2. WebSocket (with keepalive, visibility pause, bfcache, exponential backoff)
+//   3. REST helpers + module mutations
+//   4. Render pipeline: render() → renderNav() → renderCards() → createCard() → createControl()
+//   5. State patching (no-rebuild contract): updateValues() + updateModuleControls()
+//   6. Type picker
+//   7. Drag-to-reorder (HTML5 DnD on desktop; touchstart-gated on mobile)
+//   (3D WebGL preview lives in preview3d.js — imported as `preview`)
+//   8. Status bar wiring (device name, sys stats, theme, reboot)
+//   9. Boot
+//
+// Load-bearing invariants:
+//   - dragTs[mid:key] cooldown: ignore WS pushes for a control the user has touched
+//     in the last 1s. Prevents slider snap-back during drag.
+//   - ctrl.hidden: skip rendering hidden controls (plan-10 feature). Persistence still
+//     loads them — toggling visibility doesn't lose state.
+//   - No-rebuild contract: WS state updates patch values in place via querySelector.
+//     We only rebuild the DOM on structural changes (add/delete/move) and explicit
+//     select-driven defineControls rebuilds.
+
+// ---------------------------------------------------------------------------
+// 1. State + storage
+// ---------------------------------------------------------------------------
+
+let state = null;
+let helioBatteryConnected = false;
+const helioBatteryReceipts = batteryReceiptTracker();
+let nebulitePreviewMetadataPending = false;
+let nebulitePreviewMetadataRetryAt = 0;
+let nebulitePreviewProfileSignature = null;
+let nebuliteLiveFrame = null;
+let nebuliteLiveExpiryTimer = null;
+let nebuliteLiveDrawAt = 0;
+let HelioTrace = null;
+let helioTrace = null;
+let drawHelioTraceWebGLPreview = null;
+let helioTraceLoadPromise = null;
+let helioTraceLoadFailed = false;
+const nebuliteSetupSession = {};
+let helioEffectsGeneration = 0;
+let helioEffectsStale = false;
+let helioEffectsReadback = null;
+let helioMetadataGeneration = 0;
+let helioValueRevision = 0;
+const helioValueChanges = new Map();
+const helioMetadataReady = new Set();
+const helioMetadataReads = new Map();
+let selectedModule = null;
+let availableTypes = [];        // populated lazily from GET /api/types when the generic editor needs it
+let availableTypesPromise = null;
+let availableTypesRerenderQueued = false;
+let ws = null;
+let previewWs = null;
+let previewRequestTimer = null;
+let previewReconnectTimer = null;
+
+function stopPreviewSocket() {
+    clearInterval(previewRequestTimer);
+    clearTimeout(previewReconnectTimer);
+    previewRequestTimer = previewReconnectTimer = null;
+    if (previewWs) { const previous = previewWs; previewWs = null; previous.close(); }
+}
+
+function connectPreviewSocket() {
+    stopPreviewSocket();
+    if (document.hidden || wsPaused || wsUnloading || ws?.readyState !== WebSocket.OPEN) return;
+    const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/wsp`);
+    previewWs = socket;
+    socket.binaryType = "arraybuffer";
+    let lastTableRequest = 0;
+    preview.onSendRequest(bytes => {
+        if (socket !== previewWs || socket.readyState !== WebSocket.OPEN || performance.now() - lastTableRequest < 500) return;
+        lastTableRequest = performance.now();
+        socket.send(new Uint8Array(bytes));
+    });
+    socket.onopen = () => {
+        if (socket !== previewWs) return;
+        const request = () => { if (socket.readyState === WebSocket.OPEN) socket.send(new Uint8Array([0x51, 1, 20])); };
+        request();
+        socket.send(new Uint8Array([0x52, 1]));
+        previewRequestTimer = setInterval(request, 2000);
+    };
+    socket.onmessage = event => { if (socket === previewWs && event.data instanceof ArrayBuffer) preview.onBinaryMessage(event.data); };
+    socket.onclose = () => {
+        if (socket !== previewWs) return;
+        clearInterval(previewRequestTimer);
+        previewWs = null;
+        previewReconnectTimer = setTimeout(connectPreviewSocket, 1500);
+    };
+    socket.onerror = () => {};
+}
+
+const WS_RETRY_MIN_MS = 200;     // first reconnect is quick so a dropped initial connect (common on Safari,
+                                 // whose first attempt can lose a contended socket) comes back near-instantly
+let wsRetryMs = WS_RETRY_MIN_MS; // exponential backoff: 200 → 400 → 800 → … → 5000 ceiling
+let wsHeartbeat = null;
+let wsReconnectTimer = null;     // the pending reconnect setTimeout — tracked so pagehide can cancel it
+let stateRefreshPromise = null;
+let initialUiRevealed = false;
+let wsPaused = false;            // gated by document.visibilityState
+let wsUnloading = false;         // true once the page starts unloading (refresh/navigate) — suppresses the
+                                 // reconnect on the closing socket so the departing page doesn't error-log
+
+const dragTimers = {};           // per-control debounce timers (clearTimeout handles)
+const dragTs = {};               // per-control last-touched timestamp (ms) — a short post-interaction cooldown
+// WiFi credentials are a transaction: text stays in the browser until Connect WiFi is pressed,
+// then SSID + password + the action are posted in order. A draft also survives a card re-render.
+const wifiCredentialDrafts = new Map();
+// Control types whose value the user can edit — updateModuleControls suppresses a
+// WS state push for one of these while the user is mid-edit. The read-only types
+// (display/display-int/time/progress) and the composite `list` are absent on
+// purpose: they always reflect the latest push.
+const EDITABLE_CONTROL_TYPES = new Set(
+    ["uint8", "uint16", "int16", "pin", "bool", "text", "textarea", "password", "select", "palette", "ipv4"]);
+const TIMING_MODES = ["fps", "ms"];
+
+// localStorage keys per ui.md
+const LS_SELECTED  = "mm_selectedRoot";
+const LS_THEME     = "mm_theme";
+const LS_TIMING    = "mm_timing_mode";
+const LS_TABS      = "mm_selectedTabs";   // { [containerName]: childName } — the open tab per container
+const LS_EXPANDED  = "mm_expanded";       // [moduleName, …] — modules whose "controls" <details> is open
+const LS_TA_SIZE   = "mm_textareaSizes";  // { "<module>:<control>": heightPx } — user-dragged textarea heights
+const LS_CARDS_W   = "mm_cardsWidth";     // px — dragged width of the docked card column (right side)
+const LS_HELIO_SETUP_COLLAPSED = "mm_helio_setup_collapsed";
+const LS_HELIO_ADVANCED_OPEN = "mm_helio_advanced_open";
+const LS_HELIO_CONTROLS_OPEN = "mm_helio_controls_open";
+const LS_HELIO_PREVIEW_WALL = "mm_helio_preview_wall";
+const LS_HELIO_PREVIEW_TILT = "mm_helio_preview_tilt";
+const LS_HELIO_PREVIEW_SWIVEL = "mm_helio_preview_swivel";
+const LS_HELIO_PREVIEW_SETTINGS = "mm_helio_preview_settings";
+const HELIO_PREVIEW_SETTINGS_VERSION = 6;
+const UI_RUNTIME_VERSION = "20261027k";
+const HELIO_VIEW   = "__helio";
+const PRESETS_VIEW = "__presets";
+const HELIO_PLAYLISTS_VIEW = "__helio_playlists";
+const PRESET_DIR   = "/presets";
+const PRESET_SCHEMA = 1;
+const HELIO_PREVIEW_VIEWPORT_MARGIN_PX = 0;
+const API_FETCH_TIMEOUT_MS = 7000;
+const HELIO_PREVIEW_DEFAULTS = Object.freeze({
+    exposure: 3.10,
+    mainBounces: 6,
+    cardBounces: 3,
+    attenuation: 0.80,
+    cutoff: 0.03,
+    offThreshold: 12,
+    offBrightness: 0.30,
+    ledFill: 1.00,
+    ledGain: 8.0,
+    reflectionSpread: 0.0,
+    glow: 1.65,
+    dichroic: 0.38,
+    glass: 0.10,
+    wallGlow: 1.25,
+    wallDistanceCm: 25,
+    mainDpr: 1.25,
+    cardDpr: 1.25,
+    cardMaxBackingSize: 480,
+    mainFps: 24,
+    cardFps: 18,
+    cardBatch: 2,
+    showRim: true,
+});
+const HELIO_PREVIEW_SETTING_SPECS = Object.freeze([
+    { key: "exposure", label: "Exposure", min: 0.5, max: 7, step: 0.05 },
+    { key: "ledFill", label: "LED size", min: 0.25, max: 1.35, step: 0.05 },
+    { key: "ledGain", label: "LED brightness", min: 0.5, max: 8, step: 0.1 },
+    { key: "glow", label: "Glow", min: 0, max: 3, step: 0.05 },
+    { key: "mainBounces", label: "Large reflections", min: 0, max: 25, step: 1 },
+    { key: "cardBounces", label: "Card reflections", min: 0, max: 25, step: 1 },
+    { key: "reflectionSpread", label: "Reflection softness", min: 0, max: 4, step: 0.05 },
+    { key: "attenuation", label: "Reflection fade", min: 0.4, max: 0.98, step: 0.01 },
+    { key: "cutoff", label: "Reflection cutoff", min: 0.001, max: 0.25, step: 0.001 },
+    { key: "offThreshold", label: "Off threshold", min: 0, max: 64, step: 1 },
+    { key: "offBrightness", label: "Off LED brightness", min: 0, max: 1, step: 0.01 },
+    { key: "dichroic", label: "Mirror color", min: 0, max: 1, step: 0.01 },
+    { key: "glass", label: "Glass", min: 0, max: 0.12, step: 0.005 },
+    { key: "wallGlow", label: "Wall glow", min: 0, max: 3, step: 0.05 },
+    { key: "wallDistanceCm", label: "Wall distance (cm)", min: 0, max: 200, step: 1 },
+    { key: "mainDpr", label: "Large resolution", min: 0.5, max: 3, step: 0.05 },
+    { key: "cardDpr", label: "Card resolution", min: 0.5, max: 3, step: 0.1 },
+    { key: "cardMaxBackingSize", label: "Card pixel limit", min: 256, max: 1280, step: 32 },
+    { key: "mainFps", label: "Large FPS", min: 10, max: 60, step: 1 },
+    { key: "cardFps", label: "Card FPS", min: 10, max: 60, step: 1 },
+    { key: "cardBatch", label: "Cards per frame", min: 1, max: 8, step: 1 },
+]);
+const HELIO_DEFAULT_AUDIO = {
+    mode: 0,
+    sckPin: 40,
+    wsPin: 38,
+    sdPin: 39,
+    mclkPin: -1,
+    sampleRate: 2,
+    floor: 75,
+    gain: 1,
+    "send audio": false,
+    simulate: 0,
+    syncPort: 11988,
+};
+const HELIO_DEFAULT_AMBIENT = {
+    automatic: true,
+    darkLux: 0,
+    darkBrightness: 16,
+    brightLux: 500,
+    brightBrightness: 255,
+    hysteresisLux: 15,
+    bus: 1,
+    sda: 26,
+    scl: 11,
+    address: 0x23,
+};
+const HELIO_COLOR_CONTROL_SPECS = [
+    { label: "Scene color", names: ["red", "green", "blue"], fieldName: "helioPrimaryColor", includeWhite: true },
+    { label: "Accent", names: ["secondary red", "secondary green", "secondary blue"], fieldName: "helioSecondaryColor", includeWhite: false },
+];
+const HELIO_COLOR_CHANNEL_NAMES = new Set([
+    "red", "green", "blue", "white",
+    "secondary red", "secondary green", "secondary blue",
+]);
+let presetCache = [];
+let lastHelioPreviewPaint = 0;
+let helioPreviewAnimRunning = false;
+let helioPreviewBatch = [];
+let helioPreviewBatchIndex = 0;
+let helioPreviewViewportWatchBound = false;
+let helioPreviewViewportQueued = false;
+let lastHelioViewportPreviewPaint = 0;
+let helioPreviewResumeTimer = 0;
+let helioPlaylistRun = null;
+let helioPlaylistApplying = false;
+let helioModeApplying = false;
+let helioModeApplyingId = "";
+let helioModeQueued = null;
+let helioModeGeneration = 0;
+let helioAmbientRefreshTimer = null;
+let helioPresetCollection = null;
+let initialPresetIndex = null;
+let initialFirmwareModule = null;
+let earlyHelioHome = null;
+
+function acceptInitialPresetIndexResponse(response, lifecycle = null, firmwareModule = null) {
+    if (!response || initialPresetIndex || helioPresetCollection) return false;
+    initialPresetIndex = { initialIndexResponse: response, initialIndexLifecycle: lifecycle };
+    initialFirmwareModule = firmwareModule;
+    if (!state && !wsUnloading && isHelioFirmware(deviceFirmwareInfo()) && !isNebuliteFirmware())
+        renderEarlyHelioHome();
+    return true;
+}
+
+function takeInitialPresetIndexResponse() {
+    const initial = initialPresetIndex;
+    initialPresetIndex = null;
+    return initial || {};
+}
+
+export { acceptInitialPresetIndexResponse };
+const helioPresetModules = new Map();
+let helioSceneResyncExpected = false;
+let helioPreviewPausedUntil = 0;
+let helioLivePreviewRgb = null;
+let helioLivePreviewCount = 0;
+let helioLivePreviewSeenAt = 0;
+let helioLivePreviewLevel = 0;
+let helioLivePreviewDrawAt = 0;
+let helioFloatingPreviewEl = null;
+let helioFloatingTrace = null;
+let helioPreviewSettingsCache = null;
+let helioPreviewSettingsRefreshQueued = false;
+const helioPreviewClocks = new WeakMap();
+let installPickerPromise = null;
+let semverPromise = null;
+
+async function loadInstallPicker() {
+    if (!installPickerPromise) {
+        installPickerPromise = import("./helio-install-picker.js")
+            .then(mod => mod.installPicker);
+    }
+    return installPickerPromise;
+}
+
+async function loadSemver() {
+    if (!semverPromise) semverPromise = import("./helio-semver.js");
+    return semverPromise;
+}
+
+// The open tab per container, persisted so a reload doesn't dump you back on the first child.
+let selectedTabs = {};
+try { selectedTabs = JSON.parse(lsRead(LS_TABS, "{}")) || {}; } catch { selectedTabs = {}; }
+
+// Which modules have their "controls" disclosure open — VIEW-ONLY state the backend knows nothing about, so
+// it lives here (like selectedTabs), NOT in the module state. Persisting it means a full-state rebuild (or a
+// page reload) restores the open/closed expander instead of snapping it shut. Value/structure/picker state
+// all come from the backend, so those need no client persistence.
+let expandedSet = new Set();
+try { expandedSet = new Set(JSON.parse(lsRead(LS_EXPANDED, "[]")) || []); } catch { expandedSet = new Set(); }
+function saveExpanded() { localStorage.setItem(LS_EXPANDED, JSON.stringify([...expandedSet])); }
+
+// The height a user dragged each textarea to — again VIEW-ONLY state the backend doesn't own (like the tab
+// and expander state above), keyed by "<module>:<control>". Persisting it means a resized script/config box
+// keeps its size across a full-state rebuild and a page reload instead of snapping back to the 2-row default.
+let textareaSizes = {};
+try { textareaSizes = JSON.parse(lsRead(LS_TA_SIZE, "{}")) || {}; } catch { textareaSizes = {}; }
+function saveTextareaSize(key, heightPx) { textareaSizes[key] = heightPx; localStorage.setItem(LS_TA_SIZE, JSON.stringify(textareaSizes)); }
+
+// The width the user dragged the docked card column to — VIEW-ONLY state (like the tab/expander/textarea
+// state above). Applied as the --cards-width CSS custom property (the #main flex-basis reads it, clamped in
+// CSS so it can't crowd out the preview or vanish); restored on boot. Only meaningful in docked mode, where
+// the cards sit beside the preview; PiP/narrow mode makes them full-width and hides the handle.
+function applyCardsWidth(px) { document.documentElement.style.setProperty("--cards-width", px + "px"); }
+(function restoreCardsWidth() {
+    const w = parseInt(lsRead(LS_CARDS_W, ""), 10);
+    if (Number.isFinite(w) && w > 0) applyCardsWidth(w);
+})();
+
+// Wire the card-column resize handle (index.html #cards-resize). Dragging it left/right sets --cards-width
+// live and persists the final value. The handle sits at the LEFT edge of #main, so dragging left widens the
+// cards (they grow toward the preview); width = the pane's right edge minus the pointer x. Bounded by the
+// same clamp the CSS enforces, and coalesced through requestAnimationFrame so a drag doesn't thrash layout.
+function setupCardsResize() {
+    const handle = document.getElementById("cards-resize");
+    const main = document.getElementById("main");
+    if (!handle || !main) return;
+    const MIN = 280, MAX = 900;
+    let dragging = false, raf = 0, pendingW = 0;
+    const onMove = (clientX) => {
+        // #main's right edge is fixed (the workspace's right edge); width grows as the pointer moves left.
+        const right = main.getBoundingClientRect().right;
+        pendingW = Math.max(MIN, Math.min(MAX, Math.round(right - clientX)));
+        if (raf) return;
+        raf = requestAnimationFrame(() => { raf = 0; applyCardsWidth(pendingW); });
+    };
+    const stop = () => {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove("dragging");
+        document.body.classList.remove("cards-resizing");
+        if (pendingW > 0) localStorage.setItem(LS_CARDS_W, String(pendingW));
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", stop);
+        window.removeEventListener("pointercancel", stop);
+    };
+    const onPointerMove = (e) => { if (dragging) onMove(e.clientX); };
+    handle.addEventListener("pointerdown", (e) => {
+        // Only resize in docked mode — the handle is CSS-hidden otherwise, but guard anyway.
+        if (!document.querySelector(".workspace")?.classList.contains("mode-docked")) return;
+        e.preventDefault();
+        dragging = true;
+        pendingW = main.getBoundingClientRect().width;
+        handle.classList.add("dragging");
+        document.body.classList.add("cards-resizing");
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", stop);
+        window.addEventListener("pointercancel", stop);
+    });
+    // Double-click resets to the default width (a common resize-handle affordance).
+    handle.addEventListener("dblclick", () => { applyCardsWidth(480); localStorage.setItem(LS_CARDS_W, "480"); });
+}
+
+function lsRead(key, defaultVal) {
+    const v = localStorage.getItem(key);
+    return v !== null ? v : defaultVal;
+}
+
+let timingMode = lsRead(LS_TIMING, "fps");
+let theme      = lsRead(LS_THEME, "dark");
+
+function isSpecialView(name) {
+    return name === HELIO_VIEW || name === HELIO_PLAYLISTS_VIEW || name === PRESETS_VIEW;
+}
+
+function selectedUsesGenericModuleUi() {
+    return !!state && !!selectedModule && !isSpecialView(selectedModule);
+}
+
+function ensureTypeCatalog(opts = {}) {
+    if (availableTypes.length > 0) return Promise.resolve(availableTypes);
+    if (!availableTypesPromise) {
+        availableTypesPromise = fetch("/api/types")
+            .then(r => r.json())
+            .then(j => {
+                availableTypes = j.types || [];
+                return availableTypes;
+            })
+            .catch(() => {
+                availableTypesPromise = null;
+                return [];
+            });
+    }
+    if (opts.rerender && !availableTypesRerenderQueued) {
+        availableTypesRerenderQueued = true;
+        availableTypesPromise.then(() => {
+            availableTypesRerenderQueued = false;
+            if (selectedUsesGenericModuleUi()) {
+                renderNav();
+                renderCards();
+            }
+        });
+    }
+    return availableTypesPromise;
+}
+
+// ---------------------------------------------------------------------------
+// 2. WebSocket
+// ---------------------------------------------------------------------------
+
+function connectWs() {
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    // The old socket can close after it has been replaced, in which case its
+    // callback is intentionally ignored. Hide its last battery reading now.
+    helioBatteryConnected = false;
+    syncHelioBatteryStatus();
+    if (ws) {
+        try { ws.close(); } catch {}
+        ws = null;
+    }
+    const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`;
+    ws = new WebSocket(url);
+    const sock = ws;   // captured so a stale socket's late callback (after a reconnect swapped `ws`) is a no-op
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+        if (sock !== ws) return;   // a newer socket already took over — ignore this stale open
+        wsRetryMs = WS_RETRY_MIN_MS;                        // reset backoff
+        setWsDot(true);
+        ws.send(JSON.stringify({ subscribe: ["*"], detail: "values" }));
+        checkUiRuntimeVersion();
+        // Keepalive ping every 25s — Safari kills idle WebSockets otherwise
+        clearInterval(wsHeartbeat);
+        wsHeartbeat = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
+        }, 25000);
+    };
+
+    ws.onmessage = (e) => {
+        if (sock !== ws || wsPaused) return;   // ignore a stale socket's late frame
+        if (e.data instanceof ArrayBuffer) {
+            preview.onBinaryMessage(e.data);
+            return;
+        }
+        try {
+            const data = JSON.parse(e.data);
+            if (!data) return;
+            // Compatibility notices request a streamed REST snapshot from firmware that sends them.
+            if (data.resync === true) {
+                if (helioSceneResyncExpected) {
+                    helioSceneResyncExpected = false;
+                    return;
+                }
+                refetchState(2, API_FETCH_TIMEOUT_MS);
+                return;
+            }
+            // Patches carry only changed leaves each second. Apply one onto the existing state in
+            // place; a patch before the first state snapshot is ignored.
+            if (Array.isArray(data.patch)) {
+                if (state && Array.isArray(state.modules)) { applyStatePatch(data.patch); updateValues(); }
+                return;
+            }
+            // The same /ws also carries WLED-compatibility {state,info} frames for the native WLED app
+            // (see HttpServerModule's WLED shim). Those aren't our module-state shape — ignore anything
+            // without a `modules` array, or it would clobber `state` and blank the module view.
+            if (!Array.isArray(data.modules)) return;
+            // Compatibility with value-only snapshots that require a separate schema read.
+            if (data.compact) {
+                refetchState(2, API_FETCH_TIMEOUT_MS);
+                return;
+            }
+            state = data;
+            helioBatteryConnected = true;
+            syncHelioBatteryStatus();
+            helioMetadataGeneration++;
+            helioMetadataReady.clear();
+            helioValueChanges.clear();
+            renderStateSnapshot();
+            if (!previewWs) connectPreviewSocket();
+        } catch {
+            // ignore malformed messages
+        }
+    };
+
+    ws.onclose = () => {
+        if (sock !== ws) return;   // a stale socket closing after we already moved on — leave the live one alone
+        helioSceneResyncExpected = false;
+        stopPreviewSocket();
+        clearHelioLivePreview();
+        clearInterval(wsHeartbeat);
+        wsHeartbeat = null;
+        if (wsUnloading) return;   // the page is going away — don't reconnect (and don't touch the DOM)
+        setWsDot(false);
+        helioBatteryConnected = false;
+        syncHelioBatteryStatus();
+        // Exponential backoff with 5s ceiling; track the timer so pagehide can cancel a pending reconnect.
+        wsReconnectTimer = setTimeout(connectWs, wsRetryMs);
+        wsRetryMs = Math.min(wsRetryMs * 2, 5000);
+    };
+
+    ws.onerror = () => { /* onclose will fire next */ };
+}
+
+function setWsDot(connected) {
+    const dot = document.getElementById("ws-dot");
+    if (!dot) return;
+    dot.className = connected ? "ws-dot connected" : "ws-dot disconnected";
+}
+
+// Visibility / bfcache hooks
+document.addEventListener("visibilitychange", () => {
+    wsPaused = (document.visibilityState === "hidden");
+});
+window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+        // Safari restored from bfcache: re-establish state
+        wsPaused = false;
+        wsUnloading = false;   // a bfcache-restored page is live again — allow reconnects
+        if (!ws || ws.readyState !== WebSocket.OPEN) connectWs();
+    }
+});
+// Close the socket cleanly as the page unloads (a refresh, a navigation, or a bfcache suspend). Without
+// this the departing page's socket is torn down abnormally by the browser, which logs a "connection lost"
+// error to the console every refresh. Sending a normal (1000) close first, and marking wsUnloading so
+// onclose skips its reconnect, makes the handover silent. pagehide (not beforeunload) fires for bfcache too.
+window.addEventListener("pagehide", () => {
+    stopPreviewSocket();
+    wsUnloading = true;
+    clearInterval(wsHeartbeat);
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }   // no reconnect after unload
+    if (ws) { try { ws.close(1000); } catch { /* already closing */ } }
+});
+
+// ---------------------------------------------------------------------------
+// 3. REST helpers + module mutations
+// ---------------------------------------------------------------------------
+
+async function init() {
+    applyTheme(theme);
+    setupStatusBarButtons();
+    setupUpdateBadge();
+    setupCardsResize();
+    // Open the WebSocket first: its subscription receives the complete fragmented state.
+    connectWs();
+    preview.init();
+    preview.setupLayout();
+    preview.onFrame(updateHelioLivePreview);
+}
+
+function revealInitialUi() {
+    if (initialUiRevealed) return;
+    initialUiRevealed = true;
+    requestAnimationFrame(() => {
+        document.documentElement.classList.remove("ui-booting");
+    });
+}
+
+function renderStateSnapshot() {
+    if (!initialUiRevealed && isHelioFirmware(deviceFirmwareInfo())) selectedModule = HELIO_VIEW;
+    // Branding must exist before any generic shell or module view is allowed to paint. Keeping this
+    // sequence synchronous makes the first visible frame a complete product-specific UI.
+    applyBranding();
+    renderNav();
+    const early = earlyHelioHome;
+    earlyHelioHome = null;
+    if (early?.wrap.isConnected && selectedModule === HELIO_VIEW &&
+        isHelioFirmware(deviceFirmwareInfo()) && !isNebuliteFirmware()) {
+        hydrateHelioHome(early.wrap, early.presets);
+        deferHelioTraceUntilCards(early.mounted, early.presets);
+        helioPresetCollection?.refreshOpenControls();
+    } else renderCards();
+    initialFirmwareModule = null;
+    updateValues();
+    revealInitialUi();
+}
+
+// The message for a failed fetch Response: the server's own `{"error": …}` body (JSON, e.g.
+// "not enough space (N free)") when present, else a bare `HTTP <status>`. Every /api/* handler
+// returns errors as that JSON shape, so this is the one place the extraction lives.
+async function errorMessage(res) {
+    try {
+        const j = await res.json();
+        if (j && j.error) return j.error;
+    } catch (_) { /* non-JSON error body — fall through to the status code */ }
+    return `HTTP ${res.status}`;
+}
+
+async function apiFetch(url, options = {}, timeoutMs = API_FETCH_TIMEOUT_MS) {
+    if (typeof AbortController === "undefined") return fetch(url, options);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (e) {
+        if (e && e.name === "AbortError") throw new Error("request timed out");
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function checkUiRuntimeVersion() {
+    try {
+        const res = await apiFetch("/api/system", {}, 3500);
+        if (!res.ok) return;
+        const sys = await res.json();
+        const next = String(sys?.ui || "");
+        if (!next || next === UI_RUNTIME_VERSION) return;
+        const key = `mm_ui_reload_${next}`;
+        if (sessionStorage.getItem(key) === "1") return;
+        sessionStorage.setItem(key, "1");
+        location.reload();
+    } catch {
+        // State polling keeps the page usable when the diagnostics endpoint is unavailable.
+    }
+}
+
+async function sendControl(moduleName, controlName, value) {
+    const preset = helioPresetModules.get(moduleName);
+    if (preset) {
+        const schema = preset.editor.document.$uiSchema;
+        const descriptor = schema.controls.find(control => control.name === controlName);
+        if (!descriptor) return false;
+        const control = helioControl(preset.module, controlName);
+        const option = (control?.type === "palette" || control?.type === "select") && Number.isInteger(value)
+            ? control.options?.[value] : null;
+        const stored = typeof option === "string" ? option : option?.name ?? value;
+        preset.editor.edit(descriptor.path || schema.effectPath, controlName, stored);
+        updateLocalControlValue(moduleName, controlName, stored);
+        refreshHelioTrace();
+        return true;
+    }
+    // Optimistically update the local `state` to what we just sent — the standard controlled-input
+    // pattern. Without this, `state` keeps the OLD value until the device echoes the change back in a
+    // value patch (up to a tick1s later, or folded into a full resync for a control that triggers a
+    // rebuild like a driver's ledsPerPin). In that gap, an unrelated WS frame runs updateModuleControls,
+    // and once the dragTs edit-guard expires (>1s after the last keystroke — trivial if the user pauses)
+    // it writes the stale `state` value straight back into the field the user just changed (the value
+    // "reverses"; a manual refresh shows the correct value because it refetches). The client knows what
+    // it sent, so update `state` now; any later echo just confirms it.
+    let localValue = value;
+    if (state && Array.isArray(state.modules)) {
+        const mod = allModules().find(m => m.name === moduleName);
+        const ctrl = mod && Array.isArray(mod.controls) && mod.controls.find(c => c.name === controlName);
+        if (ctrl?.type === "password") localValue = String(value).length > 0;
+        if (ctrl) ctrl.value = localValue;
+        else if (mod && controlName === "enabled") mod.enabled = !!value;
+    }
+    // Toggling expert mode changes which controls RENDER (the `advanced` ones), not just a value — so
+    // re-render the cards. Structural change, same as an add/remove; the value write above already landed.
+    if (moduleName === "System" && controlName === "expertMode") renderCards();
+    const mod = findModule(moduleName);
+    if (helioPlaylistRun && !helioPlaylistApplying &&
+        (mod?.role === "effect" || /Effect$/.test(mod?.type || ""))) {
+        stopHelioPlaylist();
+        renderCards();
+    }
+    // Best-effort by design — failures are not retried here. Non-ok responses +
+    // network errors are logged to console so a user with devtools open can see
+    // what went wrong (e.g. a control value the device-side validator rejected).
+    try {
+        const res = await apiFetch("/api/control", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({module: moduleName, control: controlName, value: value})
+        });
+        if (!res.ok) {
+            console.warn(`[control] POST ${moduleName}.${controlName} failed (status=${res.status})`);
+            return false;
+        }
+        const updated = updateLocalControlValue(moduleName, controlName, localValue);
+        if (helioControlAffectsPreview(updated, controlName)) refreshHelioTrace();
+        return true;
+    } catch (e) {
+        console.warn(`[control] POST ${moduleName}.${controlName} failed (error=${e && e.message ? e.message : e})`);
+        return false;
+    }
+}
+
+function updateLocalControlValue(moduleName, controlName, value) {
+    const mod = helioPresetModules.get(moduleName)?.module || findModule(moduleName);
+    const ctrl = (mod?.controls || []).find(candidate => candidate.name === controlName);
+    if (ctrl) {
+        ctrl.value = value;
+        helioValueChanges.set(`${moduleName}/${controlName}`, ++helioValueRevision);
+    }
+    return mod;
+}
+
+function helioControlAffectsPreview(mod, controlName) {
+    if (!document.body.classList.contains("helio-product-mode")) return false;
+    if (mod?.role === "effect" || /Effect$/.test(mod?.type || "")) return true;
+    return mod?.type === "Drivers" && (controlName === "palette" || controlName === "brightness");
+}
+
+async function refreshStateData(retries = 1, timeoutMs = API_FETCH_TIMEOUT_MS) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const r = await apiFetch("/api/state", {}, timeoutMs);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const next = await r.json();
+            state = next.compact && state ? mergeCompactState(state, next) : next;
+            helioBatteryConnected = ws?.readyState === WebSocket.OPEN;
+            return true;
+        } catch (e) {
+            lastError = e;
+            if (attempt < retries) await waitMs(180 * (attempt + 1));
+        }
+    }
+    console.warn(`[state] refresh failed (${lastError && lastError.message ? lastError.message : lastError})`);
+    return false;
+}
+
+async function readModuleData(name) {
+    const response = await apiFetch("/api/modules/" + encodeURIComponent(name));
+    if (!response.ok) throw new Error(await errorMessage(response));
+    const fresh = await response.json();
+    if (fresh?.name !== name || !Array.isArray(fresh.controls)) throw new Error("Invalid module response");
+    return fresh;
+}
+
+function helioMetadataRoot(name) {
+    return (state?.modules || []).find(root => findModule(name, [root])) || null;
+}
+
+function helioNeedsModuleMetadata(name) {
+    const root = helioMetadataRoot(name);
+    return state?.detail === "values" && !!root && !helioMetadataReady.has(root.name);
+}
+
+function mergeHelioModuleMetadata(fresh, current, revision) {
+    if (!current || fresh.name !== current.name || fresh.type !== current.type) return fresh;
+    for (const control of fresh.controls || []) {
+        const previous = (current.controls || []).find(value => value.name === control.name && value.type === control.type);
+        if (previous && (helioValueChanges.get(`${fresh.name}/${control.name}`) || 0) > revision)
+            control.value = previous.value;
+    }
+    for (const field of ["enabled", "tickTimeUs", "dynamicBytes", "status", "severity"])
+        if ((helioValueChanges.get(`${fresh.name}/@${field}`) || 0) > revision) {
+            if (Object.hasOwn(current, field)) fresh[field] = current[field];
+            else delete fresh[field];
+        }
+    for (const child of fresh.children || [])
+        mergeHelioModuleMetadata(child, (current.children || []).find(value => value.name === child.name), revision);
+    return fresh;
+}
+
+async function ensureHelioModuleMetadata(name) {
+    const root = helioMetadataRoot(name);
+    if (!root || !helioNeedsModuleMetadata(root.name)) return true;
+    if (root.name === "Effects") return ensureHelioEffectsState();
+    if (helioMetadataReads.has(root.name)) return helioMetadataReads.get(root.name);
+    const loading = (async () => {
+        while (helioNeedsModuleMetadata(root.name)) {
+            const generation = helioMetadataGeneration, revision = helioValueRevision;
+            let fresh;
+            try { fresh = await readModuleData(root.name); }
+            catch (error) {
+                if (generation !== helioMetadataGeneration) continue;
+                throw error;
+            }
+            if (generation !== helioMetadataGeneration) continue;
+            const current = helioMetadataRoot(root.name);
+            if (!current || current.type !== fresh.type) return false;
+            mergeHelioModuleMetadata(fresh, current, revision);
+            if (!replaceModuleInState(root.name, fresh, state.modules)) return false;
+            helioMetadataReady.add(root.name);
+        }
+        return true;
+    })().catch(error => { console.warn("[controls] metadata readback failed", error); return false; });
+    helioMetadataReads.set(root.name, loading);
+    try { return await loading; }
+    finally { if (helioMetadataReads.get(root.name) === loading) helioMetadataReads.delete(root.name); }
+}
+
+function invalidateHelioEffects() {
+    helioEffectsGeneration++;
+    helioEffectsStale = true;
+    if (!state) return;
+    const effects = findModule("Effects");
+    if (effects && findModule(selectedModule, [effects])) {
+        selectedModule = effects.name;
+        renderCards();
+    }
+}
+
+async function ensureHelioEffectsState() {
+    if (!helioEffectsStale && !helioNeedsModuleMetadata("Effects")) return true;
+    if (helioEffectsReadback) return helioEffectsReadback;
+    const readback = (async () => {
+        try {
+            while (helioEffectsStale || helioNeedsModuleMetadata("Effects")) {
+                while (helioPresetCollection?.applying || helioPresetCollection?.pending) await waitMs(25);
+                const generation = helioEffectsGeneration;
+                const metadataGeneration = helioMetadataGeneration, revision = helioValueRevision;
+                let fresh;
+                try { fresh = await readModuleData("Effects"); }
+                catch (error) {
+                    if (generation !== helioEffectsGeneration || metadataGeneration !== helioMetadataGeneration) continue;
+                    throw error;
+                }
+                if (generation !== helioEffectsGeneration || metadataGeneration !== helioMetadataGeneration) continue;
+                mergeHelioModuleMetadata(fresh, findModule("Effects"), revision);
+                if (!replaceModuleInState("Effects", fresh, state?.modules)) return false;
+                helioMetadataReady.add("Effects");
+                helioEffectsStale = false;
+            }
+            return true;
+        } catch (error) {
+            console.warn("[effects] readback failed", error);
+            return false;
+        }
+    })();
+    helioEffectsReadback = readback;
+    try { return await readback; }
+    finally { if (helioEffectsReadback === readback) helioEffectsReadback = null; }
+}
+
+async function refetchState(retries = 1, timeoutMs = API_FETCH_TIMEOUT_MS) {
+    if (stateRefreshPromise) return stateRefreshPromise;
+    stateRefreshPromise = (async () => {
+        if (!await refreshStateData(retries, timeoutMs)) return false;
+        renderStateSnapshot();
+        return true;
+    })();
+    try {
+        return await stateRefreshPromise;
+    } finally {
+        stateRefreshPromise = null;
+    }
+}
+
+// --- Editable-list row ops (the client half of the editable List primitive) ---
+// Same best-effort fetch style as sendControl: non-ok + network errors are logged,
+// not retried. After a successful mutation the server persists + re-runs prepare and
+// pushes fresh state over the WS; we also refetchState() to match the module add/
+// delete/move ops (which don't wait for the WS push either). The row `id` is a number;
+// it goes into the URL path as-is. `c` (control name) may contain any chars, so encode.
+async function listAddRow(moduleName, ctrlName) {
+    try {
+        const res = await fetch(`/api/list/${encodeURIComponent(moduleName)}/${encodeURIComponent(ctrlName)}`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: "{}"
+        });
+        if (!res.ok) { console.warn(`[list] add ${moduleName}.${ctrlName} failed (status=${res.status})`); return null; }
+        const j = await res.json();
+        refetchState();
+        return j && typeof j.id === "number" ? j.id : null;
+    } catch (e) {
+        console.warn(`[list] add ${moduleName}.${ctrlName} failed (error=${e && e.message ? e.message : e})`);
+        return null;
+    }
+}
+
+async function listDeleteRow(moduleName, ctrlName, id) {
+    try {
+        const res = await fetch(`/api/list/${encodeURIComponent(moduleName)}/${encodeURIComponent(ctrlName)}/${id}`, {method: "DELETE"});
+        if (!res.ok) { console.warn(`[list] delete ${moduleName}.${ctrlName}#${id} failed (status=${res.status})`); return; }
+        refetchState();
+    } catch (e) {
+        console.warn(`[list] delete ${moduleName}.${ctrlName}#${id} failed (error=${e && e.message ? e.message : e})`);
+    }
+}
+
+async function listMoveRow(moduleName, ctrlName, id, to) {
+    try {
+        const res = await fetch(`/api/list/${encodeURIComponent(moduleName)}/${encodeURIComponent(ctrlName)}/${id}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({to: to})
+        });
+        if (!res.ok) { console.warn(`[list] move ${moduleName}.${ctrlName}#${id}→${to} failed (status=${res.status})`); return; }
+        refetchState();
+    } catch (e) {
+        console.warn(`[list] move ${moduleName}.${ctrlName}#${id} failed (error=${e && e.message ? e.message : e})`);
+    }
+}
+
+async function listSetField(moduleName, ctrlName, id, field, value) {
+    try {
+        const res = await fetch(`/api/list/${encodeURIComponent(moduleName)}/${encodeURIComponent(ctrlName)}/${id}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({field: field, value: value})
+        });
+        if (!res.ok) { console.warn(`[list] set ${moduleName}.${ctrlName}#${id}.${field} failed (status=${res.status})`); return false; }
+        // A FIELD edit does NOT refetch: the value is already applied server-side and the WS push
+        // reconciles it, so rebuilding here would collapse the open row and snap an in-progress edit
+        // back (a `channels` change also reshapes the row's fields — that structural update rides the
+        // WS push, guarded by the dragTs cooldown, not a rebuild-on-every-keystroke). Structural ops
+        // (add/delete/move) DO refetch — they change the row set. Return true so the caller can decide.
+        return true;
+    } catch (e) {
+        console.warn(`[list] set ${moduleName}.${ctrlName}#${id}.${field} failed (error=${e && e.message ? e.message : e})`);
+        return false;
+    }
+}
+
+async function addModule(type, parentName, opts = {}) {
+    if (!type) return false;
+    const body = {type: type};
+    if (parentName) body.parent_id = parentName;
+    let name = null;
+    try {
+        const res = await apiFetch("/api/modules", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+            console.warn(`[module] add ${type} failed (status=${res.status})`);
+            return false;
+        }
+        name = (await res.json()).name;   // the created module's final name (post-disambiguation)
+    } catch (e) {
+        console.warn(`[module] add ${type} failed (error=${e && e.message ? e.message : e})`);
+        return false;
+    }
+    // Select the new module's tab BEFORE the re-render so renderCards shows it active (the tab strip
+    // reads selectedTabs[parent]); then scroll it into view and focus its first control so a keyboard
+    // user lands on it. Without this the view stays on the previously-active tab and the new module
+    // is added out of sight.
+    if (name && parentName) {
+        selectedTabs[parentName] = name;
+        localStorage.setItem(LS_TABS, JSON.stringify(selectedTabs));   // persist like the tab-click path
+    }
+    if (opts.refresh !== false) {
+        await refetchState(opts.retries ?? 2, opts.timeoutMs ?? API_FETCH_TIMEOUT_MS);
+    }
+    if (name) focusModule(name);
+    return true;
+}
+
+// Bring a module's card into view and focus its first control (added via the "+" flow).
+function focusModule(name) {
+    const card = document.querySelector(`.card[data-module="${cssEscape(name)}"]`);
+    if (!card) return;
+    // A child card can wrap its controls in a collapsed <details> (.card-controls-collapse) — open it
+    // FIRST so the card is at its expanded height, THEN scroll: scrolling a still-collapsed card lands
+    // on its pre-expansion geometry and the focused control ends up mispositioned.
+    const collapse = card.querySelector("details.card-controls-collapse");
+    if (collapse) collapse.open = true;
+    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    // Focus the first real control input, NOT the tab strip / header buttons — and NOT the status row,
+    // which is a `.control-row` with only spans (a freshly added driver leads with a status, so picking
+    // the first `.control-row` would find no input and focus nothing). Query for the input directly
+    // inside any control row so the status row is skipped.
+    const first = card.querySelector(".control-row input, .control-row select, .control-row textarea, .control-row button");
+    if (first) first.focus({ preventScroll: true });
+}
+
+async function deleteModule(name, opts = {}) {
+    try {
+        const res = await apiFetch("/api/modules/" + encodeURIComponent(name), {method: "DELETE"});
+        if (!res.ok) return false;
+    } catch {
+        return false;
+    }
+    if (opts.refresh !== false) await refetchState();
+    return true;
+}
+
+// move to absolute index (0..siblings.length-1). Called from drag-and-drop.
+async function moveModuleTo(name, toIndex) {
+    await apiFetch("/api/modules/" + encodeURIComponent(name) + "/move", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({to: toIndex})
+    });
+    refetchState();
+}
+
+// swap a module for another type at the same position. The replacement starts
+// with its own default control values — a clean swap, not a value carry-over.
+async function replaceModule(name, newType, opts = {}) {
+    if (!name || !newType) return false;
+    let fresh = null;
+    try {
+        const res = await apiFetch("/api/modules/" + encodeURIComponent(name) + "/replace", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({type: newType})
+        });
+        if (!res.ok) {
+            console.warn(`[module] replace ${name} -> ${newType} failed (status=${res.status})`);
+            return false;
+        }
+        const payload = await res.json();
+        fresh = payload?.module || null;
+        if (fresh && state?.modules) replaceModuleInState(name, fresh, state.modules);
+    } catch (e) {
+        console.warn(`[module] replace ${name} -> ${newType} failed (error=${e && e.message ? e.message : e})`);
+        return false;
+    }
+    if (opts.refresh !== false) {
+        await refetchState(opts.retries ?? 2, opts.timeoutMs ?? API_FETCH_TIMEOUT_MS);
+    }
+    // Older firmware only returns {ok:true}; preserve truthy success so the generic module picker
+    // keeps working while callers that know the resource response can use the fresh module object.
+    return fresh || true;
+}
+
+async function rebootDevice() {
+    try {
+        await fetch("/api/reboot", {method: "POST"});
+    } catch { /* connection may drop mid-response — that's the device restarting */ }
+    // WS will reconnect on its own via onclose backoff
+}
+
+// ---------------------------------------------------------------------------
+// 4. Render pipeline
+// ---------------------------------------------------------------------------
+
+function renderNav() {
+    const nav = document.getElementById("nav");
+    if (!nav || !state) return;
+    nav.innerHTML = "";
+
+    // One entry per root module. Clicking selects that root — only the selected
+    // root's card subtree is rendered (one root visible at a time).
+    const list = document.createElement("div");
+    list.className = "nav-list";
+    const helioDevice = isHelioFirmware(deviceFirmwareInfo());
+    if (helioDevice) {
+        const home = document.createElement("button");
+        home.type = "button";
+        home.className = "nav-item nav-item--helio";
+        home.textContent = productLabel();
+        home.dataset.module = HELIO_VIEW;
+        if (selectedModule === HELIO_VIEW) home.classList.add("active");
+        home.addEventListener("click", () => selectModule(HELIO_VIEW));
+        list.appendChild(home);
+
+        const playlists = document.createElement("button");
+        playlists.type = "button";
+        playlists.className = "nav-item nav-item--helio-playlists";
+        playlists.textContent = "Playlists";
+        playlists.dataset.module = HELIO_PLAYLISTS_VIEW;
+        if (selectedModule === HELIO_PLAYLISTS_VIEW) playlists.classList.add("active");
+        playlists.addEventListener("click", () => selectModule(HELIO_PLAYLISTS_VIEW));
+        list.appendChild(playlists);
+    }
+    for (const mod of state.modules) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "nav-item";
+        item.textContent = mod.name;
+        item.dataset.module = mod.name;
+        if (mod.name === selectedModule) item.classList.add("active");
+        item.addEventListener("click", () => selectModule(mod.name));
+        list.appendChild(item);
+    }
+    const presets = document.createElement("button");
+    presets.type = "button";
+    presets.className = "nav-item nav-item--presets";
+    presets.textContent = "Presets";
+    presets.dataset.module = PRESETS_VIEW;
+    if (selectedModule === PRESETS_VIEW) presets.classList.add("active");
+    presets.addEventListener("click", () => selectModule(PRESETS_VIEW));
+    list.appendChild(presets);
+
+    nav.appendChild(list);
+    nav.appendChild(buildNavFooter());
+}
+
+// Diagnostics cross a trust boundary when they leave the controller. Reduce the live module tree to
+// aggregate health and copy only explicit scalar system metrics; names, controls, status text, SSIDs,
+// addressing, calibration, and topology stay on the device.
+function buildDiagnosticBundle(stateJson, systemJson) {
+    const number = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
+    const summary = {
+        moduleCount: 0,
+        enabledModuleCount: 0,
+        warningCount: 0,
+        errorCount: 0,
+        dynamicBytes: 0,
+    };
+    const visit = (modules) => {
+        if (!Array.isArray(modules)) return;
+        for (const module of modules) {
+            if (!module || typeof module !== "object") continue;
+            summary.moduleCount++;
+            if (module.enabled === true) summary.enabledModuleCount++;
+            if (module.severity === "warning") summary.warningCount++;
+            if (module.severity === "error") summary.errorCount++;
+            summary.dynamicBytes += number(module.dynamicBytes);
+            visit(module.children);
+        }
+    };
+    visit(stateJson?.modules);
+    return {
+        capturedAt: new Date().toISOString(),
+        health: {
+            ui: typeof systemJson?.ui === "string" ? systemJson.ui : "",
+            fps: number(systemJson?.fps),
+            tickTimeUs: number(systemJson?.tickTimeUs),
+            freeHeap: number(systemJson?.freeHeap),
+            freeInternal: number(systemJson?.freeInternal),
+            maxBlock: number(systemJson?.maxBlock),
+            uptime: number(systemJson?.uptime),
+        },
+        summary,
+    };
+}
+
+// Footer pinned to the bottom of the side nav: copyright + social links.
+function buildNavFooter() {
+    const footer = document.createElement("footer");
+    footer.className = "nav-footer";
+
+    const links = document.createElement("div");
+    links.className = "nav-social";
+    const SOCIAL = [
+        ["GitHub",  "https://github.com/MoonModules/projectMM",
+         "M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.54-3.88-1.54-.53-1.34-1.3-1.7-1.3-1.7-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.76.41-1.27.74-1.56-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.69 5.39-5.25 5.68.42.36.8 1.08.8 2.18v3.23c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"],
+        ["Discord", "https://discord.gg/TC8NSUSCdV",
+         "M20.32 4.37A19.8 19.8 0 0 0 15.45 2.9a13.6 13.6 0 0 0-.62 1.27 18.3 18.3 0 0 0-5.67 0A13 13 0 0 0 8.54 2.9 19.7 19.7 0 0 0 3.67 4.37C.57 8.96-.27 13.44.15 17.85a19.9 19.9 0 0 0 6 3.03c.49-.66.92-1.36 1.29-2.1-.71-.27-1.39-.6-2.03-.99.17-.12.34-.25.5-.38a14.2 14.2 0 0 0 12.18 0c.16.13.33.26.5.38-.64.39-1.32.72-2.03.99.37.74.8 1.44 1.29 2.1a19.8 19.8 0 0 0 6-3.03c.5-5.1-.85-9.55-3.58-13.48ZM8.02 15.13c-1.18 0-2.15-1.08-2.15-2.41 0-1.33.95-2.42 2.15-2.42 1.2 0 2.17 1.1 2.15 2.42 0 1.33-.95 2.41-2.15 2.41Zm7.96 0c-1.18 0-2.15-1.08-2.15-2.41 0-1.33.95-2.42 2.15-2.42 1.2 0 2.17 1.1 2.15 2.42 0 1.33-.95 2.41-2.15 2.41Z"],
+        ["Reddit",  "https://reddit.com/r/moonmodules",
+         "M22 12c0-1.1-.9-2-2-2-.55 0-1.04.22-1.4.58a9.8 9.8 0 0 0-5.1-1.55l.87-4.1 2.85.6a1.5 1.5 0 1 0 .15-1l-3.18-.67a.5.5 0 0 0-.59.38l-.97 4.57a9.8 9.8 0 0 0-5.16 1.55A2 2 0 1 0 4 13.66a3.9 3.9 0 0 0-.05.6c0 3.3 3.86 5.98 8.62 5.98 4.76 0 8.62-2.68 8.62-5.98 0-.2-.02-.4-.05-.6.53-.36.86-.96.86-1.66ZM8 13.5a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0Zm8.32 4.07c-1.04 1.04-3.02 1.12-3.6 1.12-.58 0-2.57-.08-3.6-1.12a.4.4 0 0 1 .56-.56c.65.65 2.05.88 3.04.88.99 0 2.39-.23 3.04-.88a.4.4 0 0 1 .56.56ZM16 15a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Z"],
+        ["YouTube", "https://www.youtube.com/@MoonModulesLighting",
+         "M23.5 6.5a3 3 0 0 0-2.12-2.12C19.5 3.87 12 3.87 12 3.87s-7.5 0-9.38.51A3 3 0 0 0 .5 6.5C0 8.38 0 12 0 12s0 3.62.5 5.5a3 3 0 0 0 2.12 2.12c1.88.51 9.38.51 9.38.51s7.5 0 9.38-.51a3 3 0 0 0 2.12-2.12C24 15.62 24 12 24 12s0-3.62-.5-5.5ZM9.6 15.6V8.4l6.2 3.6-6.2 3.6Z"],
+    ];
+    for (const [name, url, path] of SOCIAL) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.title = name;
+        a.setAttribute("aria-label", name);
+        a.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="${path}"/></svg>`;
+        links.appendChild(a);
+    }
+    footer.appendChild(links);
+
+    // Diagnostic bundle download. Fetches /api/state + /api/system from
+    // the *same* origin we're on (the device itself) — sidesteps Chrome's
+    // mixed-content blocker that prevents the install page (HTTPS Pages)
+    // from doing the same fetch against the device (HTTP LAN). Output is
+    // an allowlisted JSON blob the user can attach to a bug report.
+    const diag = document.createElement("a");
+    diag.href = "#";
+    diag.className = "nav-diag-link";
+    diag.textContent = "Download diagnostics";
+    diag.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        try {
+            const stateResp = await apiFetch("/api/state");
+            const stateJson = await stateResp.json();
+            const systemResp = await apiFetch("/api/system");
+            const systemJson = await systemResp.json();
+            const bundle = buildDiagnosticBundle(stateJson, systemJson);
+            const blob = new Blob([JSON.stringify(bundle, null, 2)],
+                                  { type: "application/json" });
+            const fname = `projectMM-diag-${Date.now()}.json`;
+            const a = document.createElement("a");
+            const blobUrl = URL.createObjectURL(blob);
+            a.href = blobUrl;
+            a.download = fname;
+            a.click();
+            // Defer the revoke so the browser has time to start the download.
+            // Revoking immediately after click() is technically race-safe on
+            // recent Chrome / Firefox (the click navigation is synchronous)
+            // but Safari has been observed dropping downloads under a fast
+            // revoke. A few seconds is the canonical workaround.
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+        } catch (e) {
+            alert(`Diagnostic capture failed: ${e && e.message ? e.message : e}`);
+        }
+    });
+    footer.appendChild(diag);
+
+    const copy = document.createElement("div");
+    copy.className = "nav-copyright";
+    copy.textContent = `© ${new Date().getFullYear()} MoonModules`;
+    footer.appendChild(copy);
+
+    return footer;
+}
+
+function selectModule(name) {
+    // Surface demo sweep (REMOVABLE): leaving a surface re-arms it, so re-opening demos again while
+    // a re-render of the SAME surface (a pad click) does not.
+    if (name !== selectedModule) surfaceDemoShownFor = null;
+    selectedModule = name;
+    localStorage.setItem(LS_SELECTED, name);
+    document.querySelectorAll(".nav-item").forEach((el) => {
+        el.classList.toggle("active", el.dataset.module === name);
+    });
+    renderCards();
+    closeNavDrawer();
+}
+
+function findModule(name, modules) {
+    if (!modules) modules = state?.modules || [];
+    for (const m of modules) {
+        if (m.name === name) return m;
+        if (m.children) {
+            const found = findModule(name, m.children);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+// Replace one resource in the local module tree after the server returns it from a structural
+// mutation. The response contains the complete subtree and control metadata, so a full /api/state
+// round-trip would only repeat data the browser already has.
+function replaceModuleInState(name, fresh, modules) {
+    if (!name || !fresh || !Array.isArray(modules)) return false;
+    for (let i = 0; i < modules.length; i++) {
+        const mod = modules[i];
+        if (mod?.name === name) {
+            modules[i] = fresh;
+            return true;
+        }
+        if (replaceModuleInState(name, fresh, mod?.children)) return true;
+    }
+    return false;
+}
+
+// Global "expert mode": the System module's expertMode control. Controls tagged `advanced` (dev/tuning
+// readouts + knobs) render only when this is on. Read live from state so a toggle takes effect on the
+// next render with no reload; default off if System or the control isn't present yet.
+function isExpertMode() {
+    const sys = state ? findModule("System") : null;
+    const c = sys && sys.controls && sys.controls.find(c => c.name === "expertMode");
+    return !!(c && c.value);
+}
+
+function renderCards() {
+    const main = document.getElementById("main");
+    if (!main || !state) return;
+    main.innerHTML = "";
+    main.setAttribute("aria-busy", "false");
+    const helioDevice = isHelioFirmware(deviceFirmwareInfo());
+    setHelioDeviceMode(helioDevice);
+    const helioHome = selectedModule === HELIO_VIEW && helioDevice;
+    setHelioProductMode(helioHome);
+    if (!helioHome) {
+        helioTrace?.stop();
+        closeHelioFloatingPreview();
+    }
+
+    if (helioHome) {
+        renderHelioHome(main);
+        return;
+    }
+
+    if (selectedModule === PRESETS_VIEW) {
+        renderPresetsView(main);
+        return;
+    }
+
+    if (selectedModule === HELIO_PLAYLISTS_VIEW && helioDevice) {
+        renderHelioPlaylistsView(main);
+        return;
+    }
+
+    const effects = findModule("Effects");
+    if (helioEffectsStale && effects && findModule(selectedModule, [effects])) {
+        const view = selectedModule;
+        const message = document.createElement("p");
+        message.className = "helio-scene-loading";
+        message.setAttribute("role", "status");
+        message.textContent = "Loading live scene controls…";
+        main.setAttribute("aria-busy", "true");
+        main.appendChild(message);
+        ensureHelioEffectsState().then(ready => {
+            if (selectedModule !== view || !message.isConnected) return;
+            main.setAttribute("aria-busy", "false");
+            if (ready) { renderNav(); renderCards(); return; }
+            message.textContent = "Live scene controls could not be loaded.";
+            const retry = document.createElement("button");
+            retry.className = "helio-secondary-action";
+            retry.textContent = "Retry";
+            retry.addEventListener("click", renderCards);
+            main.appendChild(retry);
+        });
+        return;
+    }
+
+    if (state.detail === "values" && helioNeedsModuleMetadata(selectedModule)) {
+        const view = selectedModule;
+        const message = document.createElement("p");
+        message.className = "helio-scene-loading";
+        message.setAttribute("role", "status");
+        message.textContent = "Loading live controls…";
+        main.setAttribute("aria-busy", "true");
+        main.appendChild(message);
+        ensureHelioModuleMetadata(view).then(ready => {
+            if (selectedModule !== view || !message.isConnected) return;
+            main.setAttribute("aria-busy", "false");
+            if (ready) { renderNav(); renderCards(); return; }
+            message.textContent = "Live controls could not be loaded.";
+            const retry = document.createElement("button");
+            retry.textContent = "Retry";
+            retry.addEventListener("click", renderCards);
+            main.appendChild(retry);
+        });
+        return;
+    }
+
+    // One root visible at a time: render only the selected root's subtree.
+    // Falls back to the first root if the selection is missing or stale.
+    let root = selectedModule ? findModule(selectedModule) : null;
+    if (!root && state.modules.length > 0) {
+        root = state.modules[0];
+        selectedModule = root.name;
+    }
+    if (root && root.type === "SystemModule" && helioDevice && !helioSetupCollapsed()) {
+        renderHelioSetup(main);
+    }
+    if (root) {
+        renderModuleTree(root, main, 0);
+        ensureTypeCatalog({rerender: true});
+    }
+    // Surface demo sweep (REMOVABLE): delete this line and the block above it to remove the feature.
+    // `main` is the root of the rendered subtree, so it holds the encoder strips, the pad grid and
+    // the fader strips wherever they sit in the card nesting.
+    if (root && main.querySelector(".list-pads-fixed")) startSurfaceDemo(main, root.name);
+}
+
+// ============================================================================
+// Surface demo sweep — REMOVABLE BLOCK
+//
+// A hardware control desk sweeps its motorised faders and rings when it powers up, both to show it
+// is alive and to show what it has. This does the same for three seconds after the surface appears.
+//
+// It is deliberately isolated so it can be deleted whole: this block, plus the single
+// `startSurfaceDemo()` call at the end of renderCards(). It is a VIEW-ONLY animation — it never
+// calls sendControl, so it cannot write a swept value to the device, and the first WebSocket patch
+// after it finishes restores whatever the device actually holds.
+// ============================================================================
+const SURFACE_DEMO_MS = 1000;
+let surfaceDemoUntil = 0;
+/// The module the sweep last ran for. renderCards() fires on every state push and every mutation (a
+/// pad click refetches and re-renders), so "the surface was rendered" is NOT "the surface was
+/// opened" — without this the sweep replayed on every button press.
+let surfaceDemoShownFor = null;
+
+function startSurfaceDemo(root, moduleName) {
+    // The sweep is pure decoration, so it is the first thing to drop for someone who asked for less
+    // motion. Checked before the once-per-surface flag, so the flag is not burned by a skipped run.
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (surfaceDemoShownFor === moduleName) return;   // already demoed this surface
+    // Every bank is queried from the SAME root. The encoder and fader strips sit on the top-level
+    // card while the pad grid is inside a nested one, so scoping to the card that contains the pads
+    // found the pads and nothing else.
+    const q = (sel) => [...root.querySelectorAll(sel)];
+    // Every bank is re-queried each frame, for the same reason the pads are: a state push mid-sweep
+    // re-renders the card and replaces these nodes. A list captured once would keep writing values to
+    // detached elements while the visible controls sat frozen — which is what stopped the knobs and
+    // faders a few hundred ms into a refresh, while the (live-queried) pads ran the full period.
+    const liveInputs = () => [
+        ...q(".control-encoder .encoder-input"),
+        ...q(".control-fader .fader-input"),
+    ];
+    const knobs  = q(".control-encoder .encoder-input");
+    const faders = q(".control-fader .fader-input");
+    // Pads are looked up LIVE each frame rather than captured: a state push mid-sweep re-renders the
+    // card and replaces these nodes, and a captured list would spend the rest of the run toggling
+    // classes on detached elements — which is why the chase stopped partway through.
+    const livePads = () => q(".list-pad:not(.list-pad-empty)");
+    if (!knobs.length && !faders.length && !livePads().length) return;
+    surfaceDemoShownFor = moduleName;
+
+    // No snapshot: the demo starts on the first render, BEFORE the caller assigns input.value, so a
+    // snapshot here captures the browser's default (50) and restoring it would overwrite every real
+    // value. The device state is the truth, so the sweep ends by replaying it.
+    const start = performance.now();
+    surfaceDemoUntil = start + SURFACE_DEMO_MS;
+
+    const step = (now) => {
+        const t = (now - start) / SURFACE_DEMO_MS;
+        if (t >= 1) {
+            // Put the real values back by re-applying device state, which also repaints the knobs
+            // and readouts through the normal patch path.
+            surfaceDemoUntil = 0;
+            updateValues();
+            livePads().forEach(p => p.classList.remove("list-pad-demo"));
+            return;
+        }
+        // A travelling wave rather than every control moving together: the phase offset per column is
+        // what makes it read as a sweep across the desk.
+        liveInputs().forEach((el, i) => {
+            const lo = Number(el.min) || 0, hi = Number(el.max) || 255;
+            const phase = t * 1.5 * Math.PI * 2 - i * 0.5;
+            el.value = Math.round(lo + (hi - lo) * (0.5 + 0.45 * Math.sin(phase)));
+            redrawRangeDecorations(el);
+        });
+        // The pads chase in sequence, one lit at a time, so the grid shows its extent. Paced by TIME
+        // rather than by pad count, so the chase runs at the same speed and for the full duration
+        // whatever number of presets exist.
+        const pads = livePads();
+        if (pads.length) {
+            const lit = Math.floor(t * SURFACE_DEMO_MS / 120) % pads.length;
+            pads.forEach((p, i) => p.classList.toggle("list-pad-demo", i === lit));
+        }
+        requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+}
+
+/// True while the sweep is running: updateValues() skips patching the swept inputs, so a WebSocket
+/// push mid-demo does not fight the animation for the same DOM node.
+function surfaceDemoRunning() { return surfaceDemoUntil > performance.now(); }
+// ======================= end REMOVABLE BLOCK ================================
+function setHelioDeviceMode(on) {
+    document.body.classList.toggle("helio-device-mode", !!on);
+    document.querySelector(".workspace")?.classList.toggle("helio-device", !!on);
+    preview.refreshLayout?.();
+}
+
+function setHelioProductMode(on) {
+    document.body.classList.toggle("helio-product-mode", !!on);
+    document.querySelector(".workspace")?.classList.toggle("helio-product", !!on);
+}
+
+function helioControl(mod, name) {
+    return (mod?.controls || []).find(c => c.name === name) || null;
+}
+
+function helioOptionText(opt) {
+    if (opt && typeof opt === "object") return opt.name || String(opt.value ?? "");
+    return String(opt ?? "");
+}
+
+function helioDrivers() {
+    return firstModuleByType("Drivers");
+}
+
+function helioRmtDriver() {
+    return firstModuleByType("RmtLedDriver");
+}
+
+function helioSystem() {
+    return firstModuleByType("SystemModule") || findModule("System");
+}
+
+function helioAudio() {
+    return firstModuleByType("AudioService");
+}
+
+function helioAmbientLight() {
+    return firstModuleByType("Bh1750Service");
+}
+
+function helioAmbientBrightnessOverride() {
+    const ambient = helioAmbientLight();
+    const lux = String(controlValue(ambient, "lux", "--"));
+    const targetText = String(controlValue(ambient, "target", "manual"));
+    const target = Number.parseInt(targetText, 10);
+    const active = !!ambient && ambient.enabled !== false &&
+        !!controlValue(ambient, "automatic", false) && lux !== "--" &&
+        targetText !== "manual" && Number.isFinite(target);
+    return { active, lux, target };
+}
+
+function helioBrightnessOverrideText(override) {
+    if (!override.active) return "";
+    return `Automatic brightness is active (${override.lux} → ${override.target}).`;
+}
+
+function openHelioAutomaticBrightnessSettings() {
+    const setup = document.querySelector(".helio-setup-menu");
+    if (setup) setup.open = true;
+    const section = document.getElementById("helio-automatic-brightness");
+    section?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function populateHelioBrightnessOverrideNote(note, override) {
+    note.hidden = !override.active;
+    if (!override.active) return;
+    note.replaceChildren(document.createTextNode(`${helioBrightnessOverrideText(override)} `));
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "helio-inline-link";
+    link.textContent = "Automatic brightness settings";
+    link.addEventListener("click", openHelioAutomaticBrightnessSettings);
+    note.appendChild(link);
+}
+
+function updateHelioBrightnessOverrideNote(override) {
+    document.querySelectorAll('[data-helio-field="brightnessOverride"]').forEach(note => {
+        populateHelioBrightnessOverrideNote(note, override);
+    });
+}
+
+function helioBrightnessLabel(drivers = helioDrivers()) {
+    const value = Math.max(0, Math.min(255, Number(controlValue(drivers, "brightness", 0)) || 0));
+    return `${Math.round(value * 100 / 255)}%`;
+}
+
+function helioConnectionLabel() {
+    const network = firstModuleByType("NetworkModule");
+    const text = `${network?.status || ""} ${controlValue(network, "mode", "")}`;
+    return /\b(WiFi|Ethernet|STA|AP)\b/i.test(text) ? "Online" : "Setup";
+}
+
+function helioEffects() {
+    return allModules().filter(m => m.role === "effect" || /Effect$/.test(m.type || ""));
+}
+
+function helioActiveEffect() {
+    if (helioEffectsStale) return null;
+    return helioPreferredActiveEffect(helioEffects());
+}
+
+function helioSceneReplacementSlot(targetType = "") {
+    const effects = helioEffects();
+    const active = helioActiveEffect();
+    if (active && active.type !== targetType &&
+        (active.type === "PixelblazeCompatEffect" || isHelioPortEffectType(active.type) || isHelioFactoryScene(active))) {
+        return active;
+    }
+    return effects.find(effect =>
+        effect?.type === "PixelblazeCompatEffect" || isHelioPortEffectType(effect?.type)
+    ) || effects.find(effect =>
+        isHelioFactoryScene(effect) && effect?.type !== targetType
+    ) || null;
+}
+
+function helioModeForEffect(effect) {
+    return HELIO_MODES.find(mode => mode.type === effect?.type) || null;
+}
+
+function isHelioFactoryScene(effect) {
+    return !!helioFactorySceneForType(effect?.type);
+}
+
+function paletteColorsFromOption(opt) {
+    const colors = Array.isArray(opt?.colors) ? opt.colors : String(opt?.colors || "").split(/\s+/);
+    return colors
+        .filter(Boolean)
+        .map(h => String(h).replace(/^#/, ""))
+        .filter(h => /^[0-9a-f]{6}$/i.test(h))
+        .map(h => [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]);
+}
+
+function paletteFromState() {
+    const drivers = helioDrivers();
+    const ctrl = helioControl(drivers, "palette");
+    const opt = (ctrl?.options || [])[helioChoiceIndex(ctrl)];
+    const cols = paletteColorsFromOption(opt);
+    return cols.length ? cols : [[12, 18, 30], [255, 178, 74], [99, 102, 241], [255, 255, 255]];
+}
+
+function paletteByIndex(index, fallback = null) {
+    const drivers = helioDrivers();
+    const ctrl = helioControl(drivers, "palette");
+    const opt = (ctrl?.options || [])[normalizePaletteIndex(index, ctrl)];
+    const cols = paletteColorsFromOption(opt);
+    return cols.length ? cols : (fallback || paletteFromState());
+}
+
+function normalizePaletteIndex(index, ctrl = helioControl(helioDrivers(), "palette")) {
+    const options = ctrl?.options || [];
+    const count = options.length;
+    const value = Math.trunc(Number(index) || 0);
+    if (count <= 0) return Math.max(0, value);
+    return Math.max(0, Math.min(count - 1, value));
+}
+
+function helioControlValueForSend(ctrl, value) {
+    return ctrl?.type === "palette" ? normalizePaletteIndex(value, ctrl) : value;
+}
+
+function helioEffectWithControlValues(effect, values = {}) {
+    if (!effect) return null;
+    return {
+        ...effect,
+        enabled: true,
+        controls: (effect.controls || []).map(ctrl => (
+            Object.prototype.hasOwnProperty.call(values, ctrl.name)
+                ? { ...ctrl, value: helioControlValueForSend(ctrl, values[ctrl.name]) }
+                : ctrl
+        )),
+    };
+}
+
+function paletteCss(opt) {
+    const cols = paletteColorsFromOption(opt);
+    if (!cols.length) return "linear-gradient(135deg, #d97706, #6366f1)";
+    const stops = cols.slice(0, 8).map((c, i, arr) => {
+        const pct = arr.length <= 1 ? 0 : Math.round(i * 100 / (arr.length - 1));
+        return `rgb(${c[0]},${c[1]},${c[2]}) ${pct}%`;
+    });
+    return `linear-gradient(90deg, ${stops.join(", ")})`;
+}
+
+function helioSelectRow(mod, controlName, labelText, fieldName) {
+    const ctrl = helioControl(mod, controlName);
+    if (!mod || !ctrl) return null;
+    const row = document.createElement("label");
+    row.className = "helio-select-row";
+    const text = document.createElement("span");
+    text.textContent = labelText;
+    const select = document.createElement("select");
+    select.dataset.helioField = fieldName;
+    if (!Array.isArray(ctrl.options) || !ctrl.options.length) {
+        select.disabled = true;
+        const option = document.createElement("option");
+        option.textContent = typeof ctrl.value === "string" ? ctrl.value : "Loading options…";
+        select.appendChild(option);
+    }
+    (ctrl.options || []).forEach((opt, i) => {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = helioOptionText(opt) || String(i);
+        select.appendChild(option);
+    });
+    if (ctrl.options?.length) select.value = String(helioChoiceIndex(ctrl));
+    select.addEventListener("change", () => {
+        sendControl(mod.name, controlName, parseInt(select.value, 10));
+        if (!helioPresetModules.has(mod.name)) setTimeout(refetchState, 250);
+    });
+    row.append(text, select);
+    return row;
+}
+
+function helioToggleRow(mod, controlName, labelText, fieldName) {
+    const ctrl = helioControl(mod, controlName);
+    if (!mod || !ctrl) return null;
+    const row = document.createElement("label");
+    row.className = "helio-toggle-row";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!ctrl.value;
+    input.dataset.helioField = fieldName;
+    input.addEventListener("change", () => {
+        sendControl(mod.name, controlName, input.checked);
+        if (!helioPresetModules.has(mod.name)) setTimeout(refetchState, 250);
+    });
+    const text = document.createElement("span");
+    text.textContent = helioSceneControlMetadata(helioControlSceneForEffect(mod), controlName).label || labelText;
+    row.append(input, text);
+    appendHelioControlHelp(row, mod, controlName);
+    return row;
+}
+
+function helioFieldName(controlName) {
+    return "helioEffect_" + String(controlName).replace(/[^a-z0-9]+/gi, "_");
+}
+
+function helioPrettyLabel(controlName) {
+    const labels = {
+        "effect intensity": "Intensity",
+        "custom 1": "Fine tune 1",
+        "custom 2": "Fine tune 2",
+        "custom 3": "Fine tune 3",
+        "option 1": "Extra mode 1",
+        "option 2": "Extra mode 2",
+        "option 3": "Extra mode 3",
+        "output": "Output level",
+        "secondary red": "Secondary",
+        "secondary green": "Secondary",
+        "secondary blue": "Secondary",
+        "sound simulation": "Demo beat",
+        "audio map": "Audio shape",
+        "source defaults": "Reset scene",
+        "hue_shift": "Hue shift",
+        "fadeOut": "Trail fade",
+        "fadeRate": "Trail fade",
+        "smoothBars": "Smooth bars",
+        "colorBars": "Color bars",
+        "thickness": "Ring width",
+        "count": "Ring count",
+        "ripple": "Peak dot",
+        "width": "Meter width",
+        "star_fill_ratio": "Sparkle density",
+        "usePalette": "Palette colors",
+    };
+    return labels[controlName] || String(controlName)
+        .replace(/[_-]+/g, " ")
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function helioControlGroup(titleText, rows) {
+    const clean = rows.filter(Boolean);
+    if (!clean.length) return null;
+    const group = document.createElement("div");
+    group.className = "helio-control-group";
+    const title = document.createElement("h3");
+    title.textContent = titleText;
+    group.appendChild(title);
+    clean.forEach(row => group.appendChild(row));
+    return group;
+}
+
+function helioControlSceneForEffect(effect) {
+    if (!effect) return null;
+    const exact = helioFactorySceneForType(effect.type);
+    if (exact) return exact;
+    if (effect.type !== "HelioWledPresetsEffect") return null;
+    return helioSceneForPresetIndex(controlValue(effect, "preset", 16));
+}
+
+function helioSceneControls(scene) {
+    return scene ? new Set(Object.keys(scene.controls || {})) : null;
+}
+
+function helioSceneUsesControl(sceneControls, controlName) {
+    return !sceneControls || sceneControls.has(controlName);
+}
+
+function helioSceneControl(sceneControls, controlName, makeRow) {
+    return helioSceneUsesControl(sceneControls, controlName) ? makeRow() : null;
+}
+
+function appendHelioControlHelp(row, mod, name) {
+    const metadata = helioSceneControlMetadata(helioControlSceneForEffect(mod), name);
+    if (!metadata.description) return;
+    const help = document.createElement("small");
+    help.className = "helio-control-help";
+    help.textContent = metadata.description;
+    row.appendChild(help);
+}
+
+function helioAdvancedOpen() {
+    return lsRead(LS_HELIO_ADVANCED_OPEN, null, "0") === "1";
+}
+
+function helioControlsOpen() {
+    return lsRead(LS_HELIO_CONTROLS_OPEN, null, "0") === "1";
+}
+
+function setHelioControlsOpen(open, scroll = false) {
+    localStorage.setItem(LS_HELIO_CONTROLS_OPEN, open ? "1" : "0");
+    const panel = document.querySelector(".helio-controls");
+    if (!panel) return;
+    panel.hidden = !open;
+    document.querySelectorAll("[data-helio-controls-toggle]").forEach(button => {
+        button.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    if (!open) return;
+    if (helioNeedsModuleMetadata("Drivers")) ensureHelioModuleMetadata("Drivers").then(ready => {
+        const refresh = () => {
+            if (!ready || !panel.isConnected || !helioControlsOpen()) return;
+            if (panel.contains(document.activeElement)) {
+                panel.addEventListener("focusout", () => Promise.resolve().then(refresh), { once: true });
+                return;
+            }
+            panel.replaceWith(renderHelioControlPanel(null, { globalOnly: true }));
+        };
+        refresh();
+    });
+    setHelioAdvancedOpen(true);
+    const advanced = panel.querySelector(".helio-advanced-group");
+    if (advanced) advanced.open = true;
+    if (scroll) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function toggleHelioControls() {
+    setHelioControlsOpen(!helioControlsOpen(), true);
+}
+
+function setHelioAdvancedOpen(open) {
+    localStorage.setItem(LS_HELIO_ADVANCED_OPEN, open ? "1" : "0");
+}
+
+function helioAdvancedGroup(rows, labelText = "Advanced") {
+    const clean = rows.filter(Boolean);
+    if (!clean.length) return null;
+    const details = document.createElement("details");
+    details.className = "helio-advanced-group";
+    details.open = helioAdvancedOpen();
+    details.addEventListener("toggle", () => setHelioAdvancedOpen(details.open));
+    const summary = document.createElement("summary");
+    summary.textContent = labelText;
+    const content = document.createElement("div");
+    content.className = "helio-advanced-content";
+    content.append(...clean);
+    details.append(summary, content);
+    return details;
+}
+
+function openHelioAdvanced() {
+    setHelioControlsOpen(true);
+    setHelioAdvancedOpen(true);
+    const group = document.querySelector(".helio-advanced-group");
+    if (group) {
+        group.open = true;
+        group.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+    }
+    renderCards();
+    requestAnimationFrame(() => {
+        const next = document.querySelector(".helio-advanced-group");
+        if (next) {
+            next.open = true;
+            next.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+    });
+}
+
+function helioSliderRow(mod, controlName, labelText = helioPrettyLabel(controlName)) {
+    const ctrl = helioControl(mod, controlName);
+    if (!mod || !ctrl || ctrl.hidden) return null;
+    const metadata = helioSceneControlMetadata(helioControlSceneForEffect(mod), controlName);
+    if (!metadata.visible) return null;
+    const value = clampByte(ctrl.value ?? 0);
+    const row = document.createElement("label");
+    row.className = "helio-slider-row";
+    const text = document.createElement("span");
+    text.textContent = metadata.label || labelText;
+    const valueText = document.createElement("span");
+    valueText.dataset.helioField = helioFieldName(controlName);
+    valueText.textContent = String(value);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(ctrl.min ?? 0);
+    input.max = String(ctrl.max ?? 255);
+    input.step = "1";
+    input.value = String(value);
+    input.dataset.helioField = helioFieldName(controlName) + "_input";
+    input.addEventListener("input", () => {
+        valueText.textContent = input.value;
+        const key = `${mod.name}:${controlName}`;
+        dragTs[key] = Date.now();
+        debounceSend(`helio:${mod.name}:${controlName}`, 120, () => sendControl(mod.name, controlName, parseInt(input.value, 10)));
+    });
+    row.append(text, valueText, input);
+    appendHelioControlHelp(row, mod, controlName);
+    return row;
+}
+
+function helioNumericRow(mod, controlName, labelText = helioPrettyLabel(controlName)) {
+    const ctrl = helioControl(mod, controlName);
+    if (!mod || !ctrl) return null;
+    const value = Number(ctrl.value ?? 0);
+    const row = document.createElement("label");
+    row.className = "helio-slider-row";
+    const text = document.createElement("span");
+    text.textContent = labelText;
+    const valueText = document.createElement("span");
+    valueText.dataset.helioField = helioFieldName(controlName);
+    valueText.textContent = String(Number.isFinite(value) ? value : 0);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(ctrl.min ?? 0);
+    // Preserve an existing out-of-range value while keeping normal editing
+    // usable on a short physical strip.
+    const segmentLimit = ["NebuliteRainbowEffect", "NebuliteBlinkEffect", "NebuliteSolidEffect"].includes(mod.type) &&
+        (controlName === "segment start" || controlName === "segment stop")
+        ? Math.max(helioCurrentCount(), Number.isFinite(value) ? value : 0) : null;
+    input.max = String(segmentLimit === null ? (ctrl.max ?? 255) : Math.min(ctrl.max ?? 65535, segmentLimit));
+    input.step = String(ctrl.step ?? (String(ctrl.type || "").includes("float") ? 0.01 : 1));
+    input.value = valueText.textContent;
+    input.dataset.helioField = helioFieldName(controlName) + "_input";
+    input.addEventListener("input", () => {
+        valueText.textContent = input.value;
+        const key = `${mod.name}:${controlName}`;
+        dragTs[key] = Date.now();
+        const next = input.step === "1" ? parseInt(input.value, 10) : parseFloat(input.value);
+        debounceSend(`helio:${mod.name}:${controlName}`, 120, () => sendControl(mod.name, controlName, next));
+    });
+    row.append(text, valueText, input);
+    return row;
+}
+
+function helioNativeControlRow(mod, ctrl) {
+    if (!mod || !ctrl || ctrl.hidden || ctrl.readonly || ctrl.type === "display" || ctrl.type === "button") return null;
+    const metadata = helioSceneControlMetadata(helioControlSceneForEffect(mod), ctrl.name);
+    if (metadata.visible === false) return null;
+    const label = metadata.label || helioPrettyLabel(ctrl.name);
+    if (ctrl.type === "bool") return helioToggleRow(mod, ctrl.name, label, helioFieldName(ctrl.name));
+    let row = null;
+    if (ctrl.type === "select") row = helioSelectRow(mod, ctrl.name, label, helioFieldName(ctrl.name));
+    else if (ctrl.type === "palette") row = helioPaletteRow(mod, ctrl.name, label);
+    else if (ctrl.min !== undefined || ctrl.max !== undefined || /^(u?int|float|number)/.test(String(ctrl.type || "")))
+        row = helioNumericRow(mod, ctrl.name, label);
+    if (row) appendHelioControlHelp(row, mod, ctrl.name);
+    return row;
+}
+
+function helioNativeControlRows(mod) {
+    const rows = [];
+    const consumed = new Set();
+    for (const ctrl of mod?.controls || []) {
+        if (consumed.has(ctrl.name)) continue;
+        const colorSpec = HELIO_COLOR_CONTROL_SPECS.find(spec =>
+            (spec.names.includes(ctrl.name) || (spec.includeWhite && ctrl.name === "white")) &&
+            spec.names.every(name => helioControl(mod, name)));
+        if (colorSpec) {
+            colorSpec.names.forEach(name => consumed.add(name));
+            if (colorSpec.includeWhite && helioControl(mod, "white")) consumed.add("white");
+            rows.push(helioColorRow(
+                mod,
+                colorSpec.label,
+                colorSpec.names,
+                colorSpec.fieldName,
+                colorSpec.includeWhite,
+            ));
+            continue;
+        }
+        if (HELIO_COLOR_CHANNEL_NAMES.has(ctrl.name)) continue;
+        rows.push(helioNativeControlRow(mod, ctrl));
+    }
+    return rows.filter(Boolean);
+}
+
+function helioHasDirectColor(mod) {
+    return HELIO_COLOR_CONTROL_SPECS.some(spec => spec.names.every(name => helioControl(mod, name)));
+}
+
+function helioPaletteRow(mod, controlName = "palette", labelText = "Palette") {
+    const ctrl = helioControl(mod, controlName);
+    if (!mod || !ctrl) return null;
+    const row = document.createElement("div");
+    row.className = "helio-palette-row helio-effect-palette";
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    const select = document.createElement("select");
+    select.dataset.helioField = helioFieldName(controlName) + "_input";
+    if (!Array.isArray(ctrl.options) || !ctrl.options.length) {
+        select.disabled = true;
+        const option = document.createElement("option");
+        option.textContent = typeof ctrl.value === "string" ? ctrl.value : "Loading palette options…";
+        select.appendChild(option);
+    }
+    (ctrl.options || []).forEach((opt, i) => {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = helioOptionText(opt) || `Palette ${i}`;
+        select.appendChild(option);
+    });
+    if (ctrl.options?.length) select.value = String(helioChoiceIndex(ctrl));
+    select.addEventListener("change", () => {
+        sendControl(mod.name, controlName, parseInt(select.value, 10));
+        if (!helioPresetModules.has(mod.name)) setTimeout(refetchState, 250);
+    });
+    label.appendChild(select);
+    const swatches = document.createElement("div");
+    swatches.className = "helio-swatches";
+    (ctrl.options || []).slice(0, 10).forEach((opt, i) => {
+        const swatch = document.createElement("button");
+        swatch.type = "button";
+        swatch.className = "helio-swatch";
+        swatch.style.background = paletteCss(opt);
+        swatch.title = opt?.name || `Palette ${i}`;
+        swatch.setAttribute("aria-label", swatch.title);
+        swatch.classList.toggle("active", helioChoiceIndex(ctrl) === i);
+        swatch.addEventListener("click", () => {
+            select.value = String(i);
+            sendControl(mod.name, controlName, i);
+            if (!helioPresetModules.has(mod.name)) setTimeout(refetchState, 250);
+        });
+        swatches.appendChild(swatch);
+    });
+    row.append(label, swatches);
+    return row;
+}
+
+function helioRgbControls(mod, names) {
+    return names.map((name, i) => clampByte(controlValue(mod, name, i === 0 ? 255 : 0)));
+}
+
+function helioColorHex(mod, names, includeWhite = false) {
+    const rgb = helioRgbControls(mod, names);
+    const displayRgb = includeWhite && helioControl(mod, "white")
+        ? rgbwToRgb([...rgb, clampByte(controlValue(mod, "white", 0))])
+        : rgb;
+    return "#" + displayRgb.map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+function helioColorRow(mod, labelText, names, fieldName, includeWhite = false) {
+    if (!mod || !names.every(name => helioControl(mod, name))) return null;
+    const row = document.createElement("label");
+    row.className = "helio-color-row";
+    const label = document.createElement("span");
+    label.textContent = labelText;
+    const hasWhite = includeWhite && !!helioControl(mod, "white");
+    const controlNames = hasWhite ? [...names, "white"] : names;
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = helioColorHex(mod, names, hasWhite);
+    color.dataset.helioField = fieldName;
+    color.title = labelText;
+    color.setAttribute("aria-label", labelText);
+    color.addEventListener("input", () => {
+        const hex = color.value.replace("#", "");
+        const picked = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+        const values = hasWhite ? rgbToRgbw(picked) : picked;
+        controlNames.forEach((name, index) => {
+            dragTs[`${mod.name}:${name}`] = Date.now();
+            updateLocalControlValue(mod.name, name, values[index]);
+        });
+        debounceSend(`helio:${mod.name}:${fieldName}`, 120, async () => {
+            for (let i = 0; i < controlNames.length; i++) {
+                await sendControl(mod.name, controlNames[i], values[i]);
+            }
+        });
+    });
+    row.append(label, color);
+    return row;
+}
+
+function helioButtonRow(mod, controlName, labelText = helioPrettyLabel(controlName)) {
+    const ctrl = helioControl(mod, controlName);
+    if (!mod || !ctrl) return null;
+    const row = document.createElement("div");
+    row.className = "helio-action-row";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "helio-secondary-action";
+    button.textContent = labelText;
+    button.addEventListener("click", async () => {
+        await sendControl(mod.name, controlName, 1);
+        setTimeout(refetchState, 250);
+    });
+    row.appendChild(button);
+    return row;
+}
+
+function helioDefaultPreviewEffect() {
+    const scene = HELIO_FACTORY_SCENES.find(s => s.id === "ripple") || HELIO_FACTORY_SCENES[0];
+    return scene
+        ? { type: scene.type, controls: Object.entries(scene.controls || {}).map(([name, value]) => ({ name, value })) }
+        : null;
+}
+
+function helioPreviewEffect(effect = helioActiveEffect()) {
+    return effect && effect.enabled !== false ? effect : helioDefaultPreviewEffect();
+}
+
+function makeHelioSampler(effect = helioPreviewEffect(), pal = paletteFromState(), opts = {}) {
+    const previewEffect = effect || helioDefaultPreviewEffect();
+    const previewOpts = { ...opts, paletteByIndex, rgbOnly: isNebuliteFirmware(), ledCount: opts.ledCount || helioCurrentCount(),
+        getMasterBrightness: () => Number(controlValue(helioDrivers(), "brightness", 255)) };
+    let audioT = NaN;
+    let audio = null;
+    return (x, y, t) => {
+        if (t !== audioT) {
+            audioT = t;
+            audio = presetAudio(t, previewEffect, opts);
+        }
+        return effectColor(previewEffect, pal, t, x, y, audio, previewOpts);
+    };
+}
+
+function helioPreviewPaletteForScene(scene, fallback = paletteFromState()) {
+    return scene ? paletteByIndex(scene.palette, fallback) : fallback;
+}
+
+function requestNebulitePreviewMetadata() {
+    if (nebulitePreviewMetadataPending || performance.now() < nebulitePreviewMetadataRetryAt ||
+        !helioNeedsModuleMetadata("Drivers")) return;
+    nebulitePreviewMetadataPending = true;
+    ensureHelioModuleMetadata("Drivers").then(ready => {
+        if (ready) refreshHistoricalCroptopPreviews();
+        else nebulitePreviewMetadataRetryAt = performance.now() + 5000;
+    }).finally(() => { nebulitePreviewMetadataPending = false; });
+}
+
+function refreshHistoricalCroptopPreviews() {
+    document.querySelectorAll('.helio-mode-preview[data-preview-renderer="nebulite-strip-simulation"], .helio-mode-preview[data-preview-renderer="nebulite-output-simulation"], .helio-mode-preview[data-preview-renderer="historical-croptop-simulation"], .helio-mode-preview[data-preview-renderer="jacket-30-simulation"]').forEach(canvas => {
+        clearHelioPreviewRenderState(canvas);
+    });
+    startHelioModePreviews();
+}
+
+// Static cards must also switch renderer when a live wiring change invalidates a profile.
+function syncNebulitePreviewProfile() {
+    const model = controlValue(findModule("System"), "deviceModel", "");
+    const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
+    const signature = JSON.stringify([model, helioCurrentCount(),
+        !!profile && productProfileMatches(profile, state?.modules || []),
+        productProjection(profile, state?.modules || []),
+        productProjection(profile, state?.modules || []) === "virtual2d" ? productProjectionPoints(profile, state?.modules || []) : null]);
+    if (nebulitePreviewProfileSignature !== null && nebulitePreviewProfileSignature !== signature) {
+        refreshHistoricalCroptopPreviews();
+        drawNebuliteLiveStage();
+    }
+    nebulitePreviewProfileSignature = signature;
+}
+
+function setHelioPreviewKind(canvas, text) {
+    const label = canvas?.parentElement?.querySelector(".helio-preview-kind");
+    if (!label) return;
+    if (label.textContent !== text) label.textContent = text;
+    label.hidden = !text;
+}
+
+function drawHelioCardTracePreview(canvas, t, sampler, ledCount = helioCurrentCount(), opts = {}) {
+    if (isNebuliteFirmware()) {
+        const model = controlValue(findModule("System"), "deviceModel", "");
+        const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
+        if (model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" || model === "NEBULITE Jacket S3") requestNebulitePreviewMetadata();
+        const accent = profile && productProfileMatches(profile, state?.modules || [])
+            ? profile.state.Drivers?.Accent : null;
+        const whiteSlot = accent?.type === "PwmLightDriver" && accent.fixture === "White" &&
+            accent.count === 1 && Number.isInteger(accent.start) && accent.start >= 0 && accent.start < ledCount
+            ? [accent.start] : [];
+        const projection = productProjection(profile, state?.modules || []) === "virtual2d"
+            ? productProjectionPoints(profile, state?.modules || []) : null;
+        // The simulator consumes output order; spatial effects sample the
+        // corresponding 2D cell before the garment renderer consumes it.
+        const spatial = projection?.points.length === ledCount && !opts.effect?.type?.startsWith("Nebulite");
+        const garmentSampler = spatial ? (x, _y, time) => {
+            const i = Math.min(ledCount - 1, Math.max(0, Math.floor(x * ledCount)));
+            const [px, py] = projection.points[i];
+            return sampler((px + .5) / projection.width, (py + .5) / projection.height, time);
+        } : sampler;
+        if ((model === "NEBULITE Croptop S3" && whiteSlot.length && ledCount === 9) ||
+            (model === "NEBULITE Croptop ESP32" && profile && productProfileMatches(profile, state?.modules || []) && ledCount === 8)) {
+            if (drawHistoricalCroptop(canvas, t, garmentSampler, ledCount)) {
+                setHelioPreviewKind(canvas, "Historical crop-top simulation");
+                return;
+            }
+            whenHistoricalCroptopReady(refreshHistoricalCroptopPreviews);
+        }
+        if (model === "NEBULITE Jacket S3" && whiteSlot.length && (ledCount === 91 || ledCount === 31)) {
+            if (ledCount === 31 && projection && drawJacketPreview(canvas, t, garmentSampler, productProjectionPoints(profile))) {
+                setHelioPreviewKind(canvas, "Approximate 30 LED jacket simulation");
+                return;
+            }
+            if (ledCount === 31 && projection) whenJacketPreviewReady(refreshHistoricalCroptopPreviews);
+            const configuredProfile = ledCount === 31 ? productProjectionProfile(profile, "virtual2d") : profile;
+            const outputs = Object.values(configuredProfile.state.Drivers).filter(driver => driver?.type === 'RmtLedDriver' && driver.fixture === 'RGB')
+                .map(driver => ({ start: driver.start, count: Number(driver.ledsPerPin) }))
+                .sort((a, b) => a.start - b.start);
+            if (drawNebuliteOutputPreview(canvas, t, garmentSampler, ledCount, outputs)) {
+                setHelioPreviewKind(canvas, "RGB output diagram · not garment layout");
+                return;
+            }
+        }
+        drawNebuliteStripPreview(canvas, t, garmentSampler, ledCount, whiteSlot);
+        setHelioPreviewKind(canvas, "RGB strip simulation");
+        return;
+    }
+    if (!drawHelioTraceWebGLPreview) return;
+    const detail = helioPreviewDetail("card");
+    drawHelioTraceWebGLPreview(canvas, t, sampler, {
+        ledCount,
+        ...detail,
+        offThreshold: opts.live ? 0 : detail.offThreshold,
+        wall: helioPreviewWallEnabled(),
+    });
+}
+
+function helioLivePreviewFresh() {
+    return helioLivePreviewRgb &&
+        helioLivePreviewCount > 0 &&
+        performance.now() - helioLivePreviewSeenAt < 5000;
+}
+
+function sampleHelioLivePreview(x) {
+    if (!helioLivePreviewFresh()) return [0, 0, 0];
+    const count = helioLivePreviewCount;
+    const u = ((Number(x) || 0) % 1 + 1) % 1;
+    const i = Math.max(0, Math.min(count - 1, Math.floor(u * count)));
+    const o = i * 3;
+    return [
+        helioLivePreviewRgb[o] || 0,
+        helioLivePreviewRgb[o + 1] || 0,
+        helioLivePreviewRgb[o + 2] || 0,
+    ];
+}
+
+function normalizeHelioPreviewSetting(key, value) {
+    if (key === "showRim") return value !== false;
+    const spec = HELIO_PREVIEW_SETTING_SPECS.find(item => item.key === key);
+    const fallback = HELIO_PREVIEW_DEFAULTS[key];
+    if (!spec) return fallback;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    const clamped = Math.max(spec.min, Math.min(spec.max, number));
+    return spec.step >= 1 ? Math.round(clamped) : clamped;
+}
+
+function helioPreviewSettings() {
+    if (helioPreviewSettingsCache) return helioPreviewSettingsCache;
+    let saved = {};
+    try {
+        saved = JSON.parse(localStorage.getItem(LS_HELIO_PREVIEW_SETTINGS) || "{}") || {};
+    } catch (_) {
+        saved = {};
+    }
+    const savedVersion = Number(saved.version) || 0;
+    const previousDefaultCadence =
+        (saved.cardFps === undefined || Number(saved.cardFps) === 24) &&
+        (saved.cardBatch === undefined || Number(saved.cardBatch) === 4);
+    if (savedVersion < HELIO_PREVIEW_SETTINGS_VERSION && previousDefaultCadence) {
+        saved.cardFps = HELIO_PREVIEW_DEFAULTS.cardFps;
+        saved.cardBatch = HELIO_PREVIEW_DEFAULTS.cardBatch;
+    }
+    const previousDefaultBounces =
+        (saved.mainBounces === undefined || Number(saved.mainBounces) === 22) &&
+        (saved.cardBounces === undefined || Number(saved.cardBounces) === 14);
+    if (savedVersion < HELIO_PREVIEW_SETTINGS_VERSION && previousDefaultBounces) {
+        saved.mainBounces = HELIO_PREVIEW_DEFAULTS.mainBounces;
+        saved.cardBounces = HELIO_PREVIEW_DEFAULTS.cardBounces;
+    }
+    if (savedVersion < 4) {
+        if (saved.exposure === undefined || Number(saved.exposure) === 3.35) {
+            saved.exposure = HELIO_PREVIEW_DEFAULTS.exposure;
+        }
+        if (saved.ledFill === undefined || Number(saved.ledFill) === 1.25) {
+            saved.ledFill = HELIO_PREVIEW_DEFAULTS.ledFill;
+        }
+        if (saved.reflectionSpread === undefined || Number(saved.reflectionSpread) === 1.7) {
+            saved.reflectionSpread = HELIO_PREVIEW_DEFAULTS.reflectionSpread;
+        }
+        if (saved.glass === undefined || Number(saved.glass) === 0.075) {
+            saved.glass = HELIO_PREVIEW_DEFAULTS.glass;
+        }
+    }
+    const previousDefaultCardQuality =
+        (saved.cardBounces === undefined || Number(saved.cardBounces) === 5) &&
+        (saved.cardDpr === undefined || Number(saved.cardDpr) === 1.8) &&
+        (saved.cardMaxBackingSize === undefined || Number(saved.cardMaxBackingSize) === 640) &&
+        (saved.cardFps === undefined || Number(saved.cardFps) === 30);
+    if (savedVersion < HELIO_PREVIEW_SETTINGS_VERSION && previousDefaultCardQuality) {
+        saved.cardBounces = HELIO_PREVIEW_DEFAULTS.cardBounces;
+        saved.cardDpr = HELIO_PREVIEW_DEFAULTS.cardDpr;
+        saved.cardMaxBackingSize = HELIO_PREVIEW_DEFAULTS.cardMaxBackingSize;
+        saved.cardFps = HELIO_PREVIEW_DEFAULTS.cardFps;
+    }
+    const settings = {};
+    for (const key of Object.keys(HELIO_PREVIEW_DEFAULTS)) {
+        settings[key] = normalizeHelioPreviewSetting(key,
+            Object.prototype.hasOwnProperty.call(saved, key) ? saved[key] : HELIO_PREVIEW_DEFAULTS[key]);
+    }
+    helioPreviewSettingsCache = settings;
+    if (savedVersion < HELIO_PREVIEW_SETTINGS_VERSION) persistHelioPreviewSettings();
+    return settings;
+}
+
+function persistHelioPreviewSettings() {
+    localStorage.setItem(LS_HELIO_PREVIEW_SETTINGS, JSON.stringify({
+        ...helioPreviewSettings(),
+        version: HELIO_PREVIEW_SETTINGS_VERSION,
+    }));
+}
+
+function helioPreviewDetail(kind = "main") {
+    const settings = helioPreviewSettings();
+    const card = kind === "card";
+    const cameraMode = card ? "tilt" : helioPreviewCameraMode();
+    return {
+        exposure: settings.exposure,
+        bounces: card ? settings.cardBounces : settings.mainBounces,
+        maxDpr: card ? settings.cardDpr : settings.mainDpr,
+        maxBackingSize: card ? settings.cardMaxBackingSize : 0,
+        dichroic: settings.dichroic,
+        glass: settings.glass,
+        showRim: settings.showRim,
+        ledFill: settings.ledFill,
+        ledGain: settings.ledGain,
+        reflectionSpread: settings.reflectionSpread,
+        attenuation: settings.attenuation,
+        cutoff: settings.cutoff,
+        offThreshold: settings.offThreshold,
+        offBrightness: settings.offBrightness,
+        glow: settings.glow,
+        wallGlow: settings.wallGlow,
+        wallDistanceCm: settings.wallDistanceCm,
+        fps: card ? settings.cardFps : settings.mainFps,
+        autoSpin: false,
+        tiltAnimation: cameraMode === "tilt",
+        swivelAnimation: cameraMode === "swivel",
+    };
+}
+
+function requestHelioPreviewSettingsRefresh() {
+    if (helioPreviewSettingsRefreshQueued) return;
+    helioPreviewSettingsRefreshQueued = true;
+    requestAnimationFrame(now => {
+        helioPreviewSettingsRefreshQueued = false;
+        refreshHelioTrace();
+        lastHelioPreviewPaint = 0;
+        if (!helioCardPreviewsPaused(now)) queueHelioVisiblePreviews(now, helioPreviewSettings().cardBatch);
+    });
+}
+
+function setHelioPreviewSetting(key, value) {
+    const settings = helioPreviewSettings();
+    settings[key] = normalizeHelioPreviewSetting(key, value);
+    persistHelioPreviewSettings();
+    requestHelioPreviewSettingsRefresh();
+    return settings[key];
+}
+
+function resetHelioPreviewSettings() {
+    helioPreviewSettingsCache = { ...HELIO_PREVIEW_DEFAULTS };
+    persistHelioPreviewSettings();
+    requestHelioPreviewSettingsRefresh();
+}
+
+function helioPreviewWallEnabled() {
+    return localStorage.getItem(LS_HELIO_PREVIEW_WALL) !== "0";
+}
+
+function setHelioPreviewWallEnabled(enabled) {
+    localStorage.setItem(LS_HELIO_PREVIEW_WALL, enabled ? "1" : "0");
+    document.querySelectorAll("[data-helio-wall-toggle]").forEach(input => {
+        input.checked = enabled;
+    });
+    refreshHelioTrace();
+    requestAnimationFrame(now => queueHelioVisiblePreviews(now));
+}
+
+function helioPreviewTiltEnabled() {
+    return helioPreviewCameraMode() === "tilt";
+}
+
+function setHelioPreviewTiltEnabled(enabled) {
+    setHelioPreviewCameraMode(enabled ? "tilt" : "static");
+}
+
+function helioPreviewSwivelEnabled() {
+    return helioPreviewCameraMode() === "swivel";
+}
+
+function setHelioPreviewSwivelEnabled(enabled) {
+    setHelioPreviewCameraMode(enabled ? "swivel" : "static");
+}
+
+function helioPreviewCameraMode() {
+    if (localStorage.getItem(LS_HELIO_PREVIEW_SWIVEL) === "1") return "swivel";
+    if (localStorage.getItem(LS_HELIO_PREVIEW_TILT) === "1") return "tilt";
+    return "static";
+}
+
+function setHelioPreviewCameraMode(mode) {
+    const next = mode === "swivel" ? "swivel" : mode === "tilt" ? "tilt" : "static";
+    localStorage.setItem(LS_HELIO_PREVIEW_TILT, next === "tilt" ? "1" : "0");
+    localStorage.setItem(LS_HELIO_PREVIEW_SWIVEL, next === "swivel" ? "1" : "0");
+    document.querySelectorAll("[data-helio-tilt-toggle]").forEach(input => {
+        input.checked = next === "tilt";
+    });
+    document.querySelectorAll("[data-helio-swivel-toggle]").forEach(input => {
+        input.checked = next === "swivel";
+    });
+    refreshHelioTrace();
+}
+
+function makeHelioPreviewToggle(textContent, title, datasetKey, checked, onChange) {
+    const label = document.createElement("label");
+    label.className = "helio-preview-toggle";
+    label.title = title;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset[datasetKey] = "";
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    const text = document.createElement("span");
+    text.textContent = textContent;
+    label.append(input, text);
+    return label;
+}
+
+function makeHelioWallToggle() {
+    return makeHelioPreviewToggle("Wall", "Show wall reflection", "helioWallToggle",
+        helioPreviewWallEnabled(), setHelioPreviewWallEnabled);
+}
+
+function makeHelioTiltToggle() {
+    return makeHelioPreviewToggle("Tilt", "Animate camera from top to bottom", "helioTiltToggle",
+        helioPreviewTiltEnabled(), setHelioPreviewTiltEnabled);
+}
+
+function makeHelioSwivelToggle() {
+    return makeHelioPreviewToggle("Swivel", "Orbit 45 degrees around the wall axis", "helioSwivelToggle",
+        helioPreviewSwivelEnabled(), setHelioPreviewSwivelEnabled);
+}
+
+function loadHelioTraceModule() {
+    return import("./heliotrace.js");
+}
+
+function requestHelioTrace() {
+    if (helioTrace) return Promise.resolve(true);
+    if (helioTraceLoadPromise) return helioTraceLoadPromise;
+    helioTraceLoadFailed = false;
+    refreshHelioTrace();
+    helioTraceLoadPromise = Promise.resolve().then(loadHelioTraceModule).then(module => {
+        ({ HelioTrace, helioTrace, drawHelioTraceWebGLPreview } = module);
+        if (!wsUnloading) {
+            refreshHelioTrace();
+            startHelioModePreviews();
+        }
+        return true;
+    }).catch(error => {
+        helioTraceLoadFailed = true;
+        console.warn("[HELIO] preview renderer unavailable", error);
+        if (!wsUnloading) refreshHelioTrace();
+        return false;
+    }).finally(() => { helioTraceLoadPromise = null; });
+    return helioTraceLoadPromise;
+}
+
+function deferHelioTraceUntilCards(mounted, host) {
+    if (!state || isNebuliteFirmware()) return;
+    // Two animation frames leave a paint between the usable cards and renderer download.
+    Promise.resolve(mounted).catch(() => {}).then(() => {
+        if (!state || !host.isConnected || wsUnloading) return;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (state && host.isConnected && !wsUnloading) requestHelioTrace();
+        }));
+    });
+}
+
+function updateHelioTraceLoading(canvas) {
+    if (!canvas?.isConnected) return;
+    let status = canvas.parentElement.querySelector(":scope > .helio-preview-load-status");
+    if (helioTrace) { status?.remove(); return; }
+    if (!status) {
+        status = document.createElement("p");
+        status.className = "helio-helper-text helio-preview-load-status";
+        status.setAttribute("role", "status");
+        canvas.parentElement.appendChild(status);
+    }
+    const phase = helioTraceLoadFailed ? "failed" : "loading";
+    canvas.dataset.previewSource = phase;
+    if (status.dataset.phase === phase) return;
+    status.dataset.phase = phase;
+    status.textContent = helioTraceLoadFailed ? "Preview could not be loaded. " : "Loading preview…";
+    if (helioTraceLoadFailed) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "helio-secondary-action";
+        retry.textContent = "Retry preview";
+        retry.addEventListener("click", requestHelioTrace);
+        status.appendChild(retry);
+    }
+}
+
+function configureHelioTraceRenderer(renderer, opts = {}) {
+    if (!renderer) return;
+    renderer.setSampler(sampleHelioLivePreview);
+    renderer.setLedCount(helioLivePreviewFresh() ? helioLivePreviewCount : helioCurrentCount());
+    renderer.setExposure(opts.exposure ?? 3.1);
+    renderer.setDetail({
+        bounces: opts.bounces ?? 28,
+        maxDpr: opts.maxDpr ?? 0.95,
+        dichroic: opts.dichroic,
+        glass: opts.glass,
+        showRim: opts.showRim,
+        ledFill: opts.ledFill,
+        ledGain: opts.ledGain,
+        reflectionSpread: opts.reflectionSpread,
+        attenuation: opts.attenuation,
+        cutoff: opts.cutoff,
+        offThreshold: 0,
+        offBrightness: opts.offBrightness,
+        glow: opts.glow,
+        wallGlow: opts.wallGlow,
+        wallDistanceCm: opts.wallDistanceCm,
+        fps: opts.fps,
+        wall: helioPreviewWallEnabled(),
+        autoSpin: opts.autoSpin === true,
+        tiltAnimation: opts.tiltAnimation === true,
+        swivelAnimation: opts.swivelAnimation === true,
+    });
+}
+
+function drawHelioMainPreview() {
+    const canvas = document.getElementById("helio-trace");
+    if (!canvas) return;
+    updateHelioTraceLoading(canvas);
+    if (!helioTrace) return;
+    if ((helioFloatingPreviewEl && !helioFloatingPreviewEl.hidden) || !helioPreviewNearViewport(canvas)) {
+        helioTrace.stop();
+        return;
+    }
+    configureHelioTraceRenderer(helioTrace, helioPreviewDetail("main"));
+    const mounted = helioTrace.mount(canvas);
+    const now = performance.now();
+    helioTrace.draw(now);
+    if (helioTrace.cameraAnimationActive()) helioTrace.start();
+    else helioTrace.stop();
+    helioLivePreviewDrawAt = now;
+    canvas.dataset.previewRenderer = mounted ? "heliotrace-webgl" : "heliotrace-canvas";
+    canvas.dataset.previewSource = helioLivePreviewFresh() ? "device" : "waiting";
+}
+
+function ensureHelioFloatingTrace() {
+    if (!HelioTrace) return null;
+    if (!helioFloatingTrace) {
+        helioFloatingTrace = new HelioTrace({ interactive: true, ...helioPreviewDetail("main") });
+    }
+    return helioFloatingTrace;
+}
+
+function syncHelioFloatingPreview() {
+    if (!helioFloatingPreviewEl || helioFloatingPreviewEl.hidden) {
+        if (helioFloatingTrace) helioFloatingTrace.stop();
+        return;
+    }
+    const canvas = helioFloatingPreviewEl.querySelector("canvas");
+    if (!canvas) return;
+    updateHelioTraceLoading(canvas);
+    const renderer = ensureHelioFloatingTrace();
+    if (!renderer) return;
+    configureHelioTraceRenderer(renderer, helioPreviewDetail("main"));
+    const mounted = renderer.mount(canvas);
+    const now = performance.now();
+    renderer.draw(now);
+    if (renderer.cameraAnimationActive()) renderer.start();
+    else renderer.stop();
+    helioLivePreviewDrawAt = now;
+    canvas.dataset.previewRenderer = mounted ? "heliotrace-webgl" : "heliotrace-canvas";
+    canvas.dataset.previewSource = helioLivePreviewFresh() ? "device" : "waiting";
+}
+
+function closeHelioFloatingPreview() {
+    if (helioFloatingPreviewEl) helioFloatingPreviewEl.hidden = true;
+    if (helioFloatingTrace) helioFloatingTrace.stop();
+    drawHelioMainPreview();
+    resumeHelioCardPreviews();
+}
+
+function openHelioFloatingPreview() {
+    if (!helioFloatingPreviewEl) {
+        const pane = document.createElement("aside");
+        pane.className = "helio-floating-preview";
+        pane.setAttribute("aria-label", "Floating preview");
+        const bar = document.createElement("div");
+        bar.className = "helio-floating-preview-bar";
+        const title = document.createElement("span");
+        title.textContent = "Preview";
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "helio-floating-preview-close";
+        close.setAttribute("aria-label", "Close preview");
+        close.textContent = "x";
+        close.addEventListener("click", closeHelioFloatingPreview);
+        bar.append(title, makeHelioWallToggle(), makeHelioTiltToggle(), makeHelioSwivelToggle(), close);
+        const canvas = document.createElement("canvas");
+        canvas.className = "helio-floating-preview-canvas";
+        canvas.setAttribute("aria-label", "Floating live preview");
+        pane.append(bar, canvas);
+        document.body.appendChild(pane);
+        helioFloatingPreviewEl = pane;
+    }
+    helioFloatingPreviewEl.hidden = false;
+    requestHelioTrace();
+    helioTrace?.stop();
+    syncHelioFloatingPreview();
+}
+
+function updateHelioTraceLiveStats() {
+    const fresh = helioLivePreviewFresh();
+    const canvas = document.getElementById("helio-trace");
+    if (canvas) {
+        canvas.dataset.livePreviewMax = String(helioLivePreviewLevel);
+        canvas.dataset.livePreviewCount = String(helioLivePreviewCount);
+        canvas.dataset.livePreviewFresh = fresh ? "true" : "false";
+        canvas.dataset.previewSource = fresh ? "device" : "waiting";
+        updateHelioTraceLoading(canvas);
+    }
+    const floatingCanvas = helioFloatingPreviewEl?.querySelector("canvas");
+    if (floatingCanvas) {
+        floatingCanvas.dataset.previewSource = fresh ? "device" : "waiting";
+        updateHelioTraceLoading(floatingCanvas);
+    }
+}
+
+function clearHelioLivePreview() {
+    nebuliteLiveFrame = null;
+    clearTimeout(nebuliteLiveExpiryTimer);
+    nebuliteLiveExpiryTimer = null;
+    drawNebuliteLiveStage();
+    helioLivePreviewRgb = null;
+    helioLivePreviewCount = 0;
+    helioLivePreviewSeenAt = 0;
+    helioLivePreviewLevel = 0;
+    updateHelioTraceLiveStats();
+    drawHelioLivePreviewFrame(performance.now(), true);
+}
+
+function updateHelioLivePreview(frame) {
+    if (!document.body.classList.contains("helio-product-mode")) return;
+    if (!frame || !frame.rgb || frame.count <= 0) return;
+    helioLivePreviewRgb = new Uint8Array(frame.rgb);
+    nebuliteLiveFrame = { ...frame, rgb: helioLivePreviewRgb };
+    helioLivePreviewCount = frame.count;
+    helioLivePreviewSeenAt = frame.time || performance.now();
+    helioLivePreviewLevel = 0;
+    for (let i = 0; i < helioLivePreviewRgb.length; i += 3) {
+        helioLivePreviewLevel = Math.max(
+            helioLivePreviewLevel,
+            helioLivePreviewRgb[i] || 0,
+            helioLivePreviewRgb[i + 1] || 0,
+            helioLivePreviewRgb[i + 2] || 0,
+        );
+    }
+    updateHelioTraceLiveStats();
+    if (isNebuliteFirmware()) {
+        if (helioLivePreviewSeenAt - nebuliteLiveDrawAt >= 1000 / helioPreviewSettings().mainFps - 0.5) {
+            drawNebuliteLiveStage();
+            nebuliteLiveDrawAt = helioLivePreviewSeenAt;
+        }
+        if (!nebuliteLiveExpiryTimer) nebuliteLiveExpiryTimer = setTimeout(checkNebuliteLiveExpiry, 5000);
+    }
+    drawHelioLivePreviewFrame(helioLivePreviewSeenAt);
+}
+
+function checkNebuliteLiveExpiry() {
+    nebuliteLiveExpiryTimer = null;
+    if (!helioLivePreviewFresh()) { drawNebuliteLiveStage(); return; }
+    nebuliteLiveExpiryTimer = setTimeout(checkNebuliteLiveExpiry,
+        Math.max(1, 5000 - (performance.now() - helioLivePreviewSeenAt)));
+}
+
+function drawNebuliteLiveStage() {
+    const canvas = document.getElementById("nebulite-live-preview");
+    const image = document.querySelector(".nebulite-product-image");
+    const label = document.querySelector("[data-nebulite-live-label]");
+    if (!canvas || !label) return;
+    const model = controlValue(findModule("System"), "deviceModel", "");
+    const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
+    const projection = productProjection(profile, state?.modules || []);
+    const count = model === "NEBULITE Croptop S3" ? 9 : model === "NEBULITE Croptop ESP32" ? 8 : model === "NEBULITE Jacket S3" ? (projection === "virtual2d" ? 31 : 91) : 0;
+    const sourceCoordinates = projection === "virtual2d" ? productProjectionPoints(profile, state?.modules || [])?.points : count;
+    const sampler = count && profile && productProfileMatches(profile, state?.modules || []) && helioLivePreviewFresh()
+        && sourceCoordinates ? nebuliteLiveSampler(nebuliteLiveFrame, count, sourceCoordinates) : null;
+    let drawn = false;
+    if (sampler && (count === 8 || count === 9)) {
+        drawn = drawHistoricalCroptop(canvas, 0, sampler, count);
+        if (!drawn) whenHistoricalCroptopReady(drawNebuliteLiveStage);
+    } else if (sampler && count === 31) {
+        drawn = drawJacketPreview(canvas, 0, sampler, productProjectionPoints(profile));
+        if (!drawn) whenJacketPreviewReady(drawNebuliteLiveStage);
+    } else if (sampler && count === 91) {
+        const configuredProfile = count === 31 ? productProjectionProfile(profile, "virtual2d") : profile;
+        const outputs = Object.values(configuredProfile.state.Drivers).filter(driver => driver?.type === "RmtLedDriver" && driver.fixture === "RGB")
+            .map(driver => ({ start: driver.start, count: Number(driver.ledsPerPin) })).sort((a, b) => a.start - b.start);
+        drawn = drawNebuliteOutputPreview(canvas, 0, sampler, count, outputs);
+    }
+    canvas.hidden = !drawn;
+    if (image) image.hidden = drawn;
+    label.textContent = drawn ? (count === 8 || count === 9 ? "Live source · historical crop-top illustration" : count === 31 ? "Live source · approximate 30 LED jacket" : "Live source · RGB output diagram") + (count === 8 ? "" : " · white output not shown")
+        : profile ? "Waiting for a matching live source preview" : "NEBULITE · Choose your product in Setup";
+}
+
+function drawHelioLivePreviewFrame(now, force = false) {
+    const interval = 1000 / helioPreviewSettings().mainFps;
+    if (!force && now - helioLivePreviewDrawAt < interval - 0.5) return;
+    if (helioFloatingPreviewEl && !helioFloatingPreviewEl.hidden) {
+        if (helioFloatingTrace?.canvas) {
+            if (!helioFloatingTrace.running) helioFloatingTrace.draw(now);
+            helioLivePreviewDrawAt = now;
+        }
+        return;
+    }
+    const canvas = document.getElementById("helio-trace");
+    if (!canvas || !helioTrace || !helioPreviewNearViewport(canvas) || helioTrace.canvas !== canvas) return;
+    if (!helioTrace.running) helioTrace.draw(now);
+    helioLivePreviewDrawAt = now;
+}
+
+function refreshHelioTrace() {
+    if (!document.body.classList.contains("helio-product-mode")) return;
+    updateHelioTraceLiveStats();
+    drawHelioMainPreview();
+    syncHelioFloatingPreview();
+    if (isNebuliteFirmware()) drawNebuliteLiveStage();
+}
+
+function syncHelioBatteryStatus(host = document.querySelector(".helio-battery-container")) {
+    const view = batteryView(state?.modules, { connected: helioBatteryConnected,
+        receipts: helioBatteryReceipts, now: performance.now() });
+    // Keep receipt ages even while the battery UI is not mounted.
+    if (!host) return;
+    const key = JSON.stringify(view);
+    if (host.dataset.batteryView === key) return;
+    const row = renderBatteryStatus(document, view);
+    host.replaceChildren(...(row ? [row] : []));
+    host.hidden = !row;
+    host.dataset.batteryView = key;
+}
+
+// A half-open socket can leave an old sample on screen without firing onclose.
+setInterval(() => syncHelioBatteryStatus(), 5000);
+
+function helioPresetModule(record) {
+    const saved = record.editor.document;
+    const schema = saved.$uiSchema;
+    if (!schema?.effectPath || !schema.effectType) return null;
+    let effect = saved;
+    for (const key of schema.effectPath) effect = effect?.[key];
+    if (!effect) return null;
+    const module = record.module ||= { name: `@preset:${record.name}` };
+    module.type = schema.effectType;
+    module.enabled = true;
+    module.role = "effect";
+    module.controls = schema.controls.map(descriptor => {
+        let target = saved;
+        for (const key of descriptor.path || schema.effectPath) target = target?.[key];
+        const control = { ...descriptor, value: target?.[descriptor.name] ?? descriptor.default };
+        if (control.type === "palette") control.options = helioControl(helioDrivers(), "palette")?.options || [];
+        return control;
+    });
+    helioPresetModules.set(module.name, record);
+    return module;
+}
+
+function mountHelioPresetCards(host) {
+    if (!helioPresetCollection) helioPresetCollection = new HelioPresetCards({
+        client: createPresetClient({ fetchFn: apiFetch, ...takeInitialPresetIndexResponse() }),
+        makeControls: record => {
+            const module = helioPresetModule(record);
+            if (module) return renderHelioControlPanel(module, { sceneOnly: true });
+            const message = document.createElement("p");
+            message.textContent = "Open Advanced to edit this composition.";
+            return message;
+        },
+        onControls: async record => {
+            if (!state || !record.editor.document.$uiSchema?.controls?.some(control => control.type === "palette") ||
+                !helioNeedsModuleMetadata("Drivers")) return false;
+            return helioPresetCollection.readDocument(record, false, () => ensureHelioModuleMetadata("Drivers"));
+        },
+        onSelect: () => {
+            stopHelioPlaylist();
+            ++helioModeGeneration;
+            helioModeApplyingId = "";
+            helioModeQueued = null;
+            invalidateHelioEffects();
+        },
+        onApply: () => {
+            if (!state) return;
+            clearHelioLivePreview();
+            updateHelioHome();
+            refreshHelioTrace();
+        },
+        onPreview: () => { if (state) startHelioModePreviews(); },
+        showLegacyImport: () => isNebuliteFirmware(),
+        legacyProduct: async () => {
+            if (!isNebuliteFirmware() || !state) return null;
+            for (const module of ["System", "Drivers", "Layouts"])
+                if (helioNeedsModuleMetadata(module) && !await ensureHelioModuleMetadata(module)) return null;
+            const model = controlValue(findModule("System"), "deviceModel", "");
+            const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
+            if (!profile || !productProfileMatches(profile, state?.modules || [])) return null;
+            if (model === "NEBULITE Jacket S3") return "jacket";
+            if (model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32") return "croptop";
+            return null;
+        },
+    });
+    const mounted = helioPresetCollection.mount(host);
+    if (state) deferHelioTraceUntilCards(mounted, host);
+    return mounted;
+}
+
+function renderEarlyHelioHome() {
+    const main = document.getElementById("main");
+    if (!main || earlyHelioHome || state) return;
+    selectedModule = HELIO_VIEW;
+    applyBranding();
+    setHelioDeviceMode(true);
+    setHelioProductMode(true);
+    earlyHelioHome = renderHelioHome(main, true);
+    main.setAttribute("aria-busy", "false");
+    revealInitialUi();
+}
+
+function renderHelioConnectingStage() {
+    const stage = document.createElement("div");
+    stage.className = "helio-stage";
+    const info = document.createElement("div");
+    info.className = "helio-stage-info";
+    info.style.visibility = "hidden";
+    info.setAttribute("aria-hidden", "true");
+    // The same action footprint reserves the mobile stage's height without exposing guessed runtime controls.
+    const eyebrow = document.createElement("div");
+    eyebrow.className = "helio-eyebrow";
+    eyebrow.textContent = "\u00a0";
+    const actions = document.createElement("div");
+    actions.className = "helio-hero-actions";
+    for (const name of ["helio-primary-action", "helio-secondary-action", "helio-secondary-action",
+                         "helio-secondary-action helio-controls-trigger"]) {
+        const space = document.createElement("span");
+        space.className = name;
+        actions.append(space);
+    }
+    info.append(eyebrow, actions);
+    const previewSpace = document.createElement("div");
+    previewSpace.className = "helio-trace-shell";
+    const status = document.createElement("p");
+    status.className = "helio-helper-text";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.textContent = "Connecting to controller…";
+    previewSpace.append(status);
+    stage.append(info, previewSpace);
+    return stage;
+}
+
+function renderHelioHome(host, connecting = false) {
+    const wrap = document.createElement("section");
+    wrap.className = "helio-home";
+    const panels = document.createElement("div");
+    panels.className = "helio-panels";
+    const presets = document.createElement("section");
+    wrap.append(panels, presets);
+    host.appendChild(wrap);
+    if (connecting) wrap.insertBefore(renderHelioConnectingStage(), panels);
+    else hydrateHelioHome(wrap, presets);
+    const mounted = mountHelioPresetCards(presets);
+    return { wrap, presets, mounted };
+}
+
+function hydrateHelioHome(wrap, presets) {
+    if (!state) return;
+    wrap.querySelector(":scope > .helio-stage")?.remove();
+    const panels = wrap.querySelector(":scope > .helio-panels");
+
+    const stage = document.createElement("div");
+    stage.className = "helio-stage";
+
+    const info = document.createElement("div");
+    info.className = "helio-stage-info";
+    const eyebrow = document.createElement("div");
+    eyebrow.className = "helio-eyebrow";
+    eyebrow.textContent = isNebuliteFirmware() ? "Your NEBULITE" : "Live Preview";
+
+    const heroActions = document.createElement("div");
+    heroActions.className = "helio-hero-actions";
+    const power = document.createElement("button");
+    power.type = "button";
+    power.className = "helio-primary-action";
+    power.dataset.helioField = "power";
+    power.textContent = controlValue(helioDrivers(), "on", true) ? "On" : "Off";
+    power.addEventListener("click", async () => {
+        const drivers = helioDrivers();
+        if (await sendControl(drivers.name, "on", !controlValue(drivers, "on", true))) updateHelioHome();
+        else refetchState();
+    });
+    const menu = document.createElement("button");
+    menu.type = "button";
+    menu.className = "helio-secondary-action";
+    menu.textContent = "Advanced";
+    menu.title = "Open advanced controls";
+    menu.setAttribute("aria-label", "Open advanced controls");
+    menu.addEventListener("click", openNavDrawer);
+    const openPreview = document.createElement("button");
+    openPreview.type = "button";
+    openPreview.className = "helio-secondary-action";
+    openPreview.textContent = "Preview";
+    openPreview.title = "Open preview";
+    openPreview.addEventListener("click", isNebuliteFirmware() ? () => preview.showFloating() : openHelioFloatingPreview);
+    const controls = document.createElement("button");
+    controls.type = "button";
+    controls.className = "helio-secondary-action helio-controls-trigger";
+    controls.textContent = "Brightness";
+    controls.dataset.helioControlsToggle = "";
+    controls.setAttribute("aria-expanded", helioControlsOpen() ? "true" : "false");
+    controls.addEventListener("click", toggleHelioControls);
+    heroActions.append(power, openPreview, menu, controls);
+    info.append(eyebrow, heroActions);
+    const batteries = document.createElement("div");
+    batteries.className = "helio-battery-container";
+    syncHelioBatteryStatus(batteries);
+    info.append(batteries);
+
+    const canvasWrap = document.createElement("div");
+    canvasWrap.className = "helio-trace-shell";
+    const canvas = document.createElement("canvas");
+    canvas.id = "helio-trace";
+    canvas.setAttribute("aria-label", "Live preview");
+    const previewOverlays = document.createElement("div");
+    previewOverlays.className = "helio-preview-overlays";
+    const cameraModes = document.createElement("div");
+    cameraModes.className = "helio-preview-camera-modes";
+    cameraModes.append(makeHelioTiltToggle(), makeHelioSwivelToggle());
+    previewOverlays.append(makeHelioWallToggle(), cameraModes);
+    if (isNebuliteFirmware()) {
+        canvasWrap.classList.add("nebulite-product-shell");
+        const model = controlValue(findModule("System"), "deviceModel", "");
+        const artwork = nebuliteProductArt(model);
+        if (artwork) {
+            const image = document.createElement("img");
+            image.src = artwork.src;
+            image.alt = artwork.label;
+            image.className = "nebulite-product-image";
+            canvasWrap.append(image);
+        }
+        const liveCanvas = document.createElement("canvas");
+        liveCanvas.id = "nebulite-live-preview";
+        liveCanvas.width = liveCanvas.height = 384;
+        liveCanvas.hidden = true;
+        canvasWrap.append(liveCanvas);
+        const label = document.createElement("p");
+        label.className = "helio-helper-text";
+        label.dataset.nebuliteLiveLabel = "";
+        label.textContent = artwork ? model + " · Historical product illustration" : "NEBULITE · Choose your product in Setup";
+        canvasWrap.append(label);
+    } else canvasWrap.append(canvas, previewOverlays);
+    stage.append(info, canvasWrap);
+    wrap.insertBefore(stage, panels);
+
+    panels.replaceChildren(renderHelioControlPanel(null, { globalOnly: true }));
+    wrap.appendChild(renderHelioSetupMenu());
+
+    if (helioModeApplying) {
+        const pending = helioModeQueued?.mode || HELIO_MODES.find(mode => mode.id === helioModeApplyingId);
+        if (pending) showHelioScenePending(pending);
+    }
+    refreshHelioTrace();
+    startHelioModePreviews();
+    setTimeout(() => queueHelioMissingVisiblePreviews(performance.now()), 120);
+}
+
+function renderHelioSceneCard(mode, status, active, audioReady) {
+    const needsAudio = helioSceneUsesAudio(mode) && !audioReady;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "helio-scene-card";
+    btn.dataset.helioMode = mode.id;
+    btn.dataset.scene = mode.id;
+    btn.classList.toggle("active", active?.type === mode.type);
+    btn.setAttribute("aria-pressed", active?.type === mode.type ? "true" : "false");
+    btn.setAttribute("aria-label", mode.label);
+    btn.classList.toggle("needs-audio", needsAudio);
+    if (needsAudio) btn.title = "Set up audio";
+
+    const canvas = document.createElement("canvas");
+    canvas.className = "helio-mode-preview";
+    canvas.width = 384;
+    canvas.height = 384;
+    canvas.dataset.helioModePreview = mode.id;
+    const label = document.createElement("span");
+    label.className = "helio-scene-label";
+    label.textContent = mode.label;
+    const meta = document.createElement("span");
+    meta.className = "helio-scene-meta";
+    const model = controlValue(findModule("System"), "deviceModel", "");
+    const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
+    const historicalCrop = isNebuliteFirmware() && (model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32") &&
+        profile && productProfileMatches(profile, state?.modules || []);
+    const jacketDiagram = isNebuliteFirmware() && model === "NEBULITE Jacket S3" &&
+        profile && productProfileMatches(profile, state?.modules || []);
+    meta.textContent = (needsAudio ? "Audio setup" : mode.meta) +
+        (isNebuliteFirmware() ? (historicalCrop ? " · Historical crop-top simulation" : jacketDiagram ? " · RGB output diagram" : " · RGB strip simulation") : "");
+    btn.append(canvas, label, meta);
+    btn.addEventListener("pointerenter", startHelioModePreviews);
+    btn.addEventListener("focus", startHelioModePreviews);
+    btn.addEventListener("click", event => {
+        event.preventDefault();
+        applyHelioMode(mode, status).catch(err => {
+            console.warn(`[helio] apply ${mode.id} failed`, err);
+            if (status) status.textContent = "apply failed";
+        });
+    });
+    return btn;
+}
+
+function renderHelioControlPanel(activeEffect = helioActiveEffect(), opts = {}) {
+    const panel = document.createElement("section");
+    panel.className = "helio-panel helio-controls";
+    panel.hidden = opts.sceneOnly ? false : !helioControlsOpen();
+    if (opts.sceneOnly) {
+        panel.classList.add("helio-preset-editor");
+        panel.dataset.presetControls = activeEffect.name;
+    }
+    const isFactoryScene = isHelioFactoryScene(activeEffect) || activeEffect?.type === "HelioWledPresetsEffect";
+    const isPortScene = isHelioPortEffectType(activeEffect?.type);
+    const head = document.createElement("div");
+    head.className = "helio-section-head";
+    const title = document.createElement("h2");
+    title.textContent = opts.sceneOnly ? "Scene settings" : "Brightness";
+    head.appendChild(title);
+
+    const drivers = helioDrivers();
+    const brightness = Number(controlValue(drivers, "brightness", 128)) || 0;
+    const ambientOverride = helioAmbientBrightnessOverride();
+    const brightRow = document.createElement("label");
+    brightRow.className = "helio-slider-row";
+    brightRow.dataset.helioBrightnessRow = "";
+    brightRow.classList.toggle("is-overridden", ambientOverride.active);
+    const brightText = document.createElement("span");
+    brightText.dataset.helioField = "brightnessLabel";
+    brightText.textContent = "Brightness";
+    const brightValue = document.createElement("span");
+    brightValue.dataset.helioField = "brightness";
+    brightValue.textContent = String(brightness);
+    const bright = document.createElement("input");
+    bright.type = "range";
+    bright.min = "0";
+    bright.max = "255";
+    bright.step = "1";
+    bright.value = String(brightness);
+    bright.dataset.helioField = "brightnessInput";
+    bright.disabled = ambientOverride.active;
+    bright.setAttribute("aria-describedby", "helio-brightness-override");
+    bright.addEventListener("input", () => {
+        brightValue.textContent = bright.value;
+        dragTs["Drivers:brightness"] = Date.now();
+        debounceSend("helio:brightness", 90, () => sendControl("Drivers", "brightness", parseInt(bright.value, 10)));
+    });
+    brightRow.append(brightText, brightValue, bright);
+    const brightnessOverride = document.createElement("p");
+    brightnessOverride.id = "helio-brightness-override";
+    brightnessOverride.className = "helio-brightness-override";
+    brightnessOverride.dataset.helioField = "brightnessOverride";
+    populateHelioBrightnessOverrideNote(brightnessOverride, ambientOverride);
+
+    const rmt = helioRmtDriver();
+    const hardwareOutput = helioControlGroup("Hardware output", [
+        helioSliderRow(rmt, "localBrightness", "Driver brightness"),
+        helioSelectRow(rmt, "curve", "Output curve", "helioRmtCurve"),
+        helioSelectRow(rmt, "fixture", "Pixel order", "helioRmtLightPreset"),
+        helioSelectRow(rmt, "whiteMode", "White mixing", "helioRmtWhiteMode"),
+    ]);
+
+    const paletteRow = document.createElement("div");
+    paletteRow.className = "helio-palette-row";
+    const paletteLabel = document.createElement("label");
+    paletteLabel.textContent = "Palette";
+    const palCtrl = helioControl(drivers, "palette");
+    const paletteSelect = document.createElement("select");
+    paletteSelect.dataset.helioField = "paletteSelect";
+    (palCtrl?.options || []).forEach((opt, i) => {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = opt?.name || String(opt);
+        paletteSelect.appendChild(option);
+    });
+    paletteSelect.value = String(helioChoiceIndex(palCtrl));
+    paletteSelect.addEventListener("change", async () => {
+        if (await sendControl("Drivers", "palette", parseInt(paletteSelect.value, 10))) updateHelioHome();
+        else refetchState();
+    });
+    paletteLabel.appendChild(paletteSelect);
+    const swatches = document.createElement("div");
+    swatches.className = "helio-swatches";
+    (palCtrl?.options || []).slice(0, 10).forEach((opt, i) => {
+        const swatch = document.createElement("button");
+        swatch.type = "button";
+        swatch.className = "helio-swatch";
+        swatch.style.background = paletteCss(opt);
+        swatch.title = opt?.name || `Palette ${i}`;
+        swatch.setAttribute("aria-label", swatch.title);
+        swatch.classList.toggle("active", helioChoiceIndex(palCtrl) === i);
+        swatch.addEventListener("click", async () => {
+            paletteSelect.value = String(i);
+            if (await sendControl("Drivers", "palette", i)) updateHelioHome();
+            else refetchState();
+        });
+        swatches.appendChild(swatch);
+    });
+    paletteRow.append(paletteLabel, swatches);
+
+    const solid = helioEffects().find(e => e.type === "SolidEffect");
+    const solidRow = helioColorRow(
+        solid,
+        "Glow",
+        ["red", "green", "blue"],
+        "helioSolidColor",
+        true,
+    );
+
+    if (!opts.sceneOnly) panel.append(head, brightRow, brightnessOverride);
+    if (!opts.globalOnly && isFactoryScene && isPortScene) {
+        const sceneControls = helioSceneControls(helioControlSceneForEffect(activeEffect));
+        const sceneRow = (controlName, makeRow) => helioSceneControl(sceneControls, controlName, makeRow);
+        const presetControls = document.createElement("div");
+        presetControls.className = "helio-preset-controls";
+        const motionGroup = helioControlGroup("Motion", [
+            sceneRow("speed", () => helioSliderRow(activeEffect, "speed")),
+            sceneRow("effect intensity", () => helioSliderRow(activeEffect, "effect intensity")),
+        ]);
+        const colorGroup = helioControlGroup("Palette & color", [
+            sceneRow("palette", () => helioPaletteRow(activeEffect, "palette", "Preset palette")),
+            sceneRow("red", () => helioColorRow(activeEffect, "Scene color", ["red", "green", "blue"], "helioPrimaryColor", true)),
+            sceneRow("secondary red", () => helioColorRow(activeEffect, "Accent", ["secondary red", "secondary green", "secondary blue"], "helioSecondaryColor", false)),
+        ]);
+        const advancedGroup = helioAdvancedGroup([
+            motionGroup,
+            colorGroup,
+            helioControlGroup("Demo & reset", [
+                sceneRow("idleBeat", () => helioToggleRow(activeEffect, "idleBeat", "Demo beat", "helioIdleBeat")),
+                helioButtonRow(activeEffect, "source defaults"),
+            ]),
+            helioControlGroup("Fine tuning", [
+                sceneRow("custom 1", () => helioSliderRow(activeEffect, "custom 1")),
+                sceneRow("custom 2", () => helioSliderRow(activeEffect, "custom 2")),
+                sceneRow("custom 3", () => helioSliderRow(activeEffect, "custom 3")),
+                sceneRow("output", () => helioSliderRow(activeEffect, "output")),
+            ]),
+            helioControlGroup("Options", [
+                sceneRow("option 1", () => helioToggleRow(activeEffect, "option 1", helioPrettyLabel("option 1"), "helioOption1")),
+                sceneRow("option 2", () => helioToggleRow(activeEffect, "option 2", helioPrettyLabel("option 2"), "helioOption2")),
+                sceneRow("option 3", () => helioToggleRow(activeEffect, "option 3", helioPrettyLabel("option 3"), "helioOption3")),
+                sceneRow("sound simulation", () => helioSliderRow(activeEffect, "sound simulation")),
+                sceneRow("audio map", () => helioSliderRow(activeEffect, "audio map")),
+            ]),
+        ], "Advanced scene controls");
+        [advancedGroup].filter(Boolean).forEach(group => presetControls.appendChild(group));
+        panel.appendChild(presetControls);
+    } else if (!opts.globalOnly && isFactoryScene) {
+        const nativeControls = document.createElement("div");
+        nativeControls.className = "helio-preset-controls";
+        const tuningGroup = helioControlGroup("Scene tuning", helioNativeControlRows(activeEffect));
+        const usesGlobalPalette = helioControlSceneForEffect(activeEffect)?.usesGlobalPalette !== false &&
+            !helioHasDirectColor(activeEffect) && !helioControl(activeEffect, "palette");
+        const advancedGroup = helioAdvancedGroup([
+            tuningGroup,
+            helioControlGroup("Color", [usesGlobalPalette ? paletteRow : null]),
+        ], "Advanced scene controls");
+        [advancedGroup].filter(Boolean).forEach(group => nativeControls.appendChild(group));
+        panel.appendChild(nativeControls);
+    } else if (!opts.globalOnly) {
+        const advancedGroup = helioAdvancedGroup([
+            helioControlGroup("Color", [paletteRow, solidRow]),
+        ], "Advanced color controls");
+        if (advancedGroup) panel.appendChild(advancedGroup);
+    }
+    if (hardwareOutput && !opts.sceneOnly) {
+        const hardware = document.createElement("details");
+        hardware.className = "helio-hardware-settings";
+        const summary = document.createElement("summary");
+        summary.textContent = "Hardware output settings";
+        hardware.append(summary, hardwareOutput);
+        panel.appendChild(hardware);
+    }
+    if (opts.sceneOnly) {
+        for (const advanced of panel.querySelectorAll(".helio-advanced-group")) {
+            const content = advanced.querySelector(".helio-advanced-content");
+            if (content) advanced.replaceWith(content);
+        }
+    }
+    return panel;
+}
+
+function renderHelioPlaylistsView(host, opts = {}) {
+    const wrap = document.createElement("section");
+    wrap.className = opts.dashboard ? "helio-dashboard-playlists" : "helio-playlists-view";
+
+    const head = document.createElement("div");
+    head.className = "presets-head";
+    const title = document.createElement("h2");
+    title.textContent = "Playlists";
+    const status = document.createElement("div");
+    status.className = "presets-status";
+    head.append(title, status);
+    wrap.appendChild(head);
+
+    const grid = document.createElement("div");
+    grid.className = "helio-playlist-grid";
+    const active = helioActiveEffect();
+    const audioReady = helioAudioStartEnabled(helioAudio());
+
+    for (const playlist of HELIO_SCENE_PLAYLISTS) {
+        const needsAudio = helioPlaylistUsesAudio(playlist) && !audioReady;
+        const section = document.createElement("section");
+        section.className = "helio-playlist-section";
+        section.dataset.helioPlaylist = playlist.id;
+        section.classList.toggle("active", helioPlaylistRun?.id === playlist.id);
+        section.classList.toggle("needs-audio", needsAudio);
+
+        const header = document.createElement("div");
+        header.className = "helio-playlist-header";
+        const copy = document.createElement("div");
+        copy.className = "helio-playlist-copy";
+        const name = document.createElement("div");
+        name.className = "preset-name";
+        name.textContent = playlist.label;
+        const meta = document.createElement("div");
+        meta.className = "preset-meta";
+        meta.textContent = needsAudio
+            ? "Audio setup needed"
+            : `${playlist.order.length} animations / ${playlist.duration}s each`;
+        copy.append(name, meta);
+
+        const sequence = document.createElement("div");
+        sequence.className = "helio-playlist-sequence";
+        playlist.order.forEach(presetIndex => {
+            const preset = HELIO_SCENE_PRESETS[presetIndex];
+            if (preset) sequence.appendChild(renderHelioSceneCard(preset, status, active, audioReady));
+        });
+
+        const row = document.createElement("div");
+        row.className = "preset-card-actions helio-playlist-actions";
+        const play = document.createElement("button");
+        play.type = "button";
+        play.className = "preset-tool";
+        play.textContent = "Play";
+        if (needsAudio) play.title = "Set up audio";
+        play.addEventListener("click", () => applyHelioPlaylist(playlist, status));
+        const stop = document.createElement("button");
+        stop.type = "button";
+        stop.className = "preset-tool";
+        stop.textContent = "Stop";
+        stop.dataset.helioPlaylistStop = playlist.id;
+        stop.disabled = helioPlaylistRun?.id !== playlist.id;
+        stop.addEventListener("click", () => {
+            stopHelioPlaylist();
+            status.textContent = "playlist stopped";
+        });
+        row.append(play, stop);
+        header.append(copy, row);
+        section.append(header, sequence);
+        grid.appendChild(section);
+    }
+
+    wrap.appendChild(grid);
+    host.appendChild(wrap);
+    if (!opts.dashboard) startHelioModePreviews();
+}
+
+function renderHelioSetupMenu() {
+    if (isNebuliteFirmware()) return renderProductSetup({
+        profiles: NEBULITE_SETUP_PROFILES,
+        session: nebuliteSetupSession,
+        identity: {
+            firmware: deviceFirmwareInfo().firmware,
+            chip: controlValue(findModule("System"), "chip", ""),
+        },
+        modules: state?.modules || [],
+        getModules: () => state?.modules || [],
+        loadMetadata: helioNeedsModuleMetadata("Drivers") ? () => ensureHelioModuleMetadata("Drivers") : null,
+        apply: async patch => {
+            const response = await apiFetch("/api/state", {
+                method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+            });
+            if (!response.ok) throw new Error(await errorMessage(response));
+            const result = await response.json();
+            if (!result.ok) throw new Error(result.error || "The controller rejected this setup.");
+        },
+        verify: async profile => {
+            if (!await refreshStateData(0, API_FETCH_TIMEOUT_MS)) return false;
+            const matches = productProfileMatches(profile, state?.modules || []);
+            if (matches) setTimeout(renderStateSnapshot, 0);
+            return matches;
+        },
+    });
+    const details = document.createElement("details");
+    details.className = "helio-dashboard-menu helio-setup-menu";
+    details.open = !helioSetupCollapsed();
+
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.textContent = "Setup";
+    const meta = document.createElement("span");
+    const currentCount = helioCurrentCount();
+    const currentSize = helioSizePresetForCount(currentCount);
+    meta.textContent = currentSize ? `${currentSize.label} / ${currentCount} LEDs` : `${currentCount} LEDs`;
+    summary.append(title, meta);
+    const content = document.createElement("div");
+    const load = async () => {
+        if (!details.open) return;
+        const needed = ["System", "Drivers", "Services", "Layouts"].filter(helioNeedsModuleMetadata);
+        if (needed.length) {
+            content.textContent = "Loading setup controls…";
+            const ready = await Promise.all(needed.map(ensureHelioModuleMetadata));
+            if (!details.open || !content.isConnected) return;
+            if (ready.some(value => !value)) {
+                content.textContent = "Setup controls could not be loaded.";
+                const retry = document.createElement("button");
+                retry.textContent = "Retry";
+                retry.addEventListener("click", load);
+                content.appendChild(retry);
+                return;
+            }
+        }
+        content.replaceChildren(renderHelioSetupPanel({ forceExpanded: true, embedded: true }));
+    };
+    details.addEventListener("toggle", () => { setHelioSetupCollapsed(!details.open); load(); });
+    details.append(summary, content);
+    if (details.open) load();
+    return details;
+}
+
+function renderHelioPreviewSettings() {
+    const settings = helioPreviewSettings();
+    const details = document.createElement("details");
+    details.className = "helio-preview-settings";
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.textContent = "Preview rendering";
+    const meta = document.createElement("span");
+    meta.textContent = `${settings.mainBounces} reflections`;
+    summary.append(title, meta);
+
+    const grid = document.createElement("div");
+    grid.className = "helio-preview-settings-grid";
+    for (const spec of HELIO_PREVIEW_SETTING_SPECS) {
+        const row = document.createElement("label");
+        row.className = "helio-preview-setting-row";
+        const label = document.createElement("span");
+        label.textContent = spec.label;
+        const range = document.createElement("input");
+        range.type = "range";
+        range.min = String(spec.min);
+        range.max = String(spec.max);
+        range.step = String(spec.step);
+        range.value = String(settings[spec.key]);
+        range.dataset.helioPreviewSetting = spec.key;
+        const number = document.createElement("input");
+        number.type = "number";
+        number.min = range.min;
+        number.max = range.max;
+        number.step = range.step;
+        number.value = range.value;
+        number.dataset.helioPreviewSettingNumber = spec.key;
+        const apply = rawValue => {
+            const value = setHelioPreviewSetting(spec.key, rawValue);
+            range.value = String(value);
+            number.value = String(value);
+            if (spec.key === "mainBounces") meta.textContent = `${value} reflections`;
+        };
+        range.addEventListener("input", () => apply(range.value));
+        number.addEventListener("change", () => apply(number.value));
+        row.append(label, range, number);
+        grid.appendChild(row);
+    }
+
+    const toggles = document.createElement("div");
+    toggles.className = "helio-preview-setting-toggles";
+    const toggle = (labelText, checked, onChange, datasetKey = "") => {
+        const row = document.createElement("label");
+        row.className = "helio-preview-setting-toggle";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = checked;
+        if (datasetKey) input.dataset[datasetKey] = "";
+        input.addEventListener("change", () => onChange(input.checked));
+        const label = document.createElement("span");
+        label.textContent = labelText;
+        row.append(input, label);
+        return row;
+    };
+    toggles.append(
+        toggle("Glass rim", settings.showRim, checked => setHelioPreviewSetting("showRim", checked)),
+        toggle("Wall", helioPreviewWallEnabled(), setHelioPreviewWallEnabled, "helioWallToggle"),
+        toggle("Tilt", helioPreviewTiltEnabled(), setHelioPreviewTiltEnabled, "helioTiltToggle"),
+        toggle("Swivel", helioPreviewSwivelEnabled(), setHelioPreviewSwivelEnabled, "helioSwivelToggle"),
+    );
+
+    const actions = document.createElement("div");
+    actions.className = "helio-preview-setting-actions";
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "helio-secondary-action";
+    reset.textContent = "Reset preview";
+    reset.addEventListener("click", () => {
+        resetHelioPreviewSettings();
+        const replacement = renderHelioPreviewSettings();
+        replacement.open = true;
+        details.replaceWith(replacement);
+    });
+    actions.appendChild(reset);
+
+    details.append(summary, grid, toggles, actions);
+    return details;
+}
+
+function renderHelioAmbientSettings() {
+    const ambient = helioAmbientLight();
+    if (!ambient) return null;
+
+    const section = document.createElement("section");
+    section.className = "helio-ambient-settings";
+    section.id = "helio-automatic-brightness";
+    const heading = document.createElement("h3");
+    heading.textContent = "Automatic brightness";
+    const intro = document.createElement("p");
+    intro.className = "helio-ambient-intro";
+    intro.textContent = "Choose the LED brightness for a dark and a bright room. HELIO blends smoothly between those two points as the measured light changes.";
+    section.append(heading, intro);
+
+    const settings = new Map([
+        ["automatic", ["Automatic control", "Uses the sensor curve below. Turn it off to keep the manual brightness from the main control."]],
+        ["lux", ["Measured light", "Light currently measured at the sensor. Higher lux means a brighter room."]],
+        ["target", ["Current output", "Brightness HELIO currently applies, from 0 (off) to 255 (full)."]],
+        ["darkLux", ["Dark reference (lux)", "At or below this light level, HELIO uses the brightness-in-darkness value."]],
+        ["darkBrightness", ["Brightness in darkness", "LED output at the dark reference, from 0 (off) to 255 (full)."]],
+        ["brightLux", ["Bright reference (lux)", "At or above this light level, HELIO uses the brightness-in-bright-room value."]],
+        ["brightBrightness", ["Brightness in bright room", "LED output at the bright reference, from 0 (off) to 255 (full)."]],
+        ["hysteresisLux", ["Minimum change (lux)", "A reading must differ by at least this much before the output changes. Raise it if brightness visibly jitters."]],
+    ]);
+    for (const [name, [labelText, description]] of settings) {
+        const control = helioControl(ambient, name);
+        if (!control) continue;
+        const row = createControl(ambient.name, ambient.type, control);
+        if (!row) continue;
+        const label = row.querySelector(".control-label");
+        if (label) {
+            const inputs = [...row.children].filter(element => element !== label);
+            const copy = document.createElement("span");
+            copy.className = "helio-ambient-control-copy";
+            label.textContent = labelText;
+            const help = document.createElement("span");
+            help.className = "helio-ambient-control-description";
+            help.textContent = description;
+            copy.append(label, help);
+
+            const input = document.createElement("span");
+            input.className = "helio-ambient-control-input";
+            input.append(...inputs);
+            row.replaceChildren(copy, input);
+        }
+        section.appendChild(row);
+    }
+    clearInterval(helioAmbientRefreshTimer);
+    let reading = false;
+    helioAmbientRefreshTimer = setInterval(async () => {
+        if (!section.isConnected) {
+            clearInterval(helioAmbientRefreshTimer);
+            helioAmbientRefreshTimer = null;
+            return;
+        }
+        const rect = section.getBoundingClientRect();
+        if (reading || document.hidden || !section.getClientRects().length ||
+            rect.bottom < 0 || rect.top > window.innerHeight) return;
+        reading = true;
+        try {
+            const response = await apiFetch(`/api/modules/${encodeURIComponent(ambient.name)}`);
+            if (!response.ok) return;
+            const latest = await response.json();
+            const current = helioAmbientLight();
+            if (current?.name !== latest.name) return;
+            for (const name of ["lux", "target"]) {
+                const value = helioControl(latest, name);
+                const control = helioControl(current, name);
+                if (value && control) control.value = value.value;
+            }
+            updateModuleControls(current);
+            updateHelioBrightnessOverrideNote(helioAmbientBrightnessOverride());
+        } catch (error) {
+            console.warn("[helio] sensor readout unavailable", error);
+        } finally {
+            reading = false;
+        }
+    }, 2000);
+    return section;
+}
+
+function renderHelioSetupPanel(opts = {}) {
+    const panel = document.createElement("section");
+    panel.className = opts.embedded ? "helio-setup-panel helio-setup-panel-embedded" : "helio-panel helio-setup-panel";
+    const collapsed = opts.forceExpanded ? false : helioSetupCollapsed();
+    panel.classList.toggle("is-collapsed", collapsed);
+    const head = document.createElement("div");
+    head.className = "helio-section-head";
+    const title = document.createElement("h2");
+    title.textContent = "Setup";
+    const status = document.createElement("span");
+    status.className = "helio-inline-status";
+    head.append(title, status);
+
+    const currentCount = helioCurrentCount();
+    const currentSize = helioSizePresetForCount(currentCount);
+
+    if (collapsed) {
+        const summary = document.createElement("div");
+        summary.className = "helio-setup-summary";
+        const copy = document.createElement("div");
+        copy.className = "helio-setup-copy";
+        const size = document.createElement("strong");
+        size.textContent = currentSize ? currentSize.label : `${currentCount} LEDs`;
+        const detail = document.createElement("span");
+        detail.textContent = `${currentCount} LEDs`;
+        copy.append(size, detail);
+        const configure = document.createElement("button");
+        configure.type = "button";
+        configure.className = "helio-secondary-action";
+        configure.textContent = "Configure";
+        configure.addEventListener("click", () => {
+            setHelioSetupCollapsed(false);
+            panel.replaceWith(renderHelioSetupPanel(opts));
+        });
+        summary.append(copy, configure);
+        panel.append(head, summary);
+        return panel;
+    }
+
+    const sizeButtons = document.createElement("div");
+    sizeButtons.className = "helio-size-grid";
+    for (const preset of HELIO_SIZE_PRESETS) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = preset.label;
+        btn.title = `${preset.count} LEDs`;
+        btn.className = currentCount === preset.count ? "active" : "";
+        btn.addEventListener("click", async () => {
+            await applyHelioSize(preset.count, status);
+            setHelioSetupCollapsed(true);
+            setTimeout(refetchState, 250);
+        });
+        sizeButtons.appendChild(btn);
+    }
+
+    const startup = document.createElement("div");
+    startup.className = "helio-start-grid";
+    for (const [mode, label] of [["static", "Static"], ["audio", "Audio"]]) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        btn.addEventListener("click", async () => {
+            await applyHelioStartup(mode, status);
+            setHelioSetupCollapsed(true);
+            setTimeout(refetchState, 250);
+        });
+        startup.appendChild(btn);
+    }
+    const defaults = document.createElement("button");
+    defaults.type = "button";
+    defaults.className = "helio-secondary-action";
+    defaults.textContent = "Defaults";
+    defaults.addEventListener("click", async () => {
+        await applyHelioDefaults(status);
+        setHelioSetupCollapsed(true);
+        setTimeout(refetchState, 250);
+    });
+    const previewSettings = renderHelioPreviewSettings();
+    const ambientSettings = renderHelioAmbientSettings();
+    const setupParts = [sizeButtons, startup, defaults];
+    if (ambientSettings) setupParts.push(ambientSettings);
+    setupParts.push(previewSettings);
+    if (opts.embedded) panel.append(...setupParts, status);
+    else panel.append(head, ...setupParts);
+    return panel;
+}
+
+function refreshHelioControlPanel(activeEffect = helioActiveEffect()) {
+    const current = document.querySelector(".helio-controls");
+    if (!current) return false;
+    current.replaceWith(renderHelioControlPanel(activeEffect));
+    return true;
+}
+
+function showHelioScenePending(mode, status) {
+    setHelioModeCardActive(mode.id);
+    if (status) status.textContent = `Selecting ${mode.label}…`;
+    const panel = document.querySelector(".helio-controls");
+    if (!panel) return;
+    panel.setAttribute("aria-busy", "true");
+    const heading = document.createElement("h2");
+    heading.textContent = mode.label;
+    const message = document.createElement("p");
+    message.className = "helio-scene-loading";
+    message.setAttribute("role", "status");
+    message.textContent = "Loading scene controls…";
+    panel.replaceChildren(heading, message);
+}
+
+function syncHelioDashboardControls() {
+    refreshHelioControlPanel();
+    renderNav();
+    updateHelioHome();
+}
+
+function waitMs(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function activateHelioEffect(target, controls = {}) {
+    if (!target?.name) return false;
+    const operations = planHelioEffectActivation(helioEffects(), target?.name, controls, {
+        controlEquals: controlValuesEqual,
+        controlValueForSend: helioControlValueForSend,
+    });
+    return sendHelioControlOperations(operations);
+}
+
+async function sendHelioControlOperations(operations) {
+    if (!operations.length) return true;
+    try {
+        const document = planHelioControlDocument(state.modules, operations);
+        if (operations.some(op => op.control === "enabled") && ws?.readyState === WebSocket.OPEN)
+            helioSceneResyncExpected = true;
+        const response = await apiFetch("/api/state", {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(document),
+        });
+        if (!response.ok) throw new Error(await errorMessage(response));
+        const result = await response.json();
+        if (!result.ok) throw new Error(result.error || "Scene configuration failed");
+        for (const op of operations) {
+            const module = updateLocalControlValue(op.module, op.control, op.value);
+            if (module && op.control === "enabled") module.enabled = !!op.value;
+        }
+        return true;
+    } catch (error) {
+        console.warn("[helio] scene configuration failed", error);
+        return false;
+    }
+}
+
+async function applyHelioScenePalette(mode) {
+    if (!mode || Object.prototype.hasOwnProperty.call(mode.controls || {}, "palette")) return;
+    const drivers = helioDrivers();
+    const ctrl = helioControl(drivers, "palette");
+    const palette = normalizePaletteIndex(mode.palette, ctrl);
+    if (!drivers || !ctrl || !Number.isFinite(palette)) return;
+    if (controlValuesEqual(ctrl, palette)) return;
+    await sendControl(drivers.name, "palette", palette);
+}
+
+function syncHelioPlaylistControls() {
+    document.querySelectorAll(".helio-playlist-section[data-helio-playlist]").forEach(section => {
+        const active = helioPlaylistRun?.id === section.dataset.helioPlaylist;
+        section.classList.toggle("active", active);
+        const stop = section.querySelector("[data-helio-playlist-stop]");
+        if (stop) stop.disabled = !active;
+    });
+}
+
+function stopHelioPlaylist() {
+    if (helioPlaylistRun?.timer) clearTimeout(helioPlaylistRun.timer);
+    helioPlaylistRun = null;
+    syncHelioPlaylistControls();
+}
+
+function pauseHelioCardPreviews(ms = 1600) {
+    helioPreviewPausedUntil = Math.max(helioPreviewPausedUntil, performance.now() + ms);
+}
+
+function helioCardPreviewsPaused(now = performance.now()) {
+    return helioModeApplying ||
+        (helioFloatingPreviewEl && !helioFloatingPreviewEl.hidden) ||
+        now < helioPreviewPausedUntil;
+}
+
+function resumeHelioCardPreviews() {
+    helioPreviewPausedUntil = performance.now();
+    requestAnimationFrame(now => queueHelioVisiblePreviews(now));
+}
+
+function setHelioModeCardActive(modeId) {
+    document.querySelectorAll(".helio-scene-card[data-helio-mode]").forEach(card => {
+        const active = card.dataset.helioMode === modeId;
+        card.classList.toggle("active", active);
+        card.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+}
+
+async function ensureHelioAudioReady(status) {
+    if (helioAudioStartEnabled(helioAudio())) return true;
+    const audio = helioAudio();
+    if (!audio?.name) {
+        if (status) status.textContent = "audio unavailable";
+        return false;
+    }
+    if (status) status.textContent = "setting up audio";
+    const ok = await sendHelioControlOperations(Object.entries(HELIO_DEFAULT_AUDIO)
+        .map(([control, value]) => ({ module: audio.name, control, value })));
+    await waitMs(120);
+    try {
+        const fresh = await readModuleData(audio.name);
+        replaceModuleInState(audio.name, fresh, state.modules);
+        updateHelioHome();
+    } catch (error) { console.warn("[audio] readback failed", error); }
+    const ready = helioAudioStartEnabled(helioAudio());
+    if (status) status.textContent = ready ? "audio ready" : (ok ? "audio setup needed" : "audio setup failed");
+    return ready;
+}
+
+async function applyHelioMode(mode, status, opts = {}) {
+    if (mode && !opts.fromPlaylist) showHelioScenePending(mode, status);
+    if (helioModeApplying) {
+        if (!opts.fromPlaylist) {
+            stopHelioPlaylist();
+            if (mode?.id && mode.id !== helioModeApplyingId) {
+                helioModeQueued = { mode, status, opts: { ...opts, fromPlaylist: false } };
+                if (status) status.textContent = "queued";
+            } else {
+                helioModeQueued = null;
+                if (status) status.textContent = "applying";
+            }
+        }
+        return false;
+    }
+    helioModeApplying = true;
+    helioModeApplyingId = mode?.id || "";
+    const generation = helioModeGeneration;
+    try {
+        if (!mode) {
+            if (status) status.textContent = "not available";
+            return false;
+        }
+        pauseHelioCardPreviews(2400);
+        if (status) status.textContent = "applying";
+        if (opts.fromPlaylist) showHelioScenePending(mode, status);
+        if (!(state?.modules?.length)) {
+            if (status) status.textContent = "state unavailable";
+            return false;
+        }
+        if (helioSceneUsesAudio(mode) && !(await ensureHelioAudioReady(status))) {
+            return false;
+        }
+        if (generation !== helioModeGeneration) return false;
+        if (!opts.fromPlaylist) stopHelioPlaylist();
+        const ready = await ensureHelioEffectsState();
+        if (generation !== helioModeGeneration) return false;
+        if (!ready) {
+            if (status) status.textContent = "live scene unavailable";
+            return false;
+        }
+        const layer = firstModuleByType("Layer");
+        if (!layer) {
+            if (status) status.textContent = "no layer";
+            return false;
+        }
+        let target = helioEffects().find(e => e.type === mode.type);
+        if (!target) {
+            const slot = helioSceneReplacementSlot(mode.type);
+            const mutationOpts = { refresh: false };
+            let replacement = null;
+            let changed = false;
+            if (slot) {
+                if (ws?.readyState === WebSocket.OPEN) helioSceneResyncExpected = true;
+                replacement = await replaceModule(slot.name, mode.type, mutationOpts);
+                if (generation !== helioModeGeneration) return false;
+                changed = !!replacement;
+            }
+            if (!changed) {
+                if (ws?.readyState === WebSocket.OPEN) helioSceneResyncExpected = true;
+                changed = await addModule(mode.type, layer.name, mutationOpts);
+                if (generation !== helioModeGeneration) return false;
+            }
+            if (!changed) {
+                const activeSlot = helioActiveEffect();
+                if (activeSlot) {
+                    if (ws?.readyState === WebSocket.OPEN) helioSceneResyncExpected = true;
+                    replacement = await replaceModule(activeSlot.name, mode.type, mutationOpts);
+                    if (generation !== helioModeGeneration) return false;
+                    changed = !!replacement;
+                }
+            }
+            if (!changed) {
+                helioSceneResyncExpected = false;
+                if (status) status.textContent = "module failed";
+                return false;
+            }
+            if (replacement && replacement !== true) target = replacement;
+            if (!target) {
+                // Compatibility fallback for an older server response or the rare add path, neither
+                // of which carries the replacement resource.
+                await refreshStateData(0, API_FETCH_TIMEOUT_MS);
+                if (generation !== helioModeGeneration) return false;
+                target = helioEffects().find(e => e.type === mode.type);
+            }
+        }
+        if (target) {
+            await applyHelioScenePalette(mode);
+            if (generation !== helioModeGeneration) return false;
+            const activated = await activateHelioEffect(target, mode.controls || {});
+            if (generation !== helioModeGeneration) return false;
+            clearHelioLivePreview();
+            const active = helioActiveEffect();
+            if (!activated || active?.type !== mode.type || active.enabled === false) {
+                if (status) status.textContent = "apply failed";
+                return false;
+            }
+            if (!helioModeQueued) syncHelioDashboardControls();
+            if (status && !helioModeQueued) status.textContent = mode.label;
+            return true;
+        } else if (status) {
+            status.textContent = "not available";
+        }
+        return false;
+    } finally {
+        helioModeApplying = false;
+        helioModeApplyingId = "";
+        const queued = helioModeQueued;
+        helioModeQueued = null;
+        if (queued) await applyHelioMode(queued.mode, queued.status, queued.opts);
+        else {
+            if (generation === helioModeGeneration) refreshHelioControlPanel();
+            resumeHelioCardPreviews();
+        }
+    }
+}
+
+async function applyHelioPlaylist(playlist, status) {
+    if (!playlist || !Array.isArray(playlist.order) || playlist.order.length === 0) {
+        if (status) status.textContent = "not available";
+        return;
+    }
+    if (helioPlaylistUsesAudio(playlist) && !(await ensureHelioAudioReady(status))) {
+        return;
+    }
+    stopHelioPlaylist();
+    const durationMs = Math.max(3, Number(playlist.duration) || 10) * 1000;
+    const run = { id: playlist.id, index: 0, timer: null, busy: false };
+    helioPlaylistRun = run;
+    syncHelioPlaylistControls();
+    const schedule = () => {
+        if (helioPlaylistRun !== run) return;
+        run.timer = setTimeout(step, durationMs);
+    };
+    const step = async () => {
+        if (helioPlaylistRun !== run || run.busy) return;
+        const sceneIndex = playlist.order[run.index % playlist.order.length];
+        const scene = HELIO_FACTORY_SCENES[sceneIndex];
+        run.index = (run.index + 1) % playlist.order.length;
+        if (!scene) return;
+        run.busy = true;
+        try {
+            helioPlaylistApplying = true;
+            const applied = await applyHelioMode(scene, status, { fromPlaylist: true });
+            if (applied && status) status.textContent = `${playlist.label}: ${scene.label}`;
+            if (!applied) {
+                if (status) status.textContent = "playlist paused";
+                stopHelioPlaylist();
+                return;
+            }
+        } finally {
+            helioPlaylistApplying = false;
+            run.busy = false;
+            if (helioPlaylistRun === run) schedule();
+        }
+    };
+    await step();
+    if (helioPlaylistRun === run) {
+        if (status) status.textContent = `${playlist.label} running`;
+        setTimeout(renderCards, 350);
+    }
+}
+
+function updateHelioHome() {
+    if (!document.querySelector(".helio-home")) return;
+    syncHelioBatteryStatus();
+    if (isNebuliteFirmware()) syncNebulitePreviewProfile();
+    // Product mode skips the generic card updater, but the Setup menu reuses the
+    // same control DOM for its ambient-light rows. Keep those read-outs and inputs
+    // on the normal patch path without rebuilding the menu (which would close it).
+    const ambient = helioAmbientLight();
+    if (ambient) updateModuleControls(ambient);
+    const set = (key, value) => {
+        document.querySelectorAll(`[data-helio-field="${key}"]`).forEach(el => {
+            if (el.closest("[data-preset-controls]")) return;
+            if (el instanceof HTMLInputElement && el.type === "checkbox") {
+                if (document.activeElement !== el) el.checked = !!value;
+            } else if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement) {
+                if (document.activeElement !== el) el.value = String(value);
+            } else {
+                el.textContent = String(value);
+            }
+        });
+    };
+    const active = helioActiveEffect();
+    const mode = helioModeForEffect(active);
+    const drivers = helioDrivers();
+    const ambientOverride = helioAmbientBrightnessOverride();
+    set("leds", helioCurrentCount());
+    set("scene", helioEffectsStale ? "Playback state pending" : mode?.label || "Off");
+    set("brightnessMetric", helioBrightnessLabel(drivers));
+    set("connection", helioConnectionLabel());
+    set("power", controlValue(drivers, "on", true) ? "On" : "Off");
+    set("brightnessLabel", "Brightness");
+    set("brightness", controlValue(drivers, "brightness", 0));
+    set("brightnessInput", controlValue(drivers, "brightness", 0));
+    updateHelioBrightnessOverrideNote(ambientOverride);
+    document.querySelectorAll("[data-helio-brightness-row]").forEach(row => {
+        row.classList.toggle("is-overridden", ambientOverride.active);
+    });
+    document.querySelectorAll('[data-helio-field="brightnessInput"]').forEach(input => {
+        input.disabled = ambientOverride.active;
+    });
+    document.querySelectorAll('[data-helio-field="brightnessOverride"]').forEach(note => {
+        note.hidden = !ambientOverride.active;
+    });
+    set("paletteSelect", helioChoiceIndex(helioControl(drivers, "palette")));
+    set("helioPlaylistSelect", controlValue(active, "playlist", 1));
+    set("helioPresetSelect", controlValue(active, "preset", 16));
+    set("helioAutoPlay", controlValue(active, "autoPlay", true));
+    set("helioIdleBeat", controlValue(active, "idleBeat", true));
+    for (const ctrl of active?.controls || []) {
+        set(helioFieldName(ctrl.name), ctrl.value);
+        set(helioFieldName(ctrl.name) + "_input", ctrl.type === "select" || ctrl.type === "palette" ? helioChoiceIndex(ctrl) : ctrl.value);
+    }
+    const rmt = helioRmtDriver();
+    for (const [field, control] of [["helioRmtCurve", "curve"], ["helioRmtLightPreset", "fixture"], ["helioRmtWhiteMode", "whiteMode"]]) {
+        set(field, helioChoiceIndex(helioControl(rmt, control)));
+    }
+    set("helioOption1", controlValue(active, "option 1", false));
+    set("helioOption2", controlValue(active, "option 2", false));
+    set("helioOption3", controlValue(active, "option 3", false));
+    set("helioPrimaryColor", helioColorHex(active, ["red", "green", "blue"], true));
+    set("helioSecondaryColor", helioColorHex(active, ["secondary red", "secondary green", "secondary blue"]));
+    const solid = helioEffects().find(effect => effect.type === "SolidEffect");
+    set("helioSolidColor", helioColorHex(solid, ["red", "green", "blue"], true));
+    if (helioModeApplying) return;
+    document.querySelectorAll(".helio-scene-card[data-helio-mode]").forEach(card => {
+        const m = HELIO_MODES.find(x => x.id === card.dataset.helioMode);
+        const isActive = !!m && active?.type === m.type;
+        card.classList.toggle("active", isActive);
+        card.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+}
+
+function startHelioModePreviews() {
+    if (!state || (!isNebuliteFirmware() && !drawHelioTraceWebGLPreview)) return;
+    const now = performance.now();
+    bindHelioPreviewViewportWatch();
+    if (!helioCardPreviewsPaused(now)) queueHelioMissingVisiblePreviews(now);
+    lastHelioPreviewPaint = now;
+    if (helioPreviewAnimRunning) return;
+    helioPreviewAnimRunning = true;
+    const loop = (now) => {
+        const alive = document.querySelector(".helio-home, .presets-view, .helio-playlists-view");
+        if (!alive) {
+            helioPreviewAnimRunning = false;
+            helioPreviewBatch = [];
+            helioPreviewBatchIndex = 0;
+            return;
+        }
+        if (document.visibilityState === "hidden") {
+            helioPreviewAnimRunning = false;
+            return;
+        }
+        if (helioCardPreviewsPaused(now)) {
+            helioPreviewAnimRunning = false;
+            if (!helioPreviewResumeTimer) {
+                const wait = Math.max(100, helioPreviewPausedUntil - now);
+                helioPreviewResumeTimer = setTimeout(() => {
+                    helioPreviewResumeTimer = 0;
+                    startHelioModePreviews();
+                }, wait);
+            }
+            return;
+        }
+        if (helioPreviewBatchIndex < helioPreviewBatch.length) {
+            paintHelioPreviewBatch(now);
+        } else if (now - lastHelioPreviewPaint >= 1000 / helioPreviewSettings().cardFps) {
+            lastHelioPreviewPaint = now;
+            helioPreviewBatch = helioPreviewItems(false, { animateOnly: true, includeMissing: true });
+            helioPreviewBatchIndex = 0;
+            if (helioPreviewBatch.length === 0) {
+                helioPreviewAnimRunning = false;
+                return;
+            }
+            paintHelioPreviewBatch(now);
+        }
+        requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+}
+
+function queueHelioVisiblePreviews(now, batchSize = helioPreviewSettings().cardBatch) {
+    helioPreviewBatch = helioPreviewItems(false);
+    helioPreviewBatchIndex = 0;
+    paintHelioPreviewBatch(now, batchSize);
+}
+
+function queueHelioMissingVisiblePreviews(now, batchSize = helioPreviewSettings().cardBatch) {
+    helioPreviewBatch = helioPreviewItems(false, { missingOnly: true });
+    helioPreviewBatchIndex = 0;
+    paintHelioPreviewBatch(now, batchSize);
+}
+
+function requestHelioViewportPreviewRefresh() {
+    if (helioPreviewViewportQueued) return;
+    helioPreviewViewportQueued = true;
+    requestAnimationFrame(now => {
+        helioPreviewViewportQueued = false;
+        drawHelioMainPreview();
+        if (helioCardPreviewsPaused(now)) return;
+        startHelioModePreviews();
+        if (now - lastHelioViewportPreviewPaint < 350) return;
+        lastHelioViewportPreviewPaint = now;
+        queueHelioMissingVisiblePreviews(now);
+    });
+}
+
+function bindHelioPreviewViewportWatch() {
+    if (helioPreviewViewportWatchBound) return;
+    helioPreviewViewportWatchBound = true;
+    window.addEventListener("scroll", requestHelioViewportPreviewRefresh, { passive: true });
+    window.addEventListener("resize", requestHelioViewportPreviewRefresh, { passive: true });
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) requestHelioViewportPreviewRefresh();
+    });
+}
+
+function helioPreviewNearViewport(canvas) {
+    const rect = canvas.getBoundingClientRect();
+    return rect.width > 0 &&
+        rect.height > 0 &&
+        rect.bottom >= -HELIO_PREVIEW_VIEWPORT_MARGIN_PX &&
+        rect.top <= window.innerHeight + HELIO_PREVIEW_VIEWPORT_MARGIN_PX;
+}
+
+function clearHelioPreviewRenderState(canvas) {
+    delete canvas.dataset.previewRenderer;
+    delete canvas.dataset.previewCamera;
+    delete canvas.dataset.previewMax;
+    delete canvas.dataset.previewLit;
+    helioPreviewClocks.delete(canvas);
+}
+
+function helioCardPreviewTime(canvas, now) {
+    const frameMs = 1000 / helioPreviewSettings().cardFps;
+    let clock = helioPreviewClocks.get(canvas);
+    if (!clock) {
+        clock = { lastPaint: now, sceneTime: 0 };
+        helioPreviewClocks.set(canvas, clock);
+        return 0;
+    }
+    const elapsed = Math.max(0, now - clock.lastPaint);
+    clock.lastPaint = now;
+    clock.sceneTime += Math.min(elapsed, frameMs * 1.5) / 1000;
+    return clock.sceneTime;
+}
+
+function paintHelioScenePreview(canvas, t) {
+    if (canvas.dataset.nativePreset) {
+        const record = helioPresetCollection?.records.get(canvas.dataset.nativePreset);
+        if (!record?.editor) {
+            if (record && !record.loading && performance.now() >= (record.previewRetryAt || 0))
+                helioPresetCollection.ensureEditor(record, { background: true }).then(() => {
+                    record.previewRetryAt = 0;
+                    startHelioModePreviews();
+                }).catch(() => { record.previewRetryAt = performance.now() + 2000; });
+            return;
+        }
+        const recording = isNebuliteFirmware() ? recordingForPreset(record.editor.document, record) : null;
+        if (recording) {
+            const frame = recording.frameAt(t * 1000);
+            if (frame !== null && drawNebuliteStripPreview(canvas, t, x => {
+                const pixel = Math.min(recording.ledCount - 1, Math.max(0, Math.floor(x * recording.ledCount)));
+                return recording.sample(frame, pixel) || [0, 0, 0];
+            }, recording.ledCount)) {
+                setHelioPreviewKind(canvas, "Historical recording · original settings");
+                return;
+            }
+        }
+        const effect = helioPresetModule(record);
+        const palette = helioControl(effect, "palette");
+        const sampler = makeHelioSampler(effect, paletteByIndex(helioChoiceIndex(palette)), { previewAudio: true });
+        drawHelioCardTracePreview(canvas, t, sampler, helioCurrentCount(), {effect});
+        return;
+    }
+    const mode = HELIO_MODES.find(m => m.id === canvas.dataset.helioModePreview);
+    const active = helioActiveEffect();
+    const usesActiveControls = !!mode && active?.enabled !== false && active?.type === mode.type;
+    const effect = usesActiveControls
+        ? active
+        : mode
+        ? { type: mode.type, controls: Object.entries(mode.controls || {}).map(([name, value]) => ({ name, value })) }
+        : active;
+    const pal = usesActiveControls ? paletteFromState() : helioPreviewPaletteForScene(mode);
+    const sampler = makeHelioSampler(effect, pal, { previewAudio: true });
+    canvas.dataset.previewSource = usesActiveControls ? "simulation-controls" : "simulation";
+    drawHelioCardTracePreview(
+        canvas,
+        t,
+        sampler,
+        helioCurrentCount(),
+        {effect},
+    );
+}
+
+function helioPreviewItems(force, opts = {}) {
+    const items = [];
+    const animated = canvas => {
+        const card = canvas.closest(".helio-scene-card, .preset-card");
+        return card?.classList.contains("active") || card?.matches(":hover, :focus-within");
+    };
+    document.querySelectorAll(".helio-mode-preview").forEach(canvas => {
+        if (!force && !helioPreviewNearViewport(canvas)) {
+            clearHelioPreviewRenderState(canvas);
+            return;
+        }
+        if (opts.activeOnly && !canvas.closest(".helio-scene-card")?.classList.contains("active")) return;
+        if (opts.missingOnly && canvas.dataset.previewRenderer) return;
+        if (opts.animateOnly && !animated(canvas) && !(opts.includeMissing && !canvas.dataset.previewRenderer)) return;
+        items.push({ type: "helio", canvas });
+    });
+    document.querySelectorAll(".preset-preview").forEach(canvas => {
+        if (!force && !helioPreviewNearViewport(canvas)) {
+            clearHelioPreviewRenderState(canvas);
+            return;
+        }
+        if (opts.activeOnly) return;
+        if (opts.missingOnly && canvas.dataset.previewRenderer) return;
+        if (opts.animateOnly && !animated(canvas) && !(opts.includeMissing && !canvas.dataset.previewRenderer)) return;
+        items.push({ type: "preset", canvas });
+    });
+    return items;
+}
+
+function paintHelioPreviewItem(item, now) {
+    if (!isNebuliteFirmware() && !drawHelioTraceWebGLPreview) return;
+    const t = helioCardPreviewTime(item.canvas, now);
+    if (item.type === "helio") paintHelioScenePreview(item.canvas, t);
+    else if (item.type === "preset") drawPresetCanvas(item.canvas, t);
+}
+
+function paintHelioPreviewBatch(now, batchSize = helioPreviewSettings().cardBatch) {
+    const end = Math.min(helioPreviewBatch.length, helioPreviewBatchIndex + batchSize);
+    const start = performance.now();
+    for (; helioPreviewBatchIndex < end; helioPreviewBatchIndex++) {
+        paintHelioPreviewItem(helioPreviewBatch[helioPreviewBatchIndex], now);
+        if (performance.now() - start >= 8) {
+            ++helioPreviewBatchIndex;
+            break;
+        }
+    }
+}
+
+function renderModuleTree(mod, parentEl, depth) {
+    const { card, childrenEl } = createCard(mod, depth);
+    parentEl.appendChild(card);
+    // Children render inside this card's .card-children wrapper, not as flat
+    // siblings. childrenEl is null for modules that don't accept children.
+    if (!childrenEl || !mod.children || mod.children.length === 0) return;
+
+    // One rule: a TOP-LEVEL module shows its children one at a time behind a tab strip, so its card
+    // stays short however many children it has. Deeper levels stack as before. The tabs are derived
+    // from mod.children on every render, so adding a layer adds its tab — there is no tab registry
+    // to keep in sync, which is the whole of the "dynamic" requirement.
+    if (depth === 0) {
+        // The "+" tab takes over the add affordance, so hide the footer's duplicate button — but keep
+        // the footer element itself, because openTypePicker renders the picker into it.
+        const addBtn = card.querySelector(".card-footer > .add-btn");
+        if (addBtn) addBtn.style.display = "none";
+        renderChildTabs(mod, childrenEl, depth);
+        return;
+    }
+    for (const child of mod.children) {
+        renderModuleTree(child, childrenEl, depth + 1);
+    }
+}
+
+// Drag a tab onto another to reorder — the tab strip IS the child list, so reordering tabs reorders
+// the modules. Deliberately the same insert-semantics + moveModuleTo() call the card drag uses
+// (attachDragHandlers): one reorder path, so a tab drag and a card drag can't drift apart.
+function attachTabDragHandlers(tab, child, parent) {
+    tab.draggable = true;
+
+    tab.addEventListener("dragstart", (e) => {
+        e.stopPropagation();                       // don't let the enclosing card's dragstart claim it
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", child.name);
+        tab.classList.add("dragging");
+    });
+    tab.addEventListener("dragend", () => {
+        tab.classList.remove("dragging");
+        document.querySelectorAll(".tab.drag-over").forEach(t => t.classList.remove("drag-over"));
+    });
+    tab.addEventListener("dragover", (e) => {
+        const src = document.querySelector(".tab.dragging");
+        if (!src || src === tab) return;
+        if (src.parentElement !== tab.parentElement) return;   // same strip only — not another container's
+        e.preventDefault();
+        tab.classList.add("drag-over");
+    });
+    tab.addEventListener("dragleave", () => tab.classList.remove("drag-over"));
+    tab.addEventListener("drop", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        tab.classList.remove("drag-over");
+        const srcName = e.dataTransfer.getData("text/plain");
+        if (!srcName || srcName === child.name) return;
+        // Re-find the index by NAME, not from the captured render-time object: state is replaced on
+        // every WS push, so `parent` here would be stale within ~1 s (same trap the card drag notes).
+        const live = findModule(parent.name);
+        const targetIdx = ((live && live.children) || []).findIndex(c => c.name === child.name);
+        if (targetIdx < 0) return;
+        moveModuleTo(srcName, targetIdx);
+    });
+}
+
+// A tab carries its module's fault severity as a dot, because a tab that can HIDE an error is worse
+// than no tab: a driver failing on a background tab must still be visible from the strip.
+function applyTabDot(tab, mod) {
+    const old = tab.querySelector(".tab-dot");
+    if (old) old.remove();
+    if (mod.severity !== "error" && mod.severity !== "warning") return;
+    const dot = document.createElement("span");
+    dot.className = "tab-dot tab-dot-" + mod.severity;
+    tab.appendChild(dot);
+}
+
+// Patch-path twin of applyTabDot + the disabled greying: the tab strip is built in renderCards(), which the
+// WS value patch deliberately never re-runs — so without this, a fault (or an enable/disable) on a background
+// tab would stay invisible until the next full render. (The UI has two render paths; a rule must live in both.)
+function updateTabDot(mod) {
+    const tab = document.querySelector(`.tab[data-tab-mid="${cssEscape(mod.name)}"]`);
+    if (!tab) return;
+    applyTabDot(tab, mod);
+    tab.classList.toggle("tab--disabled", mod.enabled === false);   // grey a disabled module's tab title
+}
+
+// Tab strip + the one selected child. `active` falls back to the first child whenever the remembered
+// tab is gone (the driver was deleted) or was never set, so the selection can never dangle.
+function renderChildTabs(mod, childrenEl, depth) {
+    const names = mod.children.map(c => c.name);
+    let active = selectedTabs[mod.name];
+    if (!names.includes(active)) active = names[0];
+
+    const strip = document.createElement("div");
+    strip.className = "tab-strip";
+    strip.setAttribute("role", "tablist");
+
+    for (const child of mod.children) {
+        const tab = document.createElement("button");
+        // Grey a disabled child's tab title (mirrors the card's card--disabled), so it reads as inactive
+        // from the strip without opening it. Derived purely from child.enabled — no backend round-trip.
+        tab.className = "tab" + (child.name === active ? " tab-active" : "")
+                              + (child.enabled === false ? " tab--disabled" : "");
+        tab.type = "button";
+        tab.setAttribute("role", "tab");
+        tab.setAttribute("aria-selected", child.name === active ? "true" : "false");
+        // Name + the module's own status dot, so a driver erroring on a background tab is still
+        // visible without opening it — a tab that can hide a fault is worse than no tab.
+        tab.dataset.tabMid = child.name;   // so updateTabDot can find it on the WS patch path
+        tab.textContent = child.name;
+        applyTabDot(tab, child);
+        attachTabDragHandlers(tab, child, mod);
+        tab.addEventListener("click", () => {
+            selectedTabs[mod.name] = child.name;
+            localStorage.setItem(LS_TABS, JSON.stringify(selectedTabs));
+            renderCards();
+        });
+        strip.appendChild(tab);
+    }
+
+    // "+" lives at the END OF THE STRIP, where a new tab appears — not in the card footer below the
+    // panel, which would read as "add something to the open driver" rather than "add a driver".
+    // createCard still renders the footer button for non-tabbed containers; here we hide it and put
+    // the affordance where the tabs are.
+    if (acceptsNewChildren(mod)) {
+        const addTab = document.createElement("button");
+        addTab.className = "tab tab-add";
+        addTab.type = "button";
+        addTab.textContent = "+";
+        addTab.title = "add " + rolesAcceptedBy(mod).join(" / ");
+        addTab.addEventListener("click", () => {
+            // THIS card's own footer — a plain querySelector would match the first .card-footer in the
+            // subtree, which belongs to a nested child's card (Effects would then offer the Layer's
+            // effects instead of another layer). Scope to direct children of this card.
+            const card = childrenEl.parentElement;
+            const footer = [...card.children].find(el => el.classList.contains("card-footer"));
+            if (footer) openTypePicker(mod, footer);
+        });
+        strip.appendChild(addTab);
+    }
+    childrenEl.appendChild(strip);
+
+    const panel = document.createElement("div");
+    panel.className = "tab-panel";
+    panel.setAttribute("role", "tabpanel");
+    childrenEl.appendChild(panel);
+    const child = mod.children.find(c => c.name === active);
+    if (child) renderModuleTree(child, panel, depth + 1);
+}
+
+function firstModuleByType(type) {
+    return allModules().find(m => m.type === type) || null;
+}
+
+function helioPrimaryLayout() {
+    if (isNebuliteFirmware()) return firstModuleByType("PixelMapLayout") || firstModuleByType("GridLayout") || firstModuleByType("SingleRowLayout");
+    return firstModuleByType("RingLayout") || firstModuleByType("SingleRowLayout") || firstModuleByType("GridLayout");
+}
+
+function helioCurrentCount() {
+    const layout = helioPrimaryLayout();
+    if (layout?.type === "PixelMapLayout") {
+        const points = String(controlValue(layout, "points", ""));
+        const pairs = points.split(";");
+        if (pairs.length <= 128 && pairs.every(pair => {
+            const m = /^(\d+),(\d+)$/.exec(pair);
+            return m && Number(m[1]) <= 63 && Number(m[2]) <= 63;
+        })) return pairs.length;
+        return HELIO_DEFAULT_LED_COUNT;
+    }
+    if (layout?.type === "GridLayout") {
+        const axes = ["width", "height", "depth"].map(name => Number(controlValue(layout, name, 1)));
+        if (axes.every(n => Number.isSafeInteger(n) && n > 0) && Number.isSafeInteger(axes[0] * axes[1] * axes[2]))
+            return axes[0] * axes[1] * axes[2];
+    }
+    const count = parseInt(controlValue(layout, "nrOfLEDs", controlValue(layout, "width", HELIO_DEFAULT_LED_COUNT)), 10);
+    return Number.isFinite(count) && count > 0 ? count : HELIO_DEFAULT_LED_COUNT;
+}
+
+function helioSizePresetForCount(count = helioCurrentCount()) {
+    return HELIO_SIZE_PRESETS.find(p => p.count === Number(count)) || null;
+}
+
+function helioSetupCollapsed() {
+    const stored = lsRead(LS_HELIO_SETUP_COLLAPSED, null, null);
+    if (stored !== null) return stored === "1";
+    return !!helioSizePresetForCount();
+}
+
+function setHelioSetupCollapsed(collapsed) {
+    localStorage.setItem(LS_HELIO_SETUP_COLLAPSED, collapsed ? "1" : "0");
+}
+
+function renderHelioSetup(parentEl) {
+    const card = document.createElement("section");
+    card.className = "card helio-setup";
+    card.dataset.depth = "0";
+
+    const title = document.createElement("div");
+    title.className = "card-title";
+    const name = document.createElement("span");
+    name.className = "card-name";
+    name.textContent = "HELIO Setup";
+    const stats = document.createElement("span");
+    stats.className = "card-stats";
+    stats.textContent = `${helioCurrentCount()} LEDs`;
+    const spacer = document.createElement("span");
+    spacer.className = "card-spacer";
+    title.append(name, spacer, stats);
+    card.appendChild(title);
+
+    const status = document.createElement("span");
+    status.className = "helio-setup-status";
+
+    const sizeRow = document.createElement("div");
+    sizeRow.className = "control-row helio-setup-row";
+    const sizeLabel = document.createElement("span");
+    sizeLabel.className = "control-label";
+    sizeLabel.textContent = "size";
+    const sizeButtons = document.createElement("div");
+    sizeButtons.className = "helio-segmented";
+    const currentCount = helioCurrentCount();
+    for (const preset of HELIO_SIZE_PRESETS) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = preset.label;
+        btn.className = currentCount === preset.count ? "active" : "";
+        btn.title = `${preset.count} LEDs`;
+        btn.addEventListener("click", async () => {
+            await applyHelioSize(preset.count, status);
+            setHelioSetupCollapsed(true);
+            refetchState();
+        });
+        sizeButtons.appendChild(btn);
+    }
+    sizeRow.append(sizeLabel, sizeButtons);
+
+    const countRow = document.createElement("div");
+    countRow.className = "control-row helio-setup-row";
+    const countLabel = document.createElement("span");
+    countLabel.className = "control-label";
+    countLabel.textContent = "LEDs";
+    const countInput = document.createElement("input");
+    countInput.type = "number";
+    countInput.min = "1";
+    countInput.max = "1000";
+    countInput.step = "1";
+    countInput.value = String(currentCount);
+    const countApply = document.createElement("button");
+    countApply.type = "button";
+    countApply.className = "helio-mini-btn";
+    countApply.textContent = "Apply";
+    countApply.addEventListener("click", async () => {
+        const count = Math.max(1, Math.min(1000, parseInt(countInput.value, 10) || currentCount));
+        await applyHelioSize(count, status);
+        setHelioSetupCollapsed(true);
+        refetchState();
+    });
+    countRow.append(countLabel, countInput, countApply);
+
+    const startRow = document.createElement("div");
+    startRow.className = "control-row helio-setup-row";
+    const startLabel = document.createElement("span");
+    startLabel.className = "control-label";
+    startLabel.textContent = "start";
+    const startButtons = document.createElement("div");
+    startButtons.className = "helio-segmented";
+    for (const [mode, label] of [["static", "Static animations"], ["audio", "Audio animations"]]) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        if (mode === "audio" && !helioAudioStartEnabled(helioAudio())) btn.title = "Set up audio";
+        btn.addEventListener("click", async () => {
+            await applyHelioStartup(mode, status);
+            setHelioSetupCollapsed(true);
+            refetchState();
+        });
+        startButtons.appendChild(btn);
+    }
+    startRow.append(startLabel, startButtons);
+
+    const defaultsRow = document.createElement("div");
+    defaultsRow.className = "helio-setup-actions";
+    const defaults = document.createElement("button");
+    defaults.type = "button";
+    defaults.className = "helio-mini-btn";
+    defaults.textContent = "Apply HELIO defaults";
+    defaults.addEventListener("click", async () => {
+        await applyHelioDefaults(status);
+        setHelioSetupCollapsed(true);
+        refetchState();
+    });
+    defaultsRow.append(defaults, status);
+
+    card.append(sizeRow, countRow, startRow, defaultsRow);
+    parentEl.appendChild(card);
+}
+
+async function applyHelioSize(count, status) {
+    const layout = helioPrimaryLayout();
+    const rmt = firstModuleByType("RmtLedDriver");
+    if (layout?.type === "RingLayout") {
+        await sendControl(layout.name, "nrOfLEDs", count);
+    } else if (layout) {
+        await sendControl(layout.name, "width", count);
+    }
+    if (rmt) await sendControl(rmt.name, "ledsPerPin", String(count));
+    if (status) status.textContent = `${count} LEDs`;
+}
+
+async function applyHelioDefaults(status) {
+    const count = helioCurrentCount();
+    const drivers = firstModuleByType("Drivers");
+    const rmt = firstModuleByType("RmtLedDriver");
+    const audio = firstModuleByType("AudioService");
+    const ambient = helioAmbientLight();
+    if (drivers) {
+        await sendControl(drivers.name, "brightness", 64);
+    }
+    if (rmt) {
+        await sendControl(rmt.name, "pins", "35");
+        await sendControl(rmt.name, "ledsPerPin", String(count));
+        const curveControl = helioControl(rmt, "curve");
+        const linearIndex = (curveControl?.options || []).findIndex(option =>
+            helioOptionText(option).toLowerCase() === "linear");
+        if (linearIndex >= 0) await sendControl(rmt.name, "curve", linearIndex);
+        const presetControl = helioControl(rmt, "fixture");
+        const presetIndex = (presetControl?.options || []).findIndex(option =>
+            helioOptionText(option).toUpperCase() === "RGBW");
+        if (presetIndex >= 0) await sendControl(rmt.name, "fixture", presetIndex);
+        const timingControl = helioControl(rmt, "timing");
+        const sk6812TimingIndex = (timingControl?.options || []).findIndex(option =>
+            helioOptionText(option).toUpperCase() === "800KHZ SK6812 RGBW");
+        if (sk6812TimingIndex >= 0) await sendControl(rmt.name, "timing", sk6812TimingIndex);
+        const whiteModeControl = helioControl(rmt, "whiteMode");
+        const directWhiteIndex = (whiteModeControl?.options || []).findIndex(option =>
+            helioOptionText(option).toLowerCase() === "none");
+        if (directWhiteIndex >= 0) await sendControl(rmt.name, "whiteMode", directWhiteIndex);
+    }
+    if (audio) {
+        for (const [control, value] of Object.entries(HELIO_DEFAULT_AUDIO)) {
+            await sendControl(audio.name, control, value);
+        }
+    }
+    if (ambient) {
+        for (const [control, value] of Object.entries(HELIO_DEFAULT_AMBIENT)) {
+            await sendControl(ambient.name, control, value);
+        }
+    }
+    if (status) status.textContent = "defaults applied";
+}
+
+async function applyHelioStartup(mode, status) {
+    if (mode === "audio" && !(await ensureHelioAudioReady(status))) {
+        return;
+    }
+    const playlist = HELIO_SCENE_PLAYLISTS.find(pl => pl.id === mode) || HELIO_SCENE_PLAYLISTS[0];
+    const firstScene = HELIO_FACTORY_SCENES[playlist.order[0]];
+    const applied = await applyHelioMode(firstScene, status);
+    if (applied && status) status.textContent = mode === "audio" ? "audio start" : "static start";
+}
+
+function createCard(mod, depth) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.dataset.module = mod.name;
+    card.dataset.depth = String(depth);
+
+    // -- Title row: [enabled?] [name] [stats] [actions] --
+    const title = document.createElement("div");
+    title.className = "card-title";
+
+    // The enabled toggle is built here but appended later — it joins the
+    // right-hand action cluster (next to ✎ × ?) rather than sitting at the start
+    // of the row, for visual grouping with the other per-card controls.
+    // Rendered as a <button> styled as a 26×26 rounded box (matching .card-btn);
+    // showing ✓ when on, blank when off. Stores its checked state in
+    // data-checked so updateValues can sync from WS pushes. A native <input>
+    // would not match the other buttons' frame and corner radius.
+    const enabled = document.createElement("button");
+    enabled.type = "button";
+    enabled.className = "module-enabled";
+    enabled.dataset.mid = mod.name;
+    enabled.dataset.key = "enabled";
+    enabled.setAttribute("aria-pressed", "true");
+    enabled.title = "Enable / disable";
+    const setEnabledUi = (on) => {
+        enabled.dataset.checked = on ? "true" : "false";
+        enabled.textContent = "⏻";
+        enabled.classList.toggle("module-enabled--off", !on);
+        enabled.setAttribute("aria-pressed", on ? "true" : "false");
+        card.classList.toggle("card--disabled", !on);
+        // Grey this module's TAB in the same click, alongside its card — so the tab title dims INSTANTLY
+        // instead of waiting ~1s for the server's full-state round-trip. (updateTabDot still syncs it on the
+        // patch path, idempotently, so this just makes the on/off button the immediate driver.) The tab
+        // lives in the parent's strip, found by the same data-tab-mid updateTabDot uses.
+        const tabEl = document.querySelector(`.tab[data-tab-mid="${cssEscape(mod.name)}"]`);
+        if (tabEl) tabEl.classList.toggle("tab--disabled", !on);
+    };
+    setEnabledUi(mod.enabled === undefined ? true : !!mod.enabled);
+    enabled.addEventListener("click", () => {
+        const next = enabled.dataset.checked !== "true";
+        setEnabledUi(next);
+        // Stamp dragTs so a WS state push older than this click can't revert
+        // the toggle before the server has acknowledged. updateValues reads
+        // dragTs[mod.name + ":enabled"] on line ~952 and suppresses stale
+        // patches within the 1s cooldown.
+        dragTs[mod.name + ":enabled"] = Date.now();
+        sendControl(mod.name, "enabled", next);
+    });
+
+    const name = document.createElement("span");
+    name.className = "card-name";
+    name.textContent = mod.name;
+    title.appendChild(name);
+
+    // Emoji tags (role + curated) shown after the name — same set used by the
+    // type picker's chip filter, so visual identity is consistent across views.
+    const emoji = emojiTagsForMod(mod);
+    if (emoji) {
+        const emojiEl = document.createElement("span");
+        emojiEl.className = "card-name-emoji";
+        emojiEl.textContent = emoji;
+        title.appendChild(emojiEl);
+    }
+
+    // Flex spacer so the name stays left and everything else groups on the right.
+    const spacer = document.createElement("span");
+    spacer.className = "card-spacer";
+    title.appendChild(spacer);
+
+    // fps/ms toggle on the stats line — global mode, single click cycles all cards
+    const stats = document.createElement("span");
+    stats.className = "card-stats";
+    stats.dataset.mid = mod.name;
+    stats.dataset.key = "stats";
+    stats.title = formatStatsTitle(mod);
+    stats.textContent = formatStats(mod);
+    stats.addEventListener("click", () => {
+        const idx = TIMING_MODES.indexOf(timingMode);
+        timingMode = TIMING_MODES[(idx + 1) % TIMING_MODES.length];
+        localStorage.setItem(LS_TIMING, timingMode);
+        // Refresh every card's stats line in place — no full re-render needed
+        document.querySelectorAll(".card-stats[data-mid]").forEach(s => {
+            const m = findModule(s.dataset.mid);
+            if (m) { s.textContent = formatStats(m); s.title = formatStatsTitle(m); }
+        });
+    });
+    title.appendChild(stats);
+
+    // Enable checkbox joins the right-hand action cluster, before ✎/×.
+    title.appendChild(enabled);
+
+    // Delete / replace buttons for user-managed children (any role a container
+    // accepts, minus modules that opted out via userEditable=false). Top-level
+    // modules are fixed in main.cpp; code-wired children declare userEditable
+    // false or carry a role no container accepts. See isUserEditableChild.
+    if (isUserEditableChild(mod, depth)) {
+        const actions = createActionButtons(mod);
+        title.appendChild(actions);
+    }
+
+    // Help link → the module's spec page on the rendered docs site, far right of
+    // the row. docPath comes from /api/types (relative to docs/moonmodules/, e.g.
+    // "core/services.md#audio" or "light/effects.md#fire"); omitted if none.
+    // The site is Material for MkDocs at moonmodules.org/projectMM/ (flat URLs, so
+    // foo.md → foo.html; the MkDocs heading slugs match these #anchors), reached
+    // via the same /projectMM/ subpath the installer uses. Convert only the `.md`
+    // extension that sits right before the optional `#anchor` (suffix-anchored),
+    // so a docPath that ever contained ".md" mid-string wouldn't be mangled.
+    const docPath = docPathForType(mod.type);
+    if (docPath) {
+        const help = document.createElement("a");
+        help.className = "card-help";
+        help.textContent = "?";
+        help.title = "Open module documentation";
+        help.target = "_blank";
+        help.rel = "noopener";
+        const htmlPath = docPath.replace(/\.md(#.*)?$/, ".html$1");
+        help.href = "https://moonmodules.org/projectMM/moonmodules/" + htmlPath;
+        title.appendChild(help);
+    }
+
+    card.appendChild(title);
+
+    // -- Controls --
+    // Child-hosting modules deeper in the tree (Effects, Layer, Drivers, Layouts)
+    // collapse their own controls so the children are the focus by default.
+    // Modules that merely host a code-wired child (Network → Improv) keep their
+    // controls expanded — the parent's settings are the main point, the code-wired
+    // child is informational. Leaf modules render controls inline (no wrapper).
+    // EXCEPTION: a top-level module (depth 0 — the selected root, e.g. System,
+    // Network, or a container like Services/Drivers) never collapses its own
+    // controls, even when it accepts children. It's the card the user is looking
+    // at, so its settings should be visible, not hidden behind a "controls" disclosure.
+    // Use the SAME predicate the row loop renders by (controlRendersGenerically), not a bare
+    // !c.hidden — else the disclosure could open for a module whose only "visible" controls render
+    // elsewhere (e.g. FileManager's filesystem/lastSaved render inside its own panel, not generically).
+    const hasVisibleControls = mod.controls && mod.controls.some(c => controlRendersGenerically(mod, c));
+    const wrapInDetails = depth > 0 && acceptsNewChildren(mod) && hasVisibleControls;
+    const controlsHost = wrapInDetails ? (() => {
+        const d = document.createElement("details");
+        d.className = "card-controls-collapse";
+        // Restore the open/closed state from localStorage, so a full-state rebuild (or a page reload) keeps
+        // the expander as the user left it instead of snapping shut. Persist it on toggle — same pattern as
+        // the selected tab (LS_TABS). VIEW-only state; nothing to do with the module's backend state.
+        d.open = expandedSet.has(mod.name);
+        d.addEventListener("toggle", () => {
+            if (d.open) expandedSet.add(mod.name); else expandedSet.delete(mod.name);
+            saveExpanded();
+        });
+        const s = document.createElement("summary");
+        s.textContent = "controls";
+        d.appendChild(s);
+        card.appendChild(d);
+        return d;
+    })() : card;
+    if (mod.status) {
+        const row = document.createElement("div");
+        row.className = "control-row";
+        row.dataset.statusMid = mod.name;
+        const label = document.createElement("span");
+        label.className = "control-label";
+        label.textContent = "status";
+        const val = document.createElement("span");
+        val.className = "status-value";
+        val.dataset.sev = mod.severity || "status";
+        val.textContent = mod.status;
+        row.appendChild(label);
+        row.appendChild(val);
+        controlsHost.appendChild(row);
+    }
+
+    if (mod.controls) {
+        for (const ctrl of mod.controls) {
+            if (!controlRendersGenerically(mod, ctrl)) continue;
+            const row = createControl(mod.name, mod.type, ctrl);
+            if (row) controlsHost.appendChild(row);
+        }
+    }
+
+    // File Manager: a modern expand/collapse folder tree + inline text editor. Browsing is UI-side
+    // over /api/dir; a create/delete is a POST/DELETE /api/dir?path= call (the path rides the request,
+    // no persisted control). Only the `show hidden` toggle renders as a raw control; the tree is the rest.
+    if (mod.type === "FileManagerModule") {
+        renderFileManager(mod, controlsHost);
+    }
+
+    // FirmwareUpdate card hosts the shared install picker. Mount once per
+    // card-build. The picker reads SystemModule.firmware (already in
+    // /api/state) to filter to OTA-compatible releases. On install, the
+    // device fetches the binary via /api/firmware/url — no browser CORS in
+    // the data path. See docs/architecture.md § Firmware vs board.
+    if (mod.type === "FirmwareUpdateModule") {
+        // Opening the Firmware card forces a fresh update check (the badge otherwise refreshes
+        // only on the 1 h cache cadence) — so the badge agrees with the picker the user is about
+        // to use. Fire-and-forget; best-effort.
+        const fwInfo = deviceFirmwareInfo();
+        if (!isHelioFirmware(fwInfo)) checkFirmwareUpdate(true);
+        const ownFirmwareKey = (() => {
+            // The `firmware` variant key is this module's own control now (moved here from
+            // SystemModule), so read it straight off mod — no cross-module lookup.
+            const fwCtrl = (mod.controls || []).find(c => c.name === "firmware");
+            return fwCtrl && fwCtrl.value ? fwCtrl.value : null;
+        })();
+        if (!isHelioFirmware(fwInfo)) {
+            const mount = document.createElement("div");
+            mount.className = "install-picker-host";
+            controlsHost.appendChild(mount);
+            mount.textContent = "Loading installer...";
+            loadInstallPicker().then(picker => {
+                if (!mount.isConnected) return;
+                mount.textContent = "";
+                picker.init({
+                container: mount,
+                ownFirmwareKey,
+                // Device already knows its deviceModel (SystemModule) â€” picker is for
+                // releases + firmware compatibility only. Showing a board picker
+                // here would invite the user to mis-narrow the firmware list.
+                enableBoardPicker: false,
+                onInstall: async (_firmware, _manifestUrl, binaryUrl) => {
+                    let res;
+                    try {
+                        res = await fetch("/api/firmware/url", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ url: binaryUrl }),
+                        });
+                    } catch (_) {
+                        throw new Error("Connection lost — update outcome unknown. Reconnect and check the firmware version before retrying.");
+                    }
+                    if (!res.ok) throw new Error(await errorMessage(res));
+                },
+                });
+            }).catch(err => {
+                if (mount.isConnected) mount.textContent = "installer unavailable: " + (err.message || err);
+            });
+        }
+
+
+        // Install-from-file: pick a locally-built .bin and stream its bytes to /api/firmware/upload,
+        // which feeds platform::otaWriteStream (esp_ota_write). Complements the release picker above —
+        // the release path has the device fetch a URL; this path has the browser push the body, so a
+        // dev build that isn't a published release can be flashed straight over the network. The device
+        // reboots on success. A lost response is ambiguous: the device may have committed already.
+        const fileRow = document.createElement("div");
+        fileRow.className = "fw-upload-row";
+        const upBtn = document.createElement("button");
+        upBtn.className = "fm-tool fm-tool--icon";
+        upBtn.textContent = "↥";   // same upload glyph as the file-manager toolbar
+        upBtn.title = "Install from file — flash a firmware .bin from your computer over the network (OTA)";
+        const upStatus = document.createElement("span");
+        upStatus.className = "fw-upload-status";
+        const upInput = document.createElement("input");
+        upInput.type = "file";
+        upInput.accept = ".bin,application/octet-stream";
+        upInput.style.display = "none";
+        upInput.addEventListener("change", async () => {
+            const file = (upInput.files || [])[0];
+            upInput.value = "";                   // reset so re-picking the same file re-fires change
+            if (!file) return;
+            upBtn.disabled = true;
+            upStatus.textContent = `uploading ${fmSize(file.size)}…`;
+            if ((mod.controls || []).some(c => c.name === "image")) {
+                try {
+                    upStatus.textContent = await uploadThroughMoonbase(file, { status: text => { upStatus.textContent = text; } });
+                } finally { upBtn.disabled = false; }
+                return;
+            }
+            const uploadController = new AbortController();
+            const uploadTimer = setTimeout(() => uploadController.abort(), 180000);
+            try {
+                const res = await fetch("/api/firmware/upload", {
+                    method: "POST", redirect: "error", signal: uploadController.signal, headers: { "Content-Type": "application/octet-stream" }, body: file,
+                });
+                // The device sends a 200 once the image is committed, before rebooting.
+                if (!res.ok) {
+                    const detail = await errorMessage(res);
+                    if (uploadController.signal.aborted) throw new Error("upload timed out");
+                    upStatus.textContent = "upload failed: " + detail + ". The image may be partially written; reconnect and inspect the device before retrying.";
+                }
+                else {
+                    let accepted = false;
+                    if (res.status === 200) {
+                        try { accepted = (await res.json())?.ok === true; } catch (_) { /* Unreadable response is ambiguous. */ }
+                    }
+                    upStatus.textContent = accepted
+                        ? "update accepted — device restarting; check the firmware version after reconnecting"
+                        : "update outcome unknown; reconnect and check the firmware version before retrying";
+                }
+            } catch (err) {
+                // The response can be lost after commit; check the running version before retrying.
+                upStatus.textContent = "connection lost — update outcome unknown; reconnect and check the firmware version";
+            } finally {
+                clearTimeout(uploadTimer);
+                upBtn.disabled = false;
+            }
+        });
+        upBtn.addEventListener("click", () => upInput.click());
+        fileRow.appendChild(upBtn);
+        fileRow.appendChild(upStatus);
+        fileRow.appendChild(upInput);
+        controlsHost.appendChild(fileRow);
+    }
+
+    // -- Children block + footer --
+    // The .card-children wrapper lives inside this card so the parent's border
+    // encloses its children; renderModuleTree recurses into it. The "+ add module"
+    // footer only appears on parents that accept user-created children — a parent
+    // hosting only code-wired children (e.g. Network → Improv) renders the
+    // children block but no add button.
+    let childrenEl = null;
+    if (hasNestedChildren(mod)) {
+        childrenEl = document.createElement("div");
+        childrenEl.className = "card-children";
+        childrenEl.dataset.depth = String(depth + 1);
+        card.appendChild(childrenEl);
+
+        if (acceptsNewChildren(mod)) {
+            // -- Footer: + add module --
+            const footer = document.createElement("div");
+            footer.className = "card-footer";
+            const addBtn = document.createElement("button");
+            addBtn.className = "add-btn";
+            addBtn.textContent = "+ add module";
+            addBtn.addEventListener("click", () => {
+                // Hide the button while the picker is open (the picker takes its
+                // place); restore it once the picker is removed (cancel/create/Esc).
+                addBtn.style.display = "none";
+                openTypePicker(mod, footer);
+                const obs = new MutationObserver(() => {
+                    if (!footer.querySelector(".type-picker")) {
+                        addBtn.style.display = "";
+                        obs.disconnect();
+                    }
+                });
+                obs.observe(footer, {childList: true});
+            });
+            footer.appendChild(addBtn);
+            card.appendChild(footer);
+        }
+    }
+
+    // -- Drag-to-reorder (HTML5 DnD on desktop; touchstart-gated on mobile) --
+    // Same gate as the delete/replace buttons: a user-managed child is also
+    // reorderable within its parent.
+    if (isUserEditableChild(mod, depth)) {
+        attachDragHandlers(card, mod);
+    }
+
+    return { card, childrenEl };
+}
+
+// Wire a button as a press-twice confirm: the first click arms it (adds the
+// `armed` class, optional armed label/title), a second click runs `onConfirm`.
+// Disarms after 3s or when the pointer leaves. Used by the delete and reboot
+// buttons — no browser confirm() popup. `armedText` is optional (delete swaps
+// × → ✓; reboot keeps its glyph). The pre-arm title is captured live so a
+// title updated elsewhere (e.g. reboot's crashed-state text) restores correctly.
+function armPressTwice(btn, onConfirm, opts = {}) {
+    let armed = false;
+    let disarmTimer = null;
+    let savedText = "";
+    let savedTitle = "";
+    const disarm = () => {
+        // Only restore label/title if we actually armed — otherwise a mouseleave before the first
+        // click would write the initial empty savedText/savedTitle over the button, collapsing a
+        // text-sized button (e.g. "🗑 delete") to an empty sliver.
+        if (!armed) return;
+        armed = false;
+        btn.classList.remove("armed");
+        if (opts.armedText !== undefined) btn.textContent = savedText;
+        btn.title = savedTitle;
+        if (disarmTimer) { clearTimeout(disarmTimer); disarmTimer = null; }
+    };
+    btn.addEventListener("click", () => {
+        // Disarm before running the action so a stray second click can't fire
+        // it twice (e.g. two /api/reboot requests).
+        if (armed) { disarm(); onConfirm(); return; }
+        armed = true;
+        savedText = btn.textContent;
+        savedTitle = btn.title;
+        btn.classList.add("armed");
+        if (opts.armedText !== undefined) btn.textContent = opts.armedText;
+        if (opts.armedTitle !== undefined) btn.title = opts.armedTitle;
+        disarmTimer = setTimeout(disarm, 3000);
+    });
+    btn.addEventListener("mouseleave", disarm);
+}
+
+// Compact byte formatter — "B" under 1 KB, "KB" otherwise (one decimal under 10 KB).
+function fmtBytes(n) {
+    if (n < 1024) return n + "B";
+    const k = n / 1024;
+    return (k < 10 ? k.toFixed(1) : Math.round(k)) + "KB";
+}
+
+// Stats line: timing (🕒, fps or µs/ms per the global toggle) + memory
+// (🧠 static, plus "+ dynamic" only when the module allocated heap).
+// Timing is omitted entirely when the module has no measured loop time.
+function formatStats(mod) {
+    const us = (mod.tickTimeUs !== undefined) ? mod.tickTimeUs : 0;
+    let timing = "";
+    if (us > 0) {
+        if (timingMode === "fps") {
+            const fps = Math.round(1_000_000 / us);
+            timing = "🕒 " + (fps >= 1000 ? Math.round(fps / 1000) + "K fps" : fps + " fps");
+        } else {
+            timing = "🕒 " + (us < 1000 ? us + " µs" : (us / 1000).toFixed(2) + " ms");
+        }
+    }
+    const stat = mod.classSize || 0;
+    const dyn = mod.dynamicBytes || 0;
+    const mem = "🧠 " + fmtBytes(stat) + (dyn > 0 ? " + " + fmtBytes(dyn) : "");
+    // Status chip: emitted by the engine when a module has something to say.
+    // Severity picks the emoji — ℹ️ neutral (Eth: 192.168.1.210), ⚠️ degraded
+    // (buffer reduced), ❌ error (No network). Tooltip carries the full text.
+    const sev = mod.severity || "status";
+    const sevEmoji = sev === "error" ? "❌" : sev === "warning" ? "⚠️" : "ℹ️";
+    const statusChip = mod.status ? "  " + sevEmoji : "";
+    const head = timing ? timing + "   " + mem : mem;
+    return head + statusChip;
+}
+function formatStatsTitle(mod) {
+    return "Click to toggle fps/ms";
+}
+
+function createActionButtons(mod) {
+    const wrap = document.createElement("span");
+    wrap.className = "card-actions";
+
+    // Reorder is drag-and-drop only (works on desktop and mobile). The whole
+    // card body is the drag source; the controls region excludes itself via
+    // the mousedown gate in attachDragHandlers. No up/down buttons, no
+    // dedicated drag handle.
+
+    const replaceBtn = document.createElement("button");
+    replaceBtn.className = "card-btn";
+    replaceBtn.textContent = "✎";
+    replaceBtn.title = "Replace with another type";
+    replaceBtn.addEventListener("click", () => {
+        // Anchor the picker to the card so it drops below the card content,
+        // not inside the cramped 26px action-button row.
+        openReplacePicker(mod, replaceBtn.closest(".card"));
+    });
+    wrap.appendChild(replaceBtn);
+
+    // Delete: press × once to arm, again to confirm — see armPressTwice.
+    const delBtn = document.createElement("button");
+    delBtn.className = "card-btn card-btn-del";
+    delBtn.textContent = "×";
+    delBtn.title = "Delete";
+    armPressTwice(delBtn, () => deleteModule(mod.name),
+                  {armedText: "✓", armedTitle: "Click again to delete"});
+    wrap.appendChild(delBtn);
+
+    return wrap;
+}
+
+function findParent(childName) {
+    function walk(node, modules) {
+        for (const m of modules) {
+            if (m === node) return null;  // shouldn't happen, defensive
+            if (m.children && m.children.some(c => c.name === childName)) return m;
+            if (m.children) {
+                const p = walk(node, m.children);
+                if (p) return p;
+            }
+        }
+        return null;
+    }
+    return walk(null, state.modules);
+}
+
+// Whether this module renders any nested children at all (a "+ add module"
+// button included if it also accepts new ones via the UI). True whenever the
+// module has at least one child today OR is one of the light-pipeline
+// containers that users can add to. This lets code-wired children (e.g.
+// ImprovProvisioning under Network) render without making the parent UI-addable.
+function hasNestedChildren(mod) {
+    return (mod.children && mod.children.length > 0) || acceptsNewChildren(mod);
+}
+
+// Roles this parent accepts as user-added children, from the device's
+// `acceptsChildRoles` (per-type in /api/types — e.g. Layer → "effect,modifier").
+// Domain-neutral: the UI no longer hardcodes which module types are containers;
+// the device declares it via MoonModule::acceptsChildRoles(). "" → [] (accepts
+// none), which is also the default for modules whose type isn't loaded yet.
+function rolesAcceptedBy(parentMod) {
+    const t = availableTypes.find(t => t.name === parentMod.type);
+    const csv = (t && t.acceptsChildRoles) ? t.acceptsChildRoles : "";
+    return csv ? csv.split(",") : [];
+}
+
+// Whether the "+ add module" affordance applies — derived from acceptsChildRoles
+// being non-empty, so there's a single source of truth (no separate list).
+function acceptsNewChildren(mod) {
+    return rolesAcceptedBy(mod).length > 0;
+}
+
+// The set of child roles ANY loaded type accepts — the union of every type's
+// acceptsChildRoles. A module is "user-managed as a child" iff its role is in
+// this set, which is how the UI decides to show delete/replace/drag without
+// hardcoding role names. Code-wired children (ImprovProvisioning,
+// — roles no container declares) correctly fall outside it.
+function allAcceptedChildRoles() {
+    const roles = new Set();
+    for (const t of availableTypes) {
+        const csv = t.acceptsChildRoles || "";
+        if (csv) csv.split(",").forEach(r => roles.add(r));
+    }
+    return roles;
+}
+
+// Whether the UI shows delete / replace / drag for this module. True when it's
+// a nested module (depth > 0) whose role is one some container accepts AND it
+// hasn't opted out via the device's userEditable=false (e.g. PreviewDriver).
+// Replaces the old hardcoded `role === "effect" || "modifier"` gate — now any
+// add-accepted role (driver, layout, …) is editable, and the child itself can
+// veto via userEditable.
+//
+// We test mod.role against the UNION of all containers' acceptsChildRoles, not
+// against this module's specific parent. That's exact while the role→container
+// mapping is 1:1 (effect→Layer, driver→Drivers, layout→Layouts, layer→Effects) —
+// a child of an add-accepted role is always under the one container that
+// accepts it. If a role ever becomes accepted by more than one container, this
+// would need the parent threaded in to scope the check to the actual parent.
+function isUserEditableChild(mod, depth) {
+    return depth > 0
+        && mod.userEditable !== false
+        && allAcceptedChildRoles().has(mod.role);
+}
+
+// ---------------------------------------------------------------------------
+// Control rendering (9 types per ui.md)
+// ---------------------------------------------------------------------------
+
+// Look up the factory default for a given module type's control. Returns undefined when
+// the type isn't in /api/types yet or the control has no default (display/progress).
+function defaultFor(moduleType, ctrlName) {
+    if (!moduleType) return undefined;
+    const t = availableTypes.find(t => t.name === moduleType);
+    if (!t || !t.defaults) return undefined;
+    return t.defaults[ctrlName];
+}
+
+// The module type's spec-page path (relative to docs/moonmodules/), from /api/types.
+// Returns "" when the type isn't loaded yet or declares no doc path.
+function docPathForType(moduleType) {
+    if (!moduleType) return "";
+    const t = availableTypes.find(t => t.name === moduleType);
+    return (t && t.docPath) ? t.docPath : "";
+}
+
+// Curated emoji string for a live module — its role emoji plus the type's
+// `tags` from /api/types, deduplicated, in role-first order. "" if the type
+// isn't loaded yet. Used on the card title and in the type picker.
+function emojiTagsForMod(mod) {
+    if (!mod) return "";
+    const t = availableTypes.find(t => t.name === mod.type) || {role: mod.role, tags: ""};
+    return emojiTagsFor(t).join("");
+}
+
+// Whether a control appears in the generic control list — false for controls the module marked
+// `hidden`. A module that renders a control in its own panel instead (e.g. the File Manager's
+// `filesystem` usage bar + `lastSaved` readout, drawn by renderFileManager) sets the hidden flag on
+// the C++ side, so the generic list skips it and the value never shows twice. Used by BOTH render
+// paths (renderCards's initial build + updateModuleControls's WS live-patch) so they agree.
+function controlRendersGenerically(mod, ctrl) {
+    if (ctrl.hidden) return false;
+    if (ctrl.advanced && !isExpertMode()) return false;   // expert-only control, expert mode is off
+    return true;
+}
+
+function createControl(moduleName, moduleType, ctrl) {
+    const row = document.createElement("div");
+    row.className = "control-row";
+    // Expert-only controls (only reachable here when expert mode is on — see controlRendersGenerically)
+    // get a distinct treatment so they read as a different tier: a left accent stripe + muted label.
+    if (ctrl.advanced) row.classList.add("control-advanced");
+    row.dataset.key = ctrl.name;
+
+    const label = document.createElement("label");
+    label.className = "control-label";
+    // The expertMode toggle itself carries the wrench glyph (via CSS ::before), so it reads as the switch
+    // that governs the 🔧 controls — the toggle is never `advanced` (it must always be reachable), so key
+    // it by name rather than the flag.
+    if (moduleName === "System" && ctrl.name === "expertMode") label.classList.add("control-label--expert");
+    label.textContent = ctrl.name;
+    row.appendChild(label);
+
+    const key = moduleName + ":" + ctrl.name;
+    const def = defaultFor(moduleType, ctrl.name);
+
+    // numberField: a numeric control that opted out of the slider (server sets it for a value where each
+    // integer is a discrete identity, not a magnitude — a PHY/I2C address, a channel). Render a plain
+    // number input, same shape as the `pin` case, whatever the underlying numeric type. The WS-patch path
+    // (updateModuleControls) reads the input by [data-mid][data-key] the same way, so no extra patch case.
+    const isNumericType = ctrl.type === "uint8" || ctrl.type === "uint16" || ctrl.type === "int16";
+    if (ctrl.numberField && isNumericType) {
+        const nMin = Number(ctrl.min ?? 0);
+        const nMax = Number(ctrl.max ?? 65535);
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = nMin;
+        input.max = nMax;
+        input.value = ctrl.value ?? 0;
+        input.dataset.mid = moduleName;
+        input.dataset.key = ctrl.name;
+        input.addEventListener("input", () => {
+            dragTs[key] = Date.now();
+            let v = parseInt(input.value, 10);
+            if (Number.isNaN(v)) return;   // mid-edit empty field: send nothing until digits arrive
+            v = Math.max(nMin, Math.min(nMax, v));
+            if (String(v) !== input.value) input.value = v;   // display always matches what's sent
+            debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, v));
+        });
+        input.addEventListener("change", () => {   // blur/Enter with a still-empty field: snap to min + send
+            if (Number.isNaN(parseInt(input.value, 10))) {
+                dragTs[key] = Date.now();
+                input.value = nMin;
+                debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, nMin));
+            }
+        });
+        row.appendChild(input);
+        appendResetButton(row, moduleName, ctrl, def, () => { input.value = def; });
+        return row;
+    }
+
+    switch (ctrl.type) {
+        case "uint8": {
+            const input = document.createElement("input");
+            input.type = "range";
+            // A fader is the same range input stood on end (CSS `writing-mode: vertical-lr`), so the
+            // value, the range and the WS live-update path are untouched — only the orientation and
+            // the row's layout change. Consecutive faders sit side by side as one bank.
+            // An encoder is the same range input drawn as a KNOB: the input itself is hidden and an
+            // SVG dial sits on top, so the value, the range, the WS update path and keyboard access
+            // are the range input's — only the appearance changes. Dragging vertically turns it,
+            // which is the gesture a real encoder takes.
+            if (ctrl.encoder) {
+                input.classList.add("encoder-input");
+                row.classList.add("control-encoder");
+                row.appendChild(buildKnob(input, ctrl));
+                row.appendChild(buildSevenSeg(input));
+                attachTargetPopup(row, input, ctrl);
+            }
+            if (ctrl.fader) {
+                input.classList.add("fader-input");
+                row.classList.add("control-fader");
+                row.appendChild(buildSevenSeg(input));
+                // Right-click a fader to see (and later choose) what it drives — the same
+                // configure-on-the-control rule the pads follow.
+                attachTargetPopup(row, input, ctrl);
+            }
+            input.min = ctrl.min ?? 0;
+            input.max = ctrl.max ?? 255;
+            input.value = ctrl.value ?? 0;
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            // The knob and the readout were built above, before these three lines ran, so they drew
+            // against an empty input (the source of the 880 readouts). Refresh now that the value and
+            // the bounds exist.
+            redrawRangeDecorations(input);
+            const numInput = document.createElement("input");
+            numInput.type = "number";
+            numInput.className = "control-value-input";
+            numInput.min = input.min;
+            numInput.max = input.max;
+            numInput.value = input.value;
+            input.addEventListener("input", () => {
+                dragTs[key] = Date.now();
+                numInput.value = input.value;
+                debounceSend(key, 150, () => sendControl(moduleName, ctrl.name, parseInt(input.value)));
+            });
+            numInput.addEventListener("input", () => {
+                dragTs[key] = Date.now();   // stamp so a WS push can't revert what's being typed
+                const v = Math.max(Number(input.min), Math.min(Number(input.max), parseInt(numInput.value) || 0));
+                input.value = v;
+                debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, v));
+            });
+            row.appendChild(input);
+            row.appendChild(numInput);
+            appendResetButton(row, moduleName, ctrl, def, () => {
+                input.value = def;
+                numInput.value = def;
+            });
+            break;
+        }
+        case "uint16": {
+            // Bounded (server sent an explicit max below the type ceiling) →
+            // slider, like uint8/int16. Unbounded (max == 65535, the default for
+            // port/universe-style values with no natural range) → plain number.
+            const uMin = Number(ctrl.min ?? 0);
+            const uMax = Number(ctrl.max ?? 65535);
+            if (uMax < 65535) {
+                const input = document.createElement("input");
+                input.type = "range";
+                input.min = uMin;
+                input.max = uMax;
+                input.value = Math.max(uMin, Math.min(uMax, Number(ctrl.value ?? 0)));
+                input.dataset.mid = moduleName;
+                input.dataset.key = ctrl.name;
+                const numInput = document.createElement("input");
+                numInput.type = "number";
+                numInput.className = "control-value-input";
+                numInput.min = uMin;
+                numInput.max = uMax;
+                numInput.value = input.value;
+                input.addEventListener("input", () => {
+                    dragTs[key] = Date.now();
+                    numInput.value = input.value;
+                    debounceSend(key, 150, () => sendControl(moduleName, ctrl.name, parseInt(input.value)));
+                });
+                numInput.addEventListener("input", () => {
+                    dragTs[key] = Date.now();   // stamp so a WS push can't revert what's being typed
+                    const v = Math.max(uMin, Math.min(uMax, parseInt(numInput.value) || 0));
+                    input.value = v;
+                    debounceSend(key, 150, () => sendControl(moduleName, ctrl.name, v));
+                });
+                row.appendChild(input);
+                row.appendChild(numInput);
+                appendResetButton(row, moduleName, ctrl, def, () => {
+                    input.value = def; numInput.value = def;
+                });
+            } else {
+                const input = document.createElement("input");
+                input.type = "number";
+                input.value = ctrl.value ?? 0;
+                input.dataset.mid = moduleName;
+                input.dataset.key = ctrl.name;
+                input.addEventListener("input", () => {
+                    dragTs[key] = Date.now();
+                    // Sanitise: empty/garbage → 0, clamp into the uint16 range so a
+                    // NaN or out-of-range value never reaches the device.
+                    let v = parseInt(input.value, 10);
+                    if (Number.isNaN(v)) v = 0;
+                    v = Math.max(0, Math.min(65535, v));
+                    debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, v));
+                });
+                row.appendChild(input);
+                appendResetButton(row, moduleName, ctrl, def, () => { input.value = def; });
+            }
+            break;
+        }
+        case "pin": {
+            // A GPIO pin: plain number input, never a slider (a pin has no range to
+            // drag). −1 = unused. ctrl.min/max are the valid-GPIO span used only to
+            // clamp the typed value before sending.
+            const pMin = Number(ctrl.min ?? -1);
+            const pMax = Number(ctrl.max ?? 52);
+            const input = document.createElement("input");
+            input.type = "number";
+            input.min = pMin;
+            input.max = pMax;
+            input.value = ctrl.value ?? -1;
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            input.addEventListener("input", () => {
+                dragTs[key] = Date.now();
+                let v = parseInt(input.value, 10);
+                if (Number.isNaN(v)) v = -1;
+                v = Math.max(pMin, Math.min(pMax, v));
+                debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, v));
+            });
+            row.appendChild(input);
+            appendResetButton(row, moduleName, ctrl, def, () => { input.value = def; });
+            break;
+        }
+        case "int16": {
+            // ctrl.min/ctrl.max are always present (server sends them). Sentinel
+            // values INT16_MIN (-32768) / INT16_MAX (32767) mean "unbounded" —
+            // fall back to a ±percentage range.
+            const rawMin = Number(ctrl.min ?? -32768);
+            const rawMax = Number(ctrl.max ?? 32767);
+            const min = rawMin <= -32768 ? -100 : rawMin;
+            const max = rawMax >= 32767  ?  200 : rawMax;
+            const raw = Number(ctrl.value ?? 0);
+            const clamped = Math.max(min, Math.min(max, raw));
+            const input = document.createElement("input");
+            input.type = "range";
+            input.min = min;
+            input.max = max;
+            input.value = clamped;
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            const numInput = document.createElement("input");
+            numInput.type = "number";
+            numInput.className = "control-value-input";
+            numInput.min = min;
+            numInput.max = max;
+            numInput.value = input.value;
+            input.addEventListener("input", () => {
+                dragTs[key] = Date.now();
+                numInput.value = input.value;
+                debounceSend(key, 150, () => sendControl(moduleName, ctrl.name, parseInt(input.value)));
+            });
+            numInput.addEventListener("input", () => {
+                dragTs[key] = Date.now();   // stamp so a WS push can't revert what's being typed
+                const v = Math.max(min, Math.min(max, parseInt(numInput.value) || 0));
+                input.value = v;
+                debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, v));
+            });
+            row.appendChild(input);
+            row.appendChild(numInput);
+            appendResetButton(row, moduleName, ctrl, def, () => {
+                input.value = def;
+                numInput.value = def;
+            });
+            break;
+        }
+        case "bool": {
+            // Modern on/off switch: an <input type=checkbox> (kept for the
+            // existing change/sync paths) wrapped in a <label> that draws a
+            // pill-shaped track + sliding thumb via CSS. The checkbox itself
+            // is visually hidden but stays the source of truth.
+            const sw = document.createElement("label");
+            sw.className = "switch";
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.checked = !!ctrl.value;
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            input.addEventListener("change", () => {
+                dragTs[key] = Date.now();
+                sendControl(moduleName, ctrl.name, input.checked);
+            });
+            const track = document.createElement("span");
+            track.className = "switch-track";
+            sw.appendChild(input);
+            sw.appendChild(track);
+            row.appendChild(sw);
+            appendResetButton(row, moduleName, ctrl, def, () => { input.checked = !!def; });
+            break;
+        }
+        case "text": {
+            const input = document.createElement("input");
+            input.type = "text";
+            const wifiSsid = moduleType === "NetworkModule" && ctrl.name === "ssid";
+            const wifiDraft = wifiCredentialDrafts.get(moduleName);
+            input.value = wifiSsid && Object.prototype.hasOwnProperty.call(wifiDraft || {}, "ssid")
+                ? wifiDraft.ssid : (ctrl.value ?? "");
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            // ctrl.readonly is a UI hint (the server still accepts writes — the
+            // flag exists for values pushed by tooling like MoonDeck or the
+            // web installer, where editing in the device UI is by-convention
+            // disallowed). `readOnly` lets the user select/copy the text but
+            // not modify it; `disabled` would also block copy.
+            if (ctrl.readonly) {
+                input.readOnly = true;
+            } else if (wifiSsid) {
+                input.addEventListener("input", () => {
+                    dragTs[key] = Date.now();
+                    const draft = wifiCredentialDrafts.get(moduleName) || {};
+                    draft.ssid = input.value;
+                    wifiCredentialDrafts.set(moduleName, draft);
+                });
+            } else {
+                input.addEventListener("input", () => {
+                    dragTs[key] = Date.now();
+                    debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, input.value));
+                });
+            }
+            row.appendChild(input);
+            break;
+        }
+        case "textarea": {
+            // Multi-line text (e.g. a script source). A resizable <textarea>; the
+            // value syncs and debounces exactly like a "text" control.
+            const input = document.createElement("textarea");
+            input.className = "control-textarea";
+            input.value = ctrl.value ?? "";
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            input.rows = 2;            // default 2 lines; CSS height + resize grip control size
+            input.spellcheck = false;
+            // Restore a previously dragged height (view-state, see textareaSizes). A stored px height
+            // overrides the 2-row default; an untouched textarea has no entry and keeps the default.
+            const savedH = textareaSizes[key];
+            if (typeof savedH === "number" && savedH > 0) input.style.height = savedH + "px";
+            // Persist the height whenever the user drags the resize grip. A <textarea> has no native resize
+            // event, so a ResizeObserver is the standard way to observe it; store the pixel height keyed by
+            // "<module>:<control>". Use the observed height (not the inline style, which the initial observe
+            // fire and a layout-driven change wouldn't set), track the last saved value, and write only on a
+            // real change — so the initial fire and idle re-observations don't thrash localStorage. rAF-
+            // coalesced so a drag saves once per frame at most.
+            let taRaf = 0, taPrevH = Math.round(savedH > 0 ? savedH : 0);
+            const taObserver = new ResizeObserver((entries) => {
+                const h = Math.round(entries[0].contentRect.height);
+                if (taRaf || h <= 0 || h === taPrevH) return;
+                taRaf = requestAnimationFrame(() => { taRaf = 0; taPrevH = h; saveTextareaSize(key, h); });
+            });
+            taObserver.observe(input);
+            if (ctrl.readonly) {
+                input.readOnly = true;
+            } else {
+                input.addEventListener("input", () => {
+                    dragTs[key] = Date.now();
+                    debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, input.value));
+                });
+            }
+            row.appendChild(input);
+            break;
+        }
+        case "password": {
+            // Password controls are set-only: the API reports only whether a
+            // value is configured, never the value itself.
+            const input = document.createElement("input");
+            input.type = "password";
+            const wifiPassword = moduleType === "NetworkModule" && ctrl.name === "password";
+            const wifiDraft = wifiCredentialDrafts.get(moduleName);
+            input.value = wifiPassword && Object.prototype.hasOwnProperty.call(wifiDraft || {}, "password")
+                ? wifiDraft.password : "";
+            input.placeholder = ctrl.value ? "Saved - enter to replace" : "Enter password";
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            input.addEventListener("input", () => {
+                dragTs[key] = Date.now();
+                if (wifiPassword) {
+                    const draft = wifiCredentialDrafts.get(moduleName) || {};
+                    draft.password = input.value;
+                    wifiCredentialDrafts.set(moduleName, draft);
+                } else {
+                    debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, input.value));
+                }
+            });
+            row.appendChild(input);
+            // Hold-to-peek reveals only the newly typed value.
+            const peek = document.createElement("button");
+            peek.className = "peek-btn";
+            peek.type = "button";
+            peek.textContent = "👁";
+            peek.title = "Hold to reveal";
+            const show = () => { input.type = "text"; };
+            const hide = () => { input.type = "password"; };
+            peek.addEventListener("mousedown", show);
+            peek.addEventListener("mouseup", hide);
+            peek.addEventListener("mouseleave", hide);
+            peek.addEventListener("touchstart", (e) => { e.preventDefault(); show(); });
+            peek.addEventListener("touchend", hide);
+            row.appendChild(peek);
+            break;
+        }
+        case "select": {
+            const sel = document.createElement("select");
+            sel.dataset.mid = moduleName;
+            sel.dataset.key = ctrl.name;
+            (ctrl.options || []).forEach((opt, i) => {
+                const o = document.createElement("option");
+                o.value = i;
+                o.textContent = opt;
+                if (i === ctrl.value) o.selected = true;
+                sel.appendChild(o);
+            });
+            // Protect the dropdown while the user has it open. A native <select>
+            // popup stays open for several frames (seconds, if deliberating) while
+            // a continuously-refreshed module keeps pushing state over the WS; an
+            // unguarded `sel.value = ctrl.value` patch during that window snaps the
+            // menu back to the old option and visibly closes it — the user never
+            // gets to pick. We mark the select "open" on pointerdown (fires BEFORE
+            // the popup opens, unlike focus, which some browsers delay or skip) and
+            // clear it on change/blur; updateModuleControls skips any select marked
+            // open. pointerdown also stamps the dragTs cooldown as a belt-and-braces
+            // fallback for the post-close frames.
+            sel.dataset.open = "false";
+            const markOpen = () => { sel.dataset.open = "true"; dragTs[key] = Date.now(); };
+            sel.addEventListener("pointerdown", markOpen);
+            sel.addEventListener("focus", markOpen);
+            sel.addEventListener("blur", () => { sel.dataset.open = "false"; });
+            sel.addEventListener("change", () => {
+                sel.dataset.open = "false";
+                dragTs[key] = Date.now();
+                sendControl(moduleName, ctrl.name, parseInt(sel.value));
+                // No refetch/re-render here: blendMode/opacity-style selects don't
+                // change the control SET, and a control that does (a hidden-flag
+                // flip) is reconciled in place by syncVisibleControls on the next
+                // WS push — so the card (and its expanded state) is preserved.
+                // A full refetchState() rebuilt the DOM and collapsed the card.
+            });
+            row.appendChild(sel);
+            appendResetButton(row, moduleName, ctrl, def, () => { sel.value = def; });
+            break;
+        }
+        case "palette": {
+            // A color-palette dropdown where EVERY option shows its own gradient — so the colors
+            // are visible before selecting, not just after. A native <select> can't do this
+            // (browsers ignore a gradient background on <option>, and the macOS popup is OS-drawn),
+            // so this is a custom dropdown: a trigger button (selected swatch + name + caret) that
+            // toggles a list of styled rows, each a gradient swatch + name. The value still rides as
+            // the option index. Prior art: MoonLight's palette control (same native-select limit).
+            const opts = ctrl.options || [];
+            const gradientFor = (i) => {
+                const cols = (opts[i] || {}).colors || "";
+                const stops = cols.split(/\s+/).filter(Boolean).map(h => "#" + h);
+                return stops.length ? `linear-gradient(to right, ${stops.join(",")})` : "none";
+            };
+            const wrap = document.createElement("div");
+            wrap.className = "palette-control";
+            wrap.dataset.mid = moduleName;
+            wrap.dataset.key = ctrl.name;
+            wrap.dataset.value = ctrl.value;
+
+            // Trigger: shows the currently-selected palette (swatch + name) and opens the list.
+            const trigger = document.createElement("button");
+            trigger.type = "button";
+            trigger.className = "palette-trigger";
+            const triSwatch = document.createElement("span");
+            triSwatch.className = "palette-swatch";
+            const triName = document.createElement("span");
+            triName.className = "palette-name";
+            const caret = document.createElement("span");
+            caret.className = "palette-caret";
+            caret.textContent = "▾";
+            const paintTrigger = (i) => {
+                triSwatch.style.background = gradientFor(i);
+                triName.textContent = (opts[i] || {}).name || String(i);
+            };
+            paintTrigger(ctrl.value);
+            trigger.append(triSwatch, triName, caret);
+
+            // The list of gradient rows, hidden until the trigger is clicked.
+            const list = document.createElement("div");
+            list.className = "palette-list";
+            list.hidden = true;
+            opts.forEach((opt, i) => {
+                const item = document.createElement("button");
+                item.type = "button";
+                item.className = "palette-item" + (i === ctrl.value ? " selected" : "");
+                item.dataset.idx = i;
+                const sw = document.createElement("span");
+                sw.className = "palette-swatch";
+                sw.style.background = gradientFor(i);
+                const nm = document.createElement("span");
+                nm.className = "palette-name";
+                nm.textContent = opt.name || String(i);
+                item.append(sw, nm);
+                item.addEventListener("click", () => {
+                    wrap.dataset.value = i;
+                    paintTrigger(i);
+                    list.querySelectorAll(".selected").forEach(x => x.classList.remove("selected"));
+                    item.classList.add("selected");
+                    closeList();
+                    dragTs[key] = Date.now();
+                    sendControl(moduleName, ctrl.name, i);
+                });
+                list.appendChild(item);
+            });
+
+            // Open/close, dismissing on outside-click or Escape (the type-picker pattern).
+            let onDocClick = null;
+            const onKey = (e) => { if (e.key === "Escape") closeList(); };
+            const closeList = () => {
+                list.hidden = true;
+                wrap.dataset.open = "false";
+                if (onDocClick) {
+                    document.removeEventListener("pointerdown", onDocClick);
+                    document.removeEventListener("keydown", onKey);
+                    onDocClick = null;
+                }
+            };
+            const openList = () => {
+                list.hidden = false;
+                wrap.dataset.open = "true";
+                dragTs[key] = Date.now();
+                // Bring the selected row into view (a long palette list may overflow the popup).
+                const sel = list.querySelector(".palette-item.selected");
+                if (sel) sel.scrollIntoView({ block: "nearest" });
+                onDocClick = (e) => { if (!wrap.contains(e.target)) closeList(); };
+                document.addEventListener("pointerdown", onDocClick);
+                document.addEventListener("keydown", onKey);
+            };
+            trigger.addEventListener("click", () => { list.hidden ? openList() : closeList(); });
+
+            wrap.append(trigger, list);
+            row.appendChild(wrap);
+            // Reset to the default palette like every other persisted control: re-paint the trigger
+            // and the selected row to `def` (sendControl is handled by appendResetButton).
+            appendResetButton(row, moduleName, ctrl, def, () => {
+                wrap.dataset.value = def;
+                paintTrigger(def);
+                list.querySelectorAll(".selected").forEach(x => x.classList.remove("selected"));
+                const r = list.querySelector(`.palette-item[data-idx="${def}"]`);
+                if (r) r.classList.add("selected");
+            });
+            break;
+        }
+        case "display": {
+            // Read-only string. Updates via WS push.
+            const span = document.createElement("span");
+            span.className = "display";
+            span.dataset.mid = moduleName;
+            span.dataset.key = ctrl.name;
+            span.textContent = ctrl.value ?? "";
+            row.appendChild(span);
+            break;
+        }
+        case "display-int": {
+            // Read-only signed int with a unit suffix (e.g. "-58 dBm").
+            // ctrl.unit is the suffix the device chose at addReadOnlyInt time.
+            const span = document.createElement("span");
+            span.className = "display";
+            span.dataset.mid = moduleName;
+            span.dataset.key = ctrl.name;
+            span.dataset.kind = "display-int";
+            span.dataset.unit = ctrl.unit ?? "";
+            span.textContent = fmtDisplayInt(ctrl);
+            row.appendChild(span);
+            break;
+        }
+        case "ipv4": {
+            // Editable dotted-quad. Wire format is the same string the user
+            // types — the device parses + validates server-side and rejects
+            // malformed values with 400. Inline validation on the client is
+            // a future enhancement; today an invalid value goes to the
+            // server and the response surfaces the rejection.
+            //
+            // Same dragTs + debounceSend pattern as text / password so the
+            // ipv4 input participates in stale-WS-push protection: while
+            // the user is typing, dragTs[key] gets bumped, and an arriving
+            // WS push within the cooldown window won't revert mid-edit
+            // (see updateValues + the dragTs check ~line 1260).
+            const input = document.createElement("input");
+            input.type = "text";
+            input.className = "ipv4-input";
+            input.dataset.mid = moduleName;
+            input.dataset.key = ctrl.name;
+            input.value = ctrl.value ?? "";
+            input.placeholder = "0.0.0.0";
+            input.maxLength = 15;  // "255.255.255.255" = 15
+            input.addEventListener("input", () => {
+                dragTs[key] = Date.now();
+                debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, input.value));
+            });
+            row.appendChild(input);
+            break;
+        }
+        case "time": {
+            // Read-only seconds, rendered as "Xd Yh Zm Ws"
+            const span = document.createElement("span");
+            span.className = "display";
+            span.dataset.mid = moduleName;
+            span.dataset.key = ctrl.name;
+            span.dataset.kind = "time";
+            span.textContent = fmtTime(ctrl.value ?? 0);
+            row.appendChild(span);
+            break;
+        }
+        case "progress": {
+            const bar = document.createElement("progress");
+            bar.max = ctrl.total ?? 100;
+            bar.value = ctrl.value ?? 0;
+            bar.dataset.mid = moduleName;
+            bar.dataset.key = ctrl.name;
+            row.appendChild(bar);
+            const lbl = document.createElement("span");
+            lbl.className = "control-value";
+            lbl.textContent = fmtProgressLabel(ctrl);
+            lbl.dataset.mid = moduleName;
+            lbl.dataset.key = ctrl.name + ".label";
+            row.appendChild(lbl);
+            break;
+        }
+        case "button": {
+            const btn = document.createElement("button");
+            btn.className = "action-btn";
+            const wifiConnect = moduleType === "NetworkModule" && ctrl.name === "connectWifi";
+            btn.textContent = wifiConnect ? "Connect WiFi" : (ctrl.label || ctrl.name);
+            if (wifiConnect) {
+                btn.addEventListener("click", async () => {
+                    const mid = cssEscape(moduleName);
+                    const ssidInput = document.querySelector(`input[data-mid="${mid}"][data-key="ssid"]`);
+                    const draft = wifiCredentialDrafts.get(moduleName) || {};
+                    const ssid = ssidInput ? ssidInput.value : (draft.ssid ?? "");
+                    btn.disabled = true;
+                    btn.textContent = "Connecting...";
+                    const ssidOk = await sendControl(moduleName, "ssid", ssid);
+                    const hasPasswordDraft = Object.prototype.hasOwnProperty.call(draft, "password");
+                    const passwordOk = ssidOk && (!hasPasswordDraft ||
+                        await sendControl(moduleName, "password", draft.password));
+                    const connectOk = passwordOk && await sendControl(moduleName, "connectWifi", 1);
+                    if (connectOk) wifiCredentialDrafts.delete(moduleName);
+                    else {
+                        btn.disabled = false;
+                        btn.textContent = "Connect WiFi";
+                    }
+                });
+            } else {
+                btn.addEventListener("click", () => sendControl(moduleName, ctrl.name, 1));
+            }
+            row.appendChild(btn);
+            break;
+        }
+        case "list": {
+            // A generic read-only list (ControlType::List). value = array of row
+            // summary objects; ctrl.detail = parallel array of detail objects (same
+            // order). Render one clickable row per summary; clicking toggles a detail
+            // panel below it. Self rows (summary.self === true) get a marker. Fully
+            // generic — the engine decides the fields; the UI just renders objects.
+            row.classList.add("control-list-row");
+            const rows = Array.isArray(ctrl.value) ? ctrl.value : [];
+            const details = Array.isArray(ctrl.detail) ? ctrl.detail : [];
+            const list = document.createElement("div");
+            list.className = "list-control";
+            list.dataset.mid = moduleName;
+            list.dataset.key = ctrl.name;
+            // When ctrl.editable is set, the list gains add/delete/reorder + inline field
+            // editing (the editable-List primitive); otherwise it stays read-only (identical
+            // to before). The flag flows through to both render paths via the opts object.
+            if (ctrl.editable) list.dataset.editable = "true";
+            buildListEntries(list, rows, details, new Set(),   // initial: nothing expanded
+                {editable: ctrl.editable, pads: ctrl.pads, gridCols: ctrl.gridCols, gridRows: ctrl.gridRows,
+                 moduleName: moduleName, ctrlName: ctrl.name, optionSets: ctrl.optionSets || {}});
+            row.appendChild(list);
+            break;
+        }
+        default:
+            // Unknown control type — skip silently. New types may be added engine-side
+            // without breaking the UI; they just don't render until handled here.
+            return null;
+    }
+
+    return row;
+}
+
+// Rebuild a List control's entries inside `container` from `rows` (summary objects)
+// and `details` (parallel detail objects). `openSet` is a Set<string> of summary
+// texts whose detail panels start expanded — pass `new Set()` for a fresh build, or
+// the currently-open set on a live re-render so an expanded row stays open. Shared by
+// createControl (initial) and updateModuleControls (WS live patch) so the two can't drift.
+//
+// `opts` optionally carries {editable, moduleName, ctrlName}. When editable is true the
+// list gains row add/delete/reorder + inline field editing (the editable-List primitive);
+// each row must then carry a numeric `id`, and each detail an array `fields[]` of field
+// descriptors. When editable is falsy the render is exactly the read-only path (unchanged).
+// Stable key for the open-detail set. An editable row carries a durable `id` (survives
+// field edits: renaming a preset or changing its channel count doesn't change the id), so
+// key on it — otherwise changing a field that shows in the summary label would fold the
+// open row shut (the label-text key no longer matches after the rebuild). A read-only row
+// (e.g. a discovered device) has no `id`; fall back to the summary label, which is stable
+// enough there (identity by display text, the previous behaviour, unchanged for devices).
+function listRowKey(item, labelText) {
+    return (item && item.id != null) ? "#" + item.id : labelText;
+}
+
+// A grid of uniform pads, one per row: the presentation a `pads` list asks for. Rows are unchanged
+// — this is the same data the stacked list renders, laid out for triggering rather than reading.
+// Uniform size on purpose: sizing each pad to its label (as MoonLight does) makes a ragged grid that
+// is harder to scan and to hit; a fixed pad with a truncated label is what a MIDI deck looks like.
+// Long-press as the touch equivalent of a right-click: a touch device has no second button, so the
+// configure gesture has to come from somewhere. 500ms, cancelled by movement so it never fires
+// during a drag.
+function attachLongPress(el, fn) {
+    let timer = 0;
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+    el.addEventListener("touchstart", () => {
+        cancel();
+        timer = setTimeout(() => { timer = 0; fn(); }, 500);
+    }, {passive: true});
+    el.addEventListener("touchmove", cancel, {passive: true});
+    el.addEventListener("touchend", cancel);
+    el.addEventListener("touchcancel", cancel);
+}
+
+// A small popup anchored to a surface control. Floating rather than appended to the anchor: a panel
+// inside the grid would reflow the pads underneath it, and a surface must not move while you are
+// working on it. Dismisses on click-away, Escape, or opening another.
+function openSurfacePopup(anchorEl, title, build) {
+    document.querySelectorAll(".surface-popup").forEach(p => p.remove());
+    const pop = document.createElement("div");
+    pop.className = "surface-popup";
+
+    const head = document.createElement("div");
+    head.className = "surface-popup-title";
+    head.textContent = title;
+    pop.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "surface-popup-body";
+    pop.appendChild(body);
+    // One teardown for every exit path (click-away, Escape, or a button calling close()): removing
+    // the popup without detaching the document listeners leaked a pair per open.
+    let away = null, esc = null;
+    const close = () => {
+        pop.remove();
+        if (away) document.removeEventListener("mousedown", away);
+        if (esc) document.removeEventListener("keydown", esc);
+    };
+    build(body, close);
+
+    document.body.appendChild(pop);
+    // Anchor below-right of the control, then pull back inside the viewport if that would overflow.
+    const r = anchorEl.getBoundingClientRect();
+    pop.style.left = `${Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)}px`;
+    pop.style.top = `${Math.min(r.bottom + 4, window.innerHeight - pop.offsetHeight - 8)}px`;
+
+    // Defer so the click that opened it does not immediately close it.
+    setTimeout(() => {
+        away = (e) => { if (!pop.contains(e.target)) close(); };
+        esc = (e) => { if (e.key === "Escape") close(); };
+        document.addEventListener("mousedown", away);
+        document.addEventListener("keydown", esc);
+    }, 0);
+    return pop;
+}
+
+// The edit form behind a right-click on a pad: rename, choose what it captures, save over it, or
+// delete. These are the SAME operations the card's bottom controls performed, moved onto the thing
+// they act on — a form at the bottom of the card cannot say which pad it means.
+// What a preset captures: exactly ONE of the four top-level subtrees. A radio group rather than four
+// checkboxes, so "a look" and "a geometry" are the only things expressible — the combinations that
+// used to be possible were the hard part to explain and the hard part to display.
+function buildCaptureToggles(body, moduleName) {
+    const mod = findModule(moduleName);
+    const ctrl = mod && (mod.controls || []).find(c => c.name === "captures");
+    if (!ctrl) return;
+    const names = Array.isArray(ctrl.options) && ctrl.options.length
+        ? ctrl.options : ["Layouts", "Effects", "Drivers", "Services"];
+    const wrap = document.createElement("div");
+    wrap.className = "surface-popup-captures";
+    names.forEach((n, i) => {
+        const lab = document.createElement("label");
+        lab.className = "surface-popup-capture";
+        const rb = document.createElement("input");
+        rb.type = "radio";
+        rb.name = `capture-${moduleName}`;
+        rb.checked = Number(ctrl.value) === i;
+        rb.addEventListener("change", () => { if (rb.checked) sendControl(moduleName, "captures", i); });
+        lab.append(rb, document.createTextNode(n));
+        wrap.appendChild(lab);
+    });
+    const cap = document.createElement("div");
+    cap.className = "surface-popup-caption";
+    cap.textContent = "captures";
+    body.append(cap, wrap);
+}
+
+function openPadEditor(anchorEl, moduleName, ctrlName, item, slot) {
+    const filled = item != null;
+    openSurfacePopup(anchorEl, filled ? `pad: ${item.name}` : `pad ${slot + 1} (empty)`, (body, close) => {
+        if (filled) {
+            const nameRow = document.createElement("div");
+            nameRow.className = "surface-popup-row";
+            const nameLbl = document.createElement("span");
+            nameLbl.textContent = "name";
+            const nameIn = document.createElement("input");
+            nameIn.type = "text";
+            nameIn.className = "list-field-input";
+            nameIn.value = item.name || "";
+            nameIn.addEventListener("change", async () => {
+                await listSetField(moduleName, ctrlName, item.id, "name", nameIn.value);
+                refetchState();
+            });
+            nameRow.append(nameLbl, nameIn);
+            body.appendChild(nameRow);
+
+            // What this preset carries, read from the file rather than the form.
+            if (item.captures) {
+                const cap = document.createElement("div");
+                cap.className = "surface-popup-row";
+                cap.textContent = `captures ${item.captures}`;
+                body.appendChild(cap);
+            }
+            // Re-saving over the pad: the toggles decide what the NEW contents carry.
+            buildCaptureToggles(body, moduleName);
+            const over = document.createElement("button");
+            over.className = "surface-popup-primary";
+            over.textContent = "save current state over it";
+            over.addEventListener("click", async () => {
+                await sendControl(moduleName, "name", item.name);
+                await sendControl(moduleName, "slot", slot);
+                await sendControl(moduleName, "save", 1);
+                close();
+                refetchState();
+            });
+            body.appendChild(over);
+
+            const del = document.createElement("button");
+            del.className = "surface-popup-danger";
+            del.textContent = "delete preset";
+            del.addEventListener("click", async () => {
+                await listDeleteRow(moduleName, ctrlName, item.id);
+                close();
+                refetchState();
+            });
+            body.appendChild(del);
+        } else {
+            // An empty pad's action is to fill it: name it and save the current state here.
+            const nameRow = document.createElement("div");
+            nameRow.className = "surface-popup-row";
+            const nameLbl = document.createElement("span");
+            nameLbl.textContent = "name";
+            const nameIn = document.createElement("input");
+            nameIn.type = "text";
+            nameIn.className = "list-field-input";
+            nameIn.placeholder = "new preset";
+            nameRow.append(nameLbl, nameIn);
+            body.appendChild(nameRow);
+            buildCaptureToggles(body, moduleName);
+
+            const saveBtn = document.createElement("button");
+            saveBtn.className = "surface-popup-primary";
+            saveBtn.textContent = "save current state here";
+            saveBtn.addEventListener("click", async () => {
+                if (!nameIn.value.trim()) { nameIn.focus(); return; }
+                // The module's own `name` + `slot` + `save` controls do the work; the popup is only
+                // the form that fills them, so the save path stays the one the tests cover.
+                await sendControl(moduleName, "name", nameIn.value.trim());
+                await sendControl(moduleName, "slot", slot);
+                await sendControl(moduleName, "save", 1);
+                close();
+                refetchState();
+            });
+            body.appendChild(saveBtn);
+            setTimeout(() => nameIn.focus(), 0);
+        }
+    });
+}
+
+// A rotary knob driving a range input. The input stays in the DOM (hidden) so every other path —
+// the WS live patch, defaults, keyboard — keeps working against it unchanged; this only draws the
+// value and turns drags into value changes.
+/// "What does this strip drive?" — the same popup for an encoder and a fader, since the question and
+/// the answer are identical for both. Right-click on a pointer, long-press on touch.
+function attachTargetPopup(row, input, ctrl) {
+    const show = () => openSurfacePopup(input, ctrl.name, (body) => {
+        const line = document.createElement("div");
+        line.className = "surface-popup-row";
+        line.textContent = ctrl.target ? `drives ${ctrl.target}` : "unassigned — no target yet";
+        body.appendChild(line);
+    });
+    row.addEventListener("contextmenu", (e) => { e.preventDefault(); show(); });
+    attachLongPress(row, show);
+}
+
+function buildKnob(input, ctrl) {
+    // Read the bounds LIVE rather than snapshotting them: the caller assigns input.min/max/value
+    // after this returns, so a snapshot here is NaN and the dial draws against nothing.
+    const bounds = () => {
+        const lo = Number(input.min), hi = Number(input.max);
+        return [Number.isFinite(lo) ? lo : 0, Number.isFinite(hi) ? hi : 255];
+    };
+    const wrap = document.createElement("div");
+    wrap.className = "knob";
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 40 40");
+    // The arc runs from 7 o'clock to 5 o'clock — the 270° sweep a real encoder cap shows, with the
+    // gap at the bottom so the pointer never sits in an ambiguous place.
+    const track = document.createElementNS(NS, "circle");
+    track.setAttribute("cx", "20"); track.setAttribute("cy", "20"); track.setAttribute("r", "15");
+    track.setAttribute("class", "knob-track");
+    const fill = document.createElementNS(NS, "circle");
+    fill.setAttribute("cx", "20"); fill.setAttribute("cy", "20"); fill.setAttribute("r", "15");
+    fill.setAttribute("class", "knob-fill");
+    const pointer = document.createElementNS(NS, "line");
+    pointer.setAttribute("class", "knob-pointer");
+    svg.append(track, fill, pointer);
+    wrap.appendChild(svg);
+
+    const CIRC = 2 * Math.PI * 15;
+    const SWEEP = 0.75;                       // 270° of the circle
+    // rotate() as an ATTRIBUTE, not CSS: a CSS transform on an SVG geometry element resolves against
+    // a different origin and drew a quarter arc instead of the intended 270°.
+    track.setAttribute("transform", "rotate(135 20 20)");
+    fill.setAttribute("transform", "rotate(135 20 20)");
+    track.setAttribute("stroke-dasharray", `${CIRC * SWEEP} ${CIRC}`);
+    const draw = () => {
+        const [min, max] = bounds();
+        const v = Number(input.value);
+        const frac = max > min ? Math.min(1, Math.max(0, (v - min) / (max - min))) : 0;
+        fill.style.strokeDasharray = `${CIRC * SWEEP * frac} ${CIRC}`;
+        // 135° is the 7 o'clock start; sweep clockwise from there.
+        const ang = (135 + frac * 270) * Math.PI / 180;
+        pointer.setAttribute("x1", String(20 + 6 * Math.cos(ang)));
+        pointer.setAttribute("y1", String(20 + 6 * Math.sin(ang)));
+        pointer.setAttribute("x2", String(20 + 13 * Math.cos(ang)));
+        pointer.setAttribute("y2", String(20 + 13 * Math.sin(ang)));
+    };
+    draw();
+    // Redraw when the value changes from anywhere — a drag here, or a WS push patching the input.
+    input.addEventListener("input", draw);
+    input.addEventListener("change", draw);
+    wrap._redraw = draw;
+
+    // Vertical drag turns the knob: up increases. 150px of travel covers the full range, which is
+    // fine for a coarse control and keeps the gesture inside a card.
+    // The gesture needs to be discoverable: without a hint the knob looks like a picture, and the
+    // range input underneath makes the browser offer a resize cursor that suggests the wrong action.
+    wrap.title = "drag up/down or scroll to turn";
+    wrap.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        wrap.setPointerCapture(e.pointerId);
+        wrap.classList.add("knob-turning");
+        const startY = e.clientY, startV = Number(input.value);
+        const [min, max] = bounds();
+        const move = (ev) => {
+            const delta = (startY - ev.clientY) / 150 * (max - min);
+            const next = Math.round(Math.min(max, Math.max(min, startV + delta)));
+            if (next === Number(input.value)) return;
+            input.value = String(next);
+            input.dispatchEvent(new Event("input", {bubbles: true}));
+        };
+        // Every termination path runs this once: pointerup, but also pointercancel and
+        // lostpointercapture, which fire when the browser takes the gesture over (scroll, a system
+        // gesture). Without them the move listener stayed attached and the knob kept turning.
+        let ended = false;
+        const up = (ev) => {
+            if (ended) return;
+            ended = true;
+            wrap.classList.remove("knob-turning");
+            if (ev && ev.pointerId != null && wrap.hasPointerCapture(ev.pointerId))
+                wrap.releasePointerCapture(ev.pointerId);
+            wrap.removeEventListener("pointermove", move);
+            wrap.removeEventListener("pointerup", up);
+            wrap.removeEventListener("pointercancel", up);
+            wrap.removeEventListener("lostpointercapture", up);
+            input.dispatchEvent(new Event("change", {bubbles: true}));
+        };
+        wrap.addEventListener("pointermove", move);
+        wrap.addEventListener("pointerup", up);
+        wrap.addEventListener("pointercancel", up);
+        wrap.addEventListener("lostpointercapture", up);
+    });
+    // Scroll to turn: the gesture people try first on anything round, and the one that works without
+    // knowing the drag exists. `passive:false` so the page does not scroll underneath it.
+    wrap.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const [min, max] = bounds();
+        const step = Math.max(1, Math.round((max - min) / 100));
+        const next = Math.round(Math.min(max, Math.max(min,
+            Number(input.value) + (e.deltaY < 0 ? step : -step))));
+        if (next === Number(input.value)) return;
+        input.value = String(next);
+        input.dispatchEvent(new Event("input", {bubbles: true}));
+        input.dispatchEvent(new Event("change", {bubbles: true}));
+    }, {passive: false});
+    return wrap;
+}
+
+// A seven-segment readout, the way the hardware shows a value: three digits, lit segments over an
+// unlit ghost so the display reads like a real LED module rather than plain text.
+const SEG7 = {
+    "0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg",
+    "5": "acdfg", "6": "acdefg", "7": "abc", "8": "abcdefg", "9": "abcdfg", " ": "",
+};
+function buildSevenSeg(input) {
+    const NS = "http://www.w3.org/2000/svg";
+    const wrap = document.createElement("div");
+    wrap.className = "seg7";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 42 20");
+    // Segment geometry per digit, in the standard a..g naming.
+    const seg = (x, y, horiz) => {
+        const p = document.createElementNS(NS, "rect");
+        p.setAttribute("x", String(x)); p.setAttribute("y", String(y));
+        p.setAttribute("width", horiz ? "7" : "2");
+        p.setAttribute("height", horiz ? "2" : "7");
+        p.setAttribute("rx", "1");
+        return p;
+    };
+    const digits = [];
+    for (let d = 0; d < 3; d++) {
+        const ox = d * 14 + 1;
+        const map = {
+            a: seg(ox + 2, 1, true),  b: seg(ox + 9, 2, false), c: seg(ox + 9, 11, false),
+            d: seg(ox + 2, 17, true), e: seg(ox, 11, false),    f: seg(ox, 2, false),
+            g: seg(ox + 2, 9, true),
+        };
+        for (const el of Object.values(map)) { el.setAttribute("class", "seg7-off"); svg.appendChild(el); }
+        digits.push(map);
+    }
+    wrap.appendChild(svg);
+    const draw = () => {
+        // Right-aligned, blank-padded: "  7", " 42", "255" — how a 3-digit module displays.
+        const txt = String(Math.round(Number(input.value))).padStart(3, " ").slice(-3);
+        digits.forEach((map, i) => {
+            const on = SEG7[txt[i]] ?? "";
+            for (const [name, el] of Object.entries(map))
+                el.setAttribute("class", on.includes(name) ? "seg7-on" : "seg7-off");
+        });
+    };
+    draw();
+    input.addEventListener("input", draw);
+    input.addEventListener("change", draw);
+    // Same hook the knob exposes, so redrawRangeDecorations refreshes both without knowing what
+    // either one is.
+    wrap._redraw = draw;
+    return wrap;
+}
+
+function buildListPads(container, rows, opts) {
+    const moduleName = opts && opts.moduleName;
+    const ctrlName = opts && opts.ctrlName;
+    const editable = !!(opts && opts.editable);
+    const cols = (opts && opts.gridCols) | 0;
+    const gridRows = (opts && opts.gridRows) | 0;
+    const fixed = cols > 0 && gridRows > 0;
+    container.replaceChildren();
+    const grid = document.createElement("div");
+    grid.className = "list-pads" + (fixed ? " list-pads-fixed" : "");
+    // Columns track --surface-col, the ONE width the knob strips and fader strips also use, so the
+    // three banks line up as columns of a single surface. It is a clamp() against the card, so the
+    // alignment survives the right pane being dragged narrower or wider.
+    if (fixed) grid.style.gridTemplateColumns = `repeat(${cols}, var(--surface-col))`;
+    container.appendChild(grid);
+    if (!fixed && rows.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "list-empty";
+        empty.textContent = "(none)";
+        container.appendChild(empty);
+        return;
+    }
+    // On a FIXED surface every cell is rendered, occupied or not: an empty cell is a position you
+    // can drop a pad onto, which is what makes the grid a surface rather than a wrapped list.
+    const cells = fixed ? new Array(cols * gridRows).fill(null) : rows.slice();
+    if (fixed) for (const r of rows) {
+        const s = (r && r.slot) | 0;
+        if (s >= 0 && s < cells.length) cells[s] = r;
+    }
+    cells.forEach((item, i) => {
+        if (fixed && item == null) {
+            // An empty cell: a drop target and nothing else. It carries the slot index so a drop
+            // knows where it landed.
+            // A button, not a div: an empty cell is an ACTION (create a preset here), so it must be
+            // reachable and activatable from the keyboard like every other pad.
+            const hole = document.createElement("button");
+            hole.type = "button";
+            hole.className = "list-pad list-pad-empty";
+            hole.title = `pad ${i + 1} (empty) — click to save the current state here`;
+            hole.addEventListener("click", () => openPadEditor(hole, moduleName, ctrlName, null, i));
+            hole.addEventListener("dragover", (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                hole.classList.add("list-drop-target");
+            });
+            hole.addEventListener("dragleave", () => hole.classList.remove("list-drop-target"));
+            hole.addEventListener("contextmenu", (e) => {
+                e.preventDefault();
+                openPadEditor(hole, moduleName, ctrlName, null, i);
+            });
+            attachLongPress(hole, () => openPadEditor(hole, moduleName, ctrlName, null, i));
+            hole.addEventListener("drop", (e) => {
+                e.preventDefault();
+                hole.classList.remove("list-drop-target");
+                const draggedId = parseInt(e.dataTransfer.getData("text/plain"));
+                if (!Number.isNaN(draggedId)) listMoveRow(moduleName, ctrlName, draggedId, i);
+            });
+            grid.appendChild(hole);
+            return;
+        }
+        const pad = document.createElement("button");
+        pad.type = "button";
+        pad.className = "list-pad" + (item && item.active ? " list-pad-active" : "");
+        // A pad is tinted by the roles it carries, so what a preset covers reads as color as well as
+        // emoji. When it is lit, the tint comes from the roles it still HOLDS (activeRoles): a mixed
+        // preset whose layer was superseded but whose layout is still on stays lit in the layout hue.
+        const padRoles = Array.isArray(item && item.roles) ? item.roles : [];
+        const litRoles = Array.isArray(item && item.activeRoles) ? item.activeRoles : [];
+        const hue = roleHue(litRoles.length ? litRoles : padRoles);
+        if (hue) pad.style.setProperty("--pad-hue", hue);
+        const label = String((item && item.name) ?? "");
+        // Role emoji through the SAME table the module cards use, so 🥞 means the same thing on a pad
+        // as on a card. A row that carries no roles simply gets no emoji.
+        const roles = Array.isArray(item && item.roles) ? item.roles : [];
+        const emoji = roles.map(r => ROLE_EMOJI[r] || "").join("");
+        if (emoji) {
+            const em = document.createElement("span");
+            em.className = "list-pad-emoji";
+            em.textContent = emoji;
+            pad.appendChild(em);
+        }
+        const nameEl = document.createElement("span");
+        nameEl.className = "list-pad-name";
+        nameEl.textContent = label;
+        pad.appendChild(nameEl);
+        pad.title = emoji ? `${label} (${roles.join(", ")})` : label;   // the full name when truncated
+        pad.addEventListener("click", async () => {
+            if (item == null || item.id == null) return;
+            pad.disabled = true;
+            // An ACTION field: the arrival is the whole message, so the value is unused. (The tests
+            // call setListRowField directly and pass the request BODY, which is why they read "{}".)
+            await listSetField(moduleName, ctrlName, item.id, "activate", "");
+            refetchState();
+            pad.disabled = false;
+        });
+        // Right-click edits the pad rather than triggering it: the controls belong on the thing they
+        // configure, not in a form at the bottom of the card that cannot say which pad it means.
+        pad.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            openPadEditor(pad, moduleName, ctrlName, item, (item && item.slot) | 0);
+        });
+        // Touch has no right button, so a long press opens the same editor. Cancelled by movement so
+        // a drag to reorder is not mistaken for a press-and-hold.
+        attachLongPress(pad, () => openPadEditor(pad, moduleName, ctrlName, item, (item && item.slot) | 0));
+        // Drag to reorder, so a grid can be arranged to match a physical control surface. Same
+        // mechanism the list rows use (listMoveRow by stable id), and the same reason the ids are
+        // stable: a reorder must not change what a pad refers to.
+        if (editable && item && item.id != null) {
+            pad.draggable = true;
+            pad.addEventListener("dragstart", (e) => {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", String(item.id));
+                pad.classList.add("list-dragging");
+            });
+            pad.addEventListener("dragend", () => {
+                pad.classList.remove("list-dragging");
+                grid.querySelectorAll(".list-drop-target").forEach(el => el.classList.remove("list-drop-target"));
+            });
+            pad.addEventListener("dragover", (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                pad.classList.add("list-drop-target");
+            });
+            pad.addEventListener("dragleave", () => pad.classList.remove("list-drop-target"));
+            pad.addEventListener("drop", (e) => {
+                e.preventDefault();
+                pad.classList.remove("list-drop-target");
+                const draggedId = parseInt(e.dataTransfer.getData("text/plain"));
+                if (!Number.isNaN(draggedId) && draggedId !== item.id) {
+                    // `i` is the SLOT on a fixed grid (the cell), or the row index on a flowing one.
+                    listMoveRow(moduleName, ctrlName, draggedId, i);
+                }
+            });
+        }
+        grid.appendChild(pad);
+    });
+}
+
+function buildListEntries(container, rows, details, openSet, opts) {
+    if (opts && opts.pads) { buildListPads(container, rows, opts); return; }
+    const editable = !!(opts && opts.editable);
+    const moduleName = opts && opts.moduleName;
+    const ctrlName = opts && opts.ctrlName;
+    const optionSets = (opts && opts.optionSets) || {};   // shared option arrays, keyed by name (optionsRef)
+    container.replaceChildren();
+    if (rows.length === 0 && !editable) {
+        const empty = document.createElement("div");
+        empty.className = "list-empty";
+        empty.textContent = "(none)";
+        container.appendChild(empty);
+        return;
+    }
+    // Rows live in their own scroll box so a long list (e.g. the seeded fixture presets) caps its
+    // height (~5 rows, see .list-scroll in the CSS) and scrolls, instead of eating the whole card.
+    // The "+ Add" button stays OUTSIDE this box, pinned below the scroll area — the standard
+    // scrollable-list-with-fixed-footer pattern.
+    const scroll = document.createElement("div");
+    scroll.className = "list-scroll";
+    container.appendChild(scroll);
+    rows.forEach((item, i) => {
+        const entry = document.createElement("div");
+        // Row classes: the `self` marker + a generic `severity` marker (rowSeverityClass) — both are
+        // field-name conventions the engine opts into, no per-module UI code.
+        const sevClass = rowSeverityClass(item);
+        entry.className = "list-entry" + (item && item.self ? " list-self" : "") +
+                          (sevClass ? " " + sevClass : "");
+        const summary = document.createElement("div");
+        summary.className = "list-summary";
+        summary.tabIndex = 0;
+        summary.setAttribute("role", "button");
+        // Freshness dot (always-visible age at a glance) when the row carries a `*Sec`
+        // duration; colored by ageBucketClass. Generic — no device knowledge here.
+        // The age fields (`ageSec`/`cached`) live in the DETAIL object, not the summary,
+        // so read the detail for the dot (it also carries `self`); fall back to the
+        // summary item when a list has no separate detail.
+        const ageClass = rowAgeClass(details[i] ?? item);
+        if (ageClass) {
+            const dot = document.createElement("span");
+            dot.className = "age-dot " + ageClass;
+            dot.setAttribute("aria-hidden", "true");
+            summary.appendChild(dot);
+        }
+        const label = document.createElement("span");
+        label.className = "list-summary-label";
+        label.textContent = listSummaryText(item);
+        summary.appendChild(label);
+        const detailPanel = document.createElement("div");
+        detailPanel.className = "list-detail";
+        // Keyed via listRowKey (stable `id` for editable rows, else the label text — see the
+        // helper) so an expanded row stays expanded across a live re-render, even when the field
+        // that changed is shown in the summary label (e.g. a preset's channel count).
+        detailPanel.hidden = !openSet.has(listRowKey(item, label.textContent));
+        summary.setAttribute("aria-expanded", String(!detailPanel.hidden));
+        const locked = !!(item && item.locked);
+        if (editable) {
+            // Right-side row actions: delete (✕) then a `⠿` drag-to-reorder handle, in that order —
+            // handles on the RIGHT, after delete, keep every row's controls aligned in one column
+            // (the common data-grid layout). A `locked` (seeded) row isn't draggable and has no
+            // delete — the server refuses both, so the UI shows neither, and locked rows have an
+            // empty actions area that still aligns. The buttons stop click propagation so they don't
+            // toggle the detail panel. entry carries the row id so a drop knows what moved where.
+            entry.dataset.rowId = item.id;
+            entry.dataset.rowIndex = i;
+            const actions = document.createElement("span");
+            actions.className = "list-actions";
+            if (!locked) {
+                const del = document.createElement("button");
+                del.type = "button";
+                del.className = "list-action-btn";
+                del.textContent = "✕";
+                del.title = "Delete";
+                del.addEventListener("click", (e) => { e.stopPropagation(); listDeleteRow(moduleName, ctrlName, item.id); });
+                actions.appendChild(del);
+
+                const handle = document.createElement("span");
+                handle.className = "list-drag-handle";
+                handle.textContent = "⠿";                 // a braille-dots grab affordance (the ::: idiom)
+                handle.title = "Drag to reorder";
+                handle.setAttribute("aria-hidden", "true");
+                handle.addEventListener("click", (e) => e.stopPropagation());
+                // The entry is draggable, gated by the SAME mechanism the module-card drag uses
+                // (attachDragHandlers): a capture-phase MOUSEDOWN handler sets `draggable` based on where
+                // the grab landed. HTML5 drag initiates from mousedown, so the flag must be set there —
+                // a pointerdown handler runs too late (the browser has already read draggable at
+                // mousedown) and dragstart never fires. Here the row drags ONLY when the grab is on the
+                // handle (a click elsewhere expands the row); the touchstart mirror arms mobile drag.
+                const dragGate = (e) => { entry.draggable = !!e.target.closest(".list-drag-handle"); };
+                entry.addEventListener("mousedown", dragGate, true);
+                entry.addEventListener("touchstart", dragGate, {capture: true, passive: true});
+                entry.addEventListener("dragstart", (e) => {
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", String(item.id));
+                    entry.classList.add("list-dragging");
+                });
+                entry.addEventListener("dragend", () => {
+                    entry.draggable = false;
+                    entry.classList.remove("list-dragging");
+                    container.querySelectorAll(".list-drop-target").forEach(el => el.classList.remove("list-drop-target"));
+                });
+                actions.appendChild(handle);
+            }
+            summary.appendChild(actions);
+            // Every editable row is a drop TARGET (drop a dragged row onto it to move there). A drop
+            // onto a locked row is clamped server-side to the first custom slot, so it's harmless.
+            entry.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; entry.classList.add("list-drop-target"); });
+            entry.addEventListener("dragleave", () => entry.classList.remove("list-drop-target"));
+            entry.addEventListener("drop", (e) => {
+                e.preventDefault();
+                entry.classList.remove("list-drop-target");
+                const draggedId = parseInt(e.dataTransfer.getData("text/plain"));
+                if (!Number.isNaN(draggedId) && draggedId !== item.id) {
+                    listMoveRow(moduleName, ctrlName, draggedId, i);   // move the dragged row to THIS row's index
+                }
+            });
+            // Editable detail: render each field descriptor as an inline control, unless
+            // the row is locked (then fall back to the read-only key/value render).
+            if (locked) fillListDetail(detailPanel, details[i] ?? item);
+            else fillEditableListDetail(detailPanel, details[i] ?? item, moduleName, ctrlName, item.id, optionSets);
+        } else {
+            fillListDetail(detailPanel, details[i] ?? item);
+        }
+        const toggle = () => {
+            detailPanel.hidden = !detailPanel.hidden;
+            summary.setAttribute("aria-expanded", String(!detailPanel.hidden));
+        };
+        summary.addEventListener("click", toggle);
+        summary.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+        });
+        entry.append(summary, detailPanel);
+        scroll.appendChild(entry);
+    });
+    if (editable) {
+        // "+ Add" appends a new row (server assigns the id, then state refreshes).
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "list-add-btn";
+        addBtn.textContent = "+ Add";
+        addBtn.addEventListener("click", () => listAddRow(moduleName, ctrlName));
+        container.appendChild(addBtn);
+    }
+}
+
+// Render an editable row's detail: each descriptor in `detail.fields[]` becomes an inline
+// control (text→<input>, uint8→<input type=number>, select→<select>). On change we call
+// listSetField(...) and let the normal refresh reflect the persisted state — no optimistic
+// local mutation. A field with `readonly:true` renders as a plain read-only value (same look
+// as fillListDetail). Fields carry a dragTs cooldown so a WS state push mid-edit can't revert
+// what's being typed/picked, mirroring the select/text guards in createControl.
+function fillEditableListDetail(panel, detail, moduleName, ctrlName, id, optionSets) {
+    panel.replaceChildren();
+    optionSets = optionSets || {};
+    const fields = detail && Array.isArray(detail.fields) ? detail.fields : [];
+    for (const f of fields) {
+        const r = document.createElement("div");
+        r.className = "list-detail-row";
+        const kEl = document.createElement("span");
+        kEl.className = "list-detail-key";
+        kEl.textContent = f.name;
+        const vEl = document.createElement("span");
+        vEl.className = "list-detail-val";
+        // Per-field cooldown key: unique per module/control/row/field so edits don't collide.
+        const dragKey = `list:${moduleName}:${ctrlName}:${id}:${f.name}`;
+        if (f.readonly) {
+            vEl.textContent = String(f.value ?? "");
+            vEl.classList.add("list-detail-muted");
+        } else if (f.type === "button") {
+            // A row ACTION rather than a value: the click PATCHes the field like any edit, and the
+            // source reads the arrival as "do this to this row" (ControlModule's preset `apply`).
+            // Generic on purpose — a row button is a primitive the list has lacked, not a
+            // preset-specific affordance. Refetches, because an action typically changes the row set
+            // or the wider tree, unlike a field edit which the WS push reconciles.
+            const btn = document.createElement("button");
+            btn.className = "list-field-btn";
+            btn.textContent = f.label || f.name;
+            btn.addEventListener("click", async () => {
+                btn.disabled = true;
+                await listSetField(moduleName, ctrlName, id, f.name, "");
+                refetchState();
+                btn.disabled = false;
+            });
+            vEl.appendChild(btn);
+        } else if (f.type === "select") {
+            const sel = document.createElement("select");
+            sel.className = "list-field-input";
+            sel.dataset.dragkey = dragKey;
+            // Options come from the field's inline `options`, or (the common case for a repeated select
+            // like the channel-role pickers) from the list's shared `optionSets` via `optionsRef` — so
+            // the option array is sent once per list, not re-inlined in every row (see writeListOptionSets).
+            const fieldOptions = f.options || (f.optionsRef ? optionSets[f.optionsRef] : null) || [];
+            fieldOptions.forEach((opt, idx) => {
+                const o = document.createElement("option");
+                o.value = idx;
+                o.textContent = opt;
+                if (idx === f.value) o.selected = true;
+                sel.appendChild(o);
+            });
+            const mark = () => { dragTs[dragKey] = Date.now(); };
+            sel.addEventListener("pointerdown", mark);
+            sel.addEventListener("focus", mark);
+            sel.addEventListener("change", () => {
+                dragTs[dragKey] = Date.now();
+                listSetField(moduleName, ctrlName, id, f.name, parseInt(sel.value));
+            });
+            vEl.appendChild(sel);
+        } else if (f.type === "uint8") {
+            const inp = document.createElement("input");
+            inp.type = "number";
+            inp.className = "list-field-input";
+            inp.dataset.dragkey = dragKey;
+            if (f.min !== undefined) inp.min = f.min;
+            if (f.max !== undefined) inp.max = f.max;
+            inp.value = f.value ?? 0;
+            inp.addEventListener("input", () => { dragTs[dragKey] = Date.now(); });
+            inp.addEventListener("change", () => {
+                dragTs[dragKey] = Date.now();
+                // Guard against empty/invalid entry (parseInt → NaN) and clamp to the control's
+                // range — the HTML min/max attributes don't enforce a hand-typed value, so a stray
+                // "" or out-of-range number would otherwise reach the device as NaN / an overflow.
+                let v = parseInt(inp.value, 10);
+                if (!Number.isFinite(v)) v = f.min ?? 0;
+                if (f.min !== undefined) v = Math.max(v, f.min);
+                if (f.max !== undefined) v = Math.min(v, f.max);
+                inp.value = v;   // reflect the clamped value back into the field
+                listSetField(moduleName, ctrlName, id, f.name, v);
+            });
+            vEl.appendChild(inp);
+        } else {   // "text" and any unknown type render as a text input
+            const inp = document.createElement("input");
+            inp.type = "text";
+            inp.className = "list-field-input";
+            inp.dataset.dragkey = dragKey;
+            inp.value = f.value ?? "";
+            inp.addEventListener("input", () => { dragTs[dragKey] = Date.now(); });
+            inp.addEventListener("change", () => {
+                dragTs[dragKey] = Date.now();
+                listSetField(moduleName, ctrlName, id, f.name, inp.value);
+            });
+            vEl.appendChild(inp);
+        }
+        r.append(kEl, vEl);
+        panel.appendChild(r);
+    }
+}
+
+// Join a list row's scalar fields into a one-line summary (skips marker fields — `self`, `severity`
+// — that render as row styling rather than text, and any nested objects). Generic: the engine names
+// the fields.
+function listSummaryText(item) {
+    if (!item || typeof item !== "object") return String(item ?? "");
+    return Object.entries(item)
+        .filter(([k, v]) => k !== "self" && k !== "severity" && typeof v !== "object")
+        .map(([, v]) => v)
+        .join("  ·  ");
+}
+
+// Render a list row's detail object as read-only key/value rows. Scalars print as-is;
+// an array of scalars (e.g. a device's `speaks:["http"]` or `via:["mdns","scan"]`)
+// renders as small chips so multi-valued fields like the discovery source are visible
+// at a glance. Nested objects are still skipped (no use case yet). Generic — the engine
+// names the fields, so a new array field shows up with no UI change here.
+function fillListDetail(panel, detail) {
+    panel.replaceChildren();
+    if (!detail || typeof detail !== "object") return;
+    for (const [k, v] of Object.entries(detail)) {
+        const isScalarArray = Array.isArray(v) && v.every(e => typeof e !== "object");
+        if (typeof v === "object" && !isScalarArray) continue;
+        // `cached` and `ageSec` both render as "last seen"; a projectMM device emits
+        // exactly one (mutually exclusive in DevicesModule), but skip ageSec when a
+        // `cached` key is also present so any other source can't produce two conflicting
+        // "last seen" rows. Match the cached branch's render condition, which fires on
+        // key EXISTENCE (`k === "cached"`), not truthiness — so gate on the key being
+        // present, not on its value. (Robust-to-any-input, generic.)
+        if (k === "ageSec" && "cached" in detail) continue;
+        const r = document.createElement("div");
+        r.className = "list-detail-row";
+        const kEl = document.createElement("span");
+        // A `*Sec` field is a duration in seconds (e.g. a device's `ageSec`) — show it
+        // under a plainer label ("last seen") and as a relative time, not a bare count.
+        // `cached` is the sibling: a restored device not yet re-seen live → "last seen:
+        // cached" rather than a fake recent time.
+        const isDuration = k.endsWith("Sec");
+        kEl.className = "list-detail-key";
+        kEl.textContent = (k === "ageSec" || k === "cached") ? "last seen" : k;
+        const vEl = document.createElement("span");
+        vEl.className = "list-detail-val";
+        if (k === "cached") {
+            vEl.textContent = "cached";
+            vEl.classList.add("list-detail-muted");
+        } else if (isScalarArray) {
+            for (const e of v) {
+                const chip = document.createElement("span");
+                chip.className = "list-detail-chip";
+                chip.textContent = String(e);
+                vEl.appendChild(chip);
+            }
+        } else if (isDuration) {
+            vEl.textContent = relativeAge(Number(v));
+            const ageClass = ageBucketClass(Number(v));   // tint to match the summary dot
+            if (ageClass) vEl.classList.add(ageClass);
+        } else if (typeof v === "string" && /^https?:\/\//.test(v)) {
+            // A value that is an http(s) URL (e.g. a device's `url`) renders as a link that
+            // opens in a new tab — generic, any ListSource detail can surface one. rel
+            // guards the opened page from reaching back via window.opener.
+            const a = document.createElement("a");
+            a.href = v;
+            a.textContent = v;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
+            a.className = "list-detail-link";
+            vEl.appendChild(a);
+        } else {
+            vEl.textContent = String(v);
+        }
+        r.append(kEl, vEl);
+        panel.appendChild(r);
+    }
+}
+
+// Freshness bucket for a duration-in-seconds (a `*Sec` field): green < 1 min, orange
+// < 1 hour, red beyond. Generic — any duration field a ListSource emits gets the same
+// scale; nothing device-specific here. (DevicesModule's ageSec is the first user: a
+// device unseen > 24h is aged out of the list entirely, so "red" spans 1h–24h.)
+function ageBucketClass(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return "";
+    if (sec < 60) return "age-fresh";
+    if (sec < 3600) return "age-recent";
+    return "age-stale";
+}
+
+// Find a row's freshness CSS class from its first `*Sec` scalar field, or "" if it has
+// none. `self` is always "now" → fresh; a `cached` row (restored, not re-seen) is
+// unknown-age → no dot (the detail says "cached"). Generic over field names.
+function rowAgeClass(item) {
+    if (!item || typeof item !== "object") return "";
+    if (item.self) return "age-fresh";
+    if (item.cached) return "";
+    for (const [k, v] of Object.entries(item)) {
+        if (k.endsWith("Sec") && typeof v === "number") return ageBucketClass(v);
+    }
+    return "";
+}
+
+// Severity CSS class from a row's `severity` field ("error"/"warn"), or "" if none/absent. Generic
+// over the field name, exactly like rowAgeClass over `*Sec`: any ListSource that emits a `severity`
+// string gets the same visual (a colored row marker). PinsModule is the first user — it flags a GPIO
+// claim on a reserved/strap/input-only pin — but nothing here is pins-specific; a task in a bad state
+// or a device with an error could emit `severity` and light up the same way.
+function rowSeverityClass(item) {
+    if (!item || typeof item !== "object") return "";
+    if (item.severity === "error") return "list-severity-error";
+    if (item.severity === "warn") return "list-severity-warn";
+    return "";
+}
+
+// Render a seconds-ago count as a short relative time ("just now", "2m ago", "3h ago",
+// "5d ago"). Snapshot at state-push time — it refreshes when the list re-renders, not
+// per second. Mirrors the device-side ageSec (now - lastSeenMs); kept simple on purpose.
+function relativeAge(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return "—";
+    if (sec < 10) return "just now";
+    if (sec < 60) return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+    return `${Math.floor(sec / 86400)}d ago`;
+}
+
+function appendResetButton(row, moduleName, ctrl, def, applyVisually) {
+    if (def === undefined || def === null) return;  // type not loaded yet or no default
+    const btn = document.createElement("button");
+    btn.className = "reset-btn";
+    btn.type = "button";
+    btn.textContent = "↺";
+    btn.title = `Reset to default (${def})`;
+    btn.dataset.mid = moduleName;
+    btn.dataset.key = ctrl.name + ".reset";
+    btn.dataset.def = String(def);
+    const eq = controlValuesEqual(ctrl, def);
+    btn.classList.toggle("active", !eq);
+    btn.addEventListener("click", () => {
+        const key = moduleName + ":" + ctrl.name;
+        clearTimeout(dragTimers[key]);   // a pending debounced edit must not overwrite the reset
+        dragTs[key] = Date.now();        // and a stale WS patch must not revert it
+        applyVisually();
+        sendControl(moduleName, ctrl.name, def);
+    });
+    row.appendChild(btn);
+}
+
+function debounceSend(key, ms, fn) {
+    clearTimeout(dragTimers[key]);
+    dragTimers[key] = setTimeout(fn, ms);
+}
+
+function fmtTime(sec) {
+    sec = Math.max(0, Math.floor(Number(sec) || 0));
+    const d = Math.floor(sec / 86400); sec -= d * 86400;
+    const h = Math.floor(sec / 3600);  sec -= h * 3600;
+    const m = Math.floor(sec / 60);    sec -= m * 60;
+    const parts = [];
+    if (d) parts.push(d + "d");
+    if (d || h) parts.push(h + "h");
+    if (d || h || m) parts.push(m + "m");
+    parts.push(sec + "s");
+    return parts.join(" ");
+}
+
+function fmtProgressLabel(ctrl) {
+    const v = Number(ctrl.value) || 0;
+    const t = Number(ctrl.total) || 0;
+    // bytes === false → a plain count (e.g. a scan position "37 / 254"); otherwise
+    // KB (the heap / flash / filesystem gauges, the original use).
+    if (ctrl.bytes === false) return v + " / " + t;
+    return Math.round(v / 1024) + "KB / " + Math.round(t / 1024) + "KB";
+}
+
+// "<value> <unit>" — treats null / undefined / 0 as "unavailable" so the
+// UI doesn't render bogus "0 dBm" when the device is in a state where the
+// metric isn't meaningful. The device's updateMetrics() writes 0 to rssi /
+// txPower in non-WiFi states; the control is hidden in those states, but
+// if anyone toggles hidden off (DevTools, future code path) the unit-with-
+// zero rendering would still mislead. Real metric values are never zero
+// in practice — RSSI is negative, TX power is 0..127 dBm (zero only on
+// driver-uninitialised reads).
+function fmtDisplayInt(ctrl) {
+    const v = ctrl.value;
+    const u = ctrl.unit || "";
+    if (v === null || v === undefined || v === 0) return "";
+    return u ? `${v} ${u}` : String(v);
+}
+
+// ---------------------------------------------------------------------------
+// 5. State patching (no-rebuild contract)
+// ---------------------------------------------------------------------------
+
+// Apply a diff-on-the-wire patch onto the in-memory `state`. Each entry is {path,value} where path is
+// "<module>/<control>" for a control value, or "<module>/@<field>" for a live module-header field
+// (tickTimeUs / dynamicBytes — shown per card). Module names are unique tree-wide (the device dedups
+// them), so the first path segment identifies the module. Mutates `state` in place; the caller then
+// calls updateValues() to refresh the DOM without a rebuild. An unknown path is skipped (a resync will
+// reconcile). List controls: the value is the full summary array (the device sends a changed list's
+// whole value — see the plan), so we replace it wholesale, which updateModuleControls/renderCards read.
+function applyStatePatch(patch) {
+    const byName = new Map(allModules().map(m => [m.name, m]));
+    for (const entry of patch) {
+        if (!entry || typeof entry.path !== "string") continue;
+        const slash = entry.path.indexOf("/");
+        if (slash < 0) continue;
+        const modName = entry.path.slice(0, slash);
+        const leaf = entry.path.slice(slash + 1);
+        const mod = byName.get(modName);
+        if (!mod) continue;
+        helioValueChanges.set(entry.path, ++helioValueRevision);
+        if (leaf[0] === "@") {
+            mod[leaf.slice(1)] = entry.value;   // header field, e.g. @tickTimeUs -> mod.tickTimeUs
+        } else if (Array.isArray(mod.controls)) {
+            const c = mod.controls.find(c => c.name === leaf);
+            if (c) c.value = entry.value;
+        }
+    }
+}
+
+/// Refresh the decorations drawn ON TOP of a range input (the knob dial, the seven-segment readout).
+///
+/// A WebSocket patch assigns `input.value` directly, which fires NEITHER `input` NOR `change` — those
+/// only fire for user gestures. Anything listening for them therefore keeps showing the value it was
+/// built with, which is why the readouts read 880/50 while the knobs pointed elsewhere. Call this
+/// wherever a range input's value is set programmatically.
+function redrawRangeDecorations(input) {
+    if (!input) return;
+    for (const el of input.parentElement ? input.parentElement.children : []) {
+        if (typeof el._redraw === "function") el._redraw();
+    }
+}
+
+function updateValues() {
+    if (!state || !state.modules) return;
+    const helioDashboardActive = document.body.classList.contains("helio-product-mode") &&
+        !!document.querySelector(".helio-home");
+    if (!helioDashboardActive) updateGenericModuleValues();
+    updateHelioHome();
+    updateStatusBar();
+}
+
+function updateGenericModuleValues() {
+    // Patch each visible card's controls and stats line; never rebuild the DOM here.
+    for (const mod of allModules()) {
+        updateTabDot(mod);   // a fault on a BACKGROUND tab must surface without opening it
+        updateModuleControls(mod);
+        // refresh the stats line for this module if visible
+        const statsEl = document.querySelector(`.card-stats[data-mid="${cssEscape(mod.name)}"]`);
+        if (statsEl) { statsEl.textContent = formatStats(mod); statsEl.title = formatStatsTitle(mod); }
+        // refresh status row — insert it if status appeared after card build
+        let statusRow = document.querySelector(`[data-status-mid="${cssEscape(mod.name)}"]`);
+        if (mod.status) {
+            if (!statusRow) {
+                // Card exists but had no status at build time — insert now before first control.
+                const card = document.querySelector(`.card[data-module="${cssEscape(mod.name)}"]`);
+                const host = card && (card.querySelector(".card-controls-collapse") || card);
+                if (host) {
+                    statusRow = document.createElement("div");
+                    statusRow.className = "control-row";
+                    statusRow.dataset.statusMid = mod.name;
+                    const label = document.createElement("span");
+                    label.className = "control-label";
+                    label.textContent = "status";
+                    const val = document.createElement("span");
+                    val.className = "status-value";
+                    val.dataset.sev = mod.severity || "status";
+                    val.textContent = mod.status;
+                    statusRow.appendChild(label);
+                    statusRow.appendChild(val);
+                    // Insert before first .control-row, or append.
+                    const firstRow = host.querySelector(".control-row");
+                    firstRow ? host.insertBefore(statusRow, firstRow) : host.appendChild(statusRow);
+                }
+            } else {
+                statusRow.style.display = "";
+                const val = statusRow.querySelector(".status-value");
+                if (val) { val.textContent = mod.status; val.dataset.sev = mod.severity || "status"; }
+            }
+        } else if (statusRow) {
+            statusRow.style.display = "none";
+        }
+        // refresh enabled toggle (now a styled <button>, not an <input>)
+        const enabledEl = document.querySelector(`button.module-enabled[data-mid="${cssEscape(mod.name)}"]`);
+        if (enabledEl) {
+            const ts = dragTs[mod.name + ":enabled"] || 0;
+            if (Date.now() - ts > 1000) {
+                const on = (mod.enabled === undefined) ? true : !!mod.enabled;
+                enabledEl.dataset.checked = on ? "true" : "false";
+                enabledEl.textContent = "⏻";
+                enabledEl.classList.toggle("module-enabled--off", !on);
+                enabledEl.setAttribute("aria-pressed", on ? "true" : "false");
+                const cardEl = document.querySelector(`.card[data-module="${cssEscape(mod.name)}"]`);
+                if (cardEl) cardEl.classList.toggle("card--disabled", !on);
+            }
+        }
+    }
+}
+
+function allModules() {
+    const out = [];
+    function walk(modules) {
+        for (const m of modules) {
+            out.push(m);
+            if (m.children) walk(m.children);
+        }
+    }
+    if (state && state.modules) walk(state.modules);
+    return out;
+}
+
+function mergeCompactState(base, patch) {
+    if (!base || !Array.isArray(base.modules) || !patch || !Array.isArray(patch.modules)) return base;
+    const byName = new Map();
+    const indexFull = (modules) => {
+        for (const mod of modules || []) {
+            if (!mod || !mod.name) continue;
+            byName.set(mod.name, mod);
+            if (mod.children) indexFull(mod.children);
+        }
+    };
+    indexFull(base.modules);
+
+    const mergeControls = (dst, src) => {
+        if (!dst.controls || !src.controls) return;
+        const controls = new Map(dst.controls.map(c => [c.name, c]));
+        for (const pc of src.controls) {
+            const dc = controls.get(pc.name);
+            if (!dc) continue;
+            if ("value" in pc) dc.value = pc.value;
+            if ("hidden" in pc) dc.hidden = pc.hidden; else delete dc.hidden;
+            if ("readonly" in pc) dc.readonly = pc.readonly; else delete dc.readonly;
+            if ("total" in pc) dc.total = pc.total;
+            if ("bytes" in pc) dc.bytes = pc.bytes;
+        }
+    };
+
+    const mergeModule = (pm) => {
+        const dm = byName.get(pm.name);
+        if (!dm) return;
+        for (const key of ["enabled", "tickTimeUs", "dynamicBytes", "status", "severity"]) {
+            if (key in pm) dm[key] = pm[key];
+            else if (key === "status" || key === "severity") delete dm[key];
+        }
+        mergeControls(dm, pm);
+        if (pm.children) for (const child of pm.children) mergeModule(child);
+    };
+    for (const mod of patch.modules) mergeModule(mod);
+    return base;
+}
+
+// Reconcile a card's control rows when its set of VISIBLE controls changed (a
+// `hidden` flag flipped at runtime, e.g. NetworkModule's static-IP fields or
+// RmtLedDriver's loopbackRxPin). The value-patch path in updateModuleControls
+// can't add or remove rows, so this handles that half. Returns true if it
+// changed the DOM. No-op (returns false) on the common frame where nothing moved.
+//
+// Position-stable by design: it inserts each newly-visible row at its correct
+// index among the existing control rows and removes rows that became hidden —
+// it does NOT tear down and re-append every row (that would land them after the
+// card's child-module block / install-picker mount, never converge, and re-fire
+// every WS tick — a render loop that wedges the UI).
+function syncVisibleControls(mod) {
+    const card = document.querySelector(`.card[data-module="${cssEscape(mod.name)}"]`);
+    if (!card) return false;
+    // The controls host is THIS card's own collapse wrapper — must be a DIRECT
+    // child (`:scope >`), not any descendant: a container card (e.g. Effects) nests
+    // its child cards (Layer) inside .card-children, and a plain
+    // `card.querySelector(".card-controls-collapse")` would reach down and match
+    // the CHILD's wrapper. That made Effects adopt Layer's control rows as its own,
+    // so both cards saw a control-set mismatch every WS frame and rebuilt each
+    // other's rows in a loop — tearing down (and closing) any open <select>.
+    const host = card.querySelector(":scope > .card-controls-collapse") || card;
+
+    const wantNames = mod.controls.filter(c => controlRendersGenerically(mod, c)).map(c => c.name);
+    const haveRows = [...host.querySelectorAll(":scope > .control-row[data-key]")];
+    const haveNames = haveRows.map(r => r.dataset.key);
+    if (wantNames.length === haveNames.length && wantNames.every((n, i) => n === haveNames[i])) {
+        return false;  // unchanged — the common case, so an idle WS push rebuilds nothing
+    }
+    // The visible-control set genuinely drifted (a hidden flag flipped — e.g. whiteMode appearing when
+    // the preset changes). Rebuild to reflect it; latest state wins. We don't defer for an in-progress
+    // edit: the drift is a consequence of a real change, and suppressing it would hide that change.
+
+    // Remove rows whose control is no longer visible.
+    const wantSet = new Set(wantNames);
+    for (const row of haveRows) {
+        if (!wantSet.has(row.dataset.key)) row.remove();
+    }
+    // Insert each visible control's row at its correct position. The anchor is the
+    // first existing control row that should come AFTER this one; null → append
+    // before the children block (insertBefore(node, null) appends to host's end,
+    // but control rows precede .card-children which lives on the card, not here).
+    const visibleControls = mod.controls.filter(c => controlRendersGenerically(mod, c));
+    for (let i = 0; i < visibleControls.length; i++) {
+        const name = visibleControls[i].name;
+        if (host.querySelector(`:scope > .control-row[data-key="${cssEscape(name)}"]`)) continue;
+        const row = createControl(mod.name, mod.type, visibleControls[i]);
+        if (!row) continue;
+        // Anchor: the rendered row of the next visible control that already exists.
+        let anchor = null;
+        for (let j = i + 1; j < visibleControls.length && !anchor; j++) {
+            anchor = host.querySelector(`:scope > .control-row[data-key="${cssEscape(visibleControls[j].name)}"]`);
+        }
+        // No later control row exists yet → keep this row above the card's
+        // children block / install-picker mount / footer (which live in the host
+        // when host===card), so controls never render below the children.
+        if (!anchor) {
+            anchor = host.querySelector(":scope > .card-children")
+                  || host.querySelector(":scope > .install-picker-host")
+                  || host.querySelector(":scope > .card-footer");
+        }
+        host.insertBefore(row, anchor);
+    }
+    return true;
+}
+
+function updateModuleControls(mod) {
+    if (!mod.controls) return;
+
+    // Conditional controls: a module can flip a control's `hidden` flag at runtime
+    // (e.g. RmtLedDriver reveals loopbackRxPin while the test is on, NetworkModule
+    // reveals static-IP fields). The value-patch loop below only updates controls
+    // already in the DOM — it can't add or remove one. So first detect whether the
+    // set of VISIBLE controls drifted from what's rendered, and if so re-render
+    // this card's control rows. Cheap: only fires on the rare frame where a hidden
+    // flag actually changed.
+    if (syncVisibleControls(mod)) return;  // re-rendered — values are fresh, skip patch
+
+    for (const ctrl of mod.controls) {
+        const mid = cssEscape(mod.name);
+        const k = cssEscape(ctrl.name);
+        const dragKey = mod.name + ":" + ctrl.name;
+        const ts = dragTs[dragKey] || 0;
+        const userActive = Date.now() - ts < 1000;
+
+        // One guard for every editable control: while the user is mid-edit (a
+        // keystroke / drag within the last second, tracked by dragTs), don't let a
+        // WS state push overwrite the field with the value it had before the edit
+        // landed. The read-only types (display/display-int/time/progress) and the
+        // composite `list` aren't in this set — they always reflect the latest push.
+        if (userActive && EDITABLE_CONTROL_TYPES.has(ctrl.type)) continue;
+
+        switch (ctrl.type) {
+            case "uint8":
+            case "uint16":
+            case "int16":
+            case "pin": {   // pin is a plain number input (no slider sibling); patches the same way
+                const input = document.querySelector(`input[data-mid="${mid}"][data-key="${k}"]`);
+                // While the demo sweep animates a control, leave it alone: the sweep restores the
+                // real value when it ends, and the next patch after that lands normally.
+                if (input && surfaceDemoRunning() &&
+                    (input.classList.contains("encoder-input") || input.classList.contains("fader-input"))) break;
+                if (input && Number(input.value) !== Number(ctrl.value)) {
+                    input.value = ctrl.value ?? 0;
+                    const val = input.nextElementSibling;
+                    if (val && val.classList.contains("control-value-input")) val.value = ctrl.value ?? 0;
+                    redrawRangeDecorations(input);
+                }
+                break;
+            }
+            case "bool": {
+                const input = document.querySelector(`input[data-mid="${mid}"][data-key="${k}"]`);
+                if (input && input.checked !== !!ctrl.value) input.checked = !!ctrl.value;
+                break;
+            }
+            case "text": {
+                const input = document.querySelector(`input[type="text"][data-mid="${mid}"][data-key="${k}"]`);
+                if (mod.type === "NetworkModule" && ctrl.name === "ssid" &&
+                    Object.prototype.hasOwnProperty.call(wifiCredentialDrafts.get(mod.name) || {}, "ssid")) break;
+                if (input && input.value !== (ctrl.value ?? "")) input.value = ctrl.value ?? "";
+                break;
+            }
+            case "textarea": {
+                const input = document.querySelector(`textarea[data-mid="${mid}"][data-key="${k}"]`);
+                // Don't clobber the box while the user is typing in it.
+                if (input && document.activeElement !== input && input.value !== (ctrl.value ?? "")) input.value = ctrl.value ?? "";
+                break;
+            }
+            case "password": {
+                const input = document.querySelector(`input[data-mid="${mid}"][data-key="${k}"]`);
+                if (mod.type === "NetworkModule" && ctrl.name === "password" &&
+                    Object.prototype.hasOwnProperty.call(wifiCredentialDrafts.get(mod.name) || {}, "password")) break;
+                if (input && document.activeElement !== input) input.value = "";
+                if (input) input.placeholder = ctrl.value ? "Saved - enter to replace" : "Enter password";
+                break;
+            }
+            case "select": {
+                const sel = document.querySelector(`select[data-mid="${mid}"][data-key="${k}"]`);
+                // Never overwrite a select the user currently has OPEN (popup
+                // showing) or focused. data-open is set on pointerdown/focus and
+                // cleared on change/blur — more reliable than document.activeElement,
+                // which is ambiguous while a native popup is up (the popup is a
+                // separate OS layer on macOS). The 1s dragTs cooldown is the
+                // additional fallback for the frames right after the popup closes.
+                if (sel && sel.dataset.open !== "true" && sel !== document.activeElement) {
+                    // Re-sync the OPTION list when it changed since render: some selects are
+                    // populated asynchronously (e.g. HueDriver learns its rooms/lights ~1-2s after
+                    // boot, growing this select from ["All"] to the full list). The value-only patch
+                    // below can't reveal new options, so rebuild them in place when they differ.
+                    const opts = ctrl.options || [];
+                    const cur = Array.from(sel.options).map(o => o.textContent);
+                    if (cur.length !== opts.length || opts.some((o, i) => o !== cur[i])) {
+                        sel.innerHTML = "";
+                        opts.forEach((opt, i) => {
+                            const o = document.createElement("option");
+                            o.value = i;
+                            o.textContent = opt;
+                            sel.appendChild(o);
+                        });
+                    }
+                    if (Number(sel.value) !== Number(ctrl.value)) sel.value = ctrl.value;
+                }
+                break;
+            }
+            case "palette": {
+                // Custom dropdown: patch the trigger (swatch + name) and the selected row, but not
+                // while the user has the list open (data-open === "true").
+                const wrap = document.querySelector(`.palette-control[data-mid="${mid}"][data-key="${k}"]`);
+                if (wrap && wrap.dataset.open !== "true" && Number(wrap.dataset.value) !== Number(ctrl.value)) {
+                    wrap.dataset.value = ctrl.value;
+                    const cols = ((ctrl.options || [])[ctrl.value] || {}).colors || "";
+                    const stops = cols.split(/\s+/).filter(Boolean).map(h => "#" + h);
+                    const grad = stops.length ? `linear-gradient(to right, ${stops.join(",")})` : "none";
+                    const triSwatch = wrap.querySelector(".palette-trigger .palette-swatch");
+                    if (triSwatch) triSwatch.style.background = grad;
+                    const triName = wrap.querySelector(".palette-trigger .palette-name");
+                    if (triName) triName.textContent = ((ctrl.options || [])[ctrl.value] || {}).name || String(ctrl.value);
+                    wrap.querySelectorAll(".palette-item.selected").forEach(x => x.classList.remove("selected"));
+                    const row = wrap.querySelector(`.palette-item[data-idx="${ctrl.value}"]`);
+                    if (row) row.classList.add("selected");
+                }
+                break;
+            }
+            case "display": {
+                document.querySelectorAll(`span.display[data-mid="${mid}"][data-key="${k}"]`)
+                    .forEach(span => { span.textContent = ctrl.value ?? ""; });
+                break;
+            }
+            case "display-int": {
+                document.querySelectorAll(`span.display[data-mid="${mid}"][data-key="${k}"]`).forEach(span => {
+                    // Re-cache the unit in case the device changed it (it
+                    // shouldn't, but the WS path is the authority).
+                    span.dataset.unit = ctrl.unit ?? span.dataset.unit ?? "";
+                    span.textContent = fmtDisplayInt(ctrl);
+                });
+                break;
+            }
+            case "ipv4": {
+                // Guarded by the shared userActive check above (same as text).
+                const input = document.querySelector(`input.ipv4-input[data-mid="${mid}"][data-key="${k}"]`);
+                if (input && input.value !== (ctrl.value ?? "")) input.value = ctrl.value ?? "";
+                break;
+            }
+            case "time": {
+                document.querySelectorAll(`span.display[data-mid="${mid}"][data-key="${k}"]`)
+                    .forEach(span => { span.textContent = fmtTime(ctrl.value ?? 0); });
+                break;
+            }
+            case "progress": {
+                const bar = document.querySelector(`progress[data-mid="${mid}"][data-key="${k}"]`);
+                if (bar) {
+                    bar.value = ctrl.value ?? 0;
+                    bar.max = ctrl.total ?? 100;
+                }
+                const lbl = document.querySelector(`span.control-value[data-mid="${mid}"][data-key="${k}.label"]`);
+                if (lbl) lbl.textContent = fmtProgressLabel(ctrl);
+                break;
+            }
+            case "list": {
+                const list = document.querySelector(`div.list-control[data-mid="${mid}"][data-key="${k}"]`);
+                if (!list) break;
+                const rows = Array.isArray(ctrl.value) ? ctrl.value : [];
+                const details = Array.isArray(ctrl.detail) ? ctrl.detail : [];
+                // ONLY REBUILD IF THE LIST ACTUALLY CHANGED. The device pushes full state ~1/sec, so an
+                // unconditional rebuild destroyed + recreated every row (and its inline dropdowns / drag
+                // handlers) every second — collapsing an open dropdown and breaking a drag. Compare the
+                // incoming rows+details against the last rendered snapshot cached on the element; if
+                // identical, do nothing (the common case, and the whole fix). Only a GENUINE change
+                // (someone edited the list) rebuilds — latest state wins, no attempt to protect a stale
+                // in-progress view (that would suppress the user's own edit from re-rendering). A
+                // rebuild on a real change is momentary and a direct consequence of that change.
+                const sig = JSON.stringify([rows, details]);
+                if (list.dataset.sig === sig) break;   // unchanged — leave the DOM (and any open edit) alone
+                list.dataset.sig = sig;
+                // Preserve which detail panels are open across the rebuild. Capture the SAME key
+                // listRowKey emits: the row's stable `id` (on entry.dataset.rowId for editable
+                // rows) when present, else the summary label text. Keying on id means changing a
+                // field shown in the label (a preset's channel count) keeps the row expanded.
+                const open = new Set(
+                    [...list.querySelectorAll(".list-entry")]
+                        .filter(e => { const d = e.querySelector(".list-detail"); return d && !d.hidden; })
+                        .map(e => e.dataset.rowId != null
+                            ? "#" + e.dataset.rowId
+                            : e.querySelector(".list-summary-label")?.textContent));
+                // Preserve scroll position too: a rebuild recreates .list-scroll (scrollTop 0), which
+                // would jump a long list back to the top mid-edit of a row further down.
+                const prevScroll = list.querySelector(".list-scroll")?.scrollTop ?? 0;
+                buildListEntries(list, rows, details, open,
+                    {editable: ctrl.editable, pads: ctrl.pads, gridCols: ctrl.gridCols, gridRows: ctrl.gridRows,
+                     moduleName: mod.name, ctrlName: ctrl.name, optionSets: ctrl.optionSets || {}});
+                const newScroll = list.querySelector(".list-scroll");
+                if (newScroll) newScroll.scrollTop = prevScroll;
+                break;
+            }
+        }
+        // Reset-button state may change as the value drifts in/out of default.
+        // Defaults live in availableTypes (populated from /api/types) keyed by module type.
+        const def = defaultFor(mod.type, ctrl.name);
+        if (def !== undefined && def !== null) {
+            const btn = document.querySelector(`button.reset-btn[data-mid="${mid}"][data-key="${k}.reset"]`);
+            if (btn) {
+                const eq = controlValuesEqual(ctrl, def);
+                btn.classList.toggle("active", !eq);
+            }
+        }
+    }
+}
+
+// Per-type equality for reset-button highlighting. bool→boolish, ipv4/text→
+// string compare, everything else → numeric. Centralised so the rules can't
+// drift between createControl and updateModuleControls.
+function controlValuesEqual(ctrl, def) {
+    if (ctrl.type === "bool") return !!ctrl.value === !!def;
+    if (ctrl.type === "ipv4" || ctrl.type === "text" || ctrl.type === "textarea" || ctrl.type === "password") {
+        return String(ctrl.value ?? "") === String(def ?? "");
+    }
+    return Number(ctrl.value) === Number(def);
+}
+
+function cssEscape(s) {
+    // Minimal CSS attribute selector escape. Module/control names are alphanumeric
+    // in practice, so this is defensive.
+    return String(s).replace(/(["\\])/g, "\\$1");
+}
+
+// ---------------------------------------------------------------------------
+// 6. Type picker
+// ---------------------------------------------------------------------------
+
+// Role → emoji. The role part of the MoonLight emoji-key system
+// (https://moonmodules.org/MoonLight/moonlight/overview/#emoji-key):
+// 🔥 effect · 💎 modifier · 🚥 layout · ☸️ driver · 🥞 layer (projectMM
+// addition — every Layer instance, child of the Effects container). The role
+// tag is derived here, not duplicated in every module's tags() string — one
+// source of truth in the UI saves repeating the same character in ~30 module
+// headers and a few bytes per type in /api/types. Each module's tags() then
+// only carries its categorical origin (🐙 WLED · 💫 MoonLight · ⚡️ FastLED)
+// and any feature extras (audio: ♫ FFT · ♪ volume · moving-head: 🚨 color ·
+// 🗼 movement). The dimensional emoji (📏 1D · 🟦 2D · 🧊 3D) is derived from
+// the type's `dim` field. All three are merged in emojiTagsFor().
+const ROLE_EMOJI = {
+    effect:     "🔥",
+    driver:     "☸️",
+    modifier:   "💎",
+    layout:     "🚥",
+    layer:      "🥞",
+    effects:    "🥞",   // the container a preset captures; same pancake as the Layers it holds
+    service:    "🛰️",
+    generic:    "⚙️",
+};
+
+// Role → hue, the color half of the same vocabulary ROLE_EMOJI carries. Four capturable roles get a
+// distinct hue so a preset pad says what it covers before its name is read. Hues (not full colors) so
+// one value drives the face, the border and the glow at different mixes, and so several roles can be
+// averaged into one tint.
+const ROLE_HUE = {
+    layout:   210,   // blue
+    effects:  280,   // violet
+    driver:   150,   // green
+    service:   35,   // amber
+};
+
+/// The tint for a preset's role. A preset carries exactly one role, so this is a lookup: a file
+/// naming several is one an older build wrote, and gets no tint because it cannot be applied.
+function roleHue(roles) {
+    const hues = (roles || []).map(r => ROLE_HUE[r]).filter(h => h != null);
+    return hues.length === 1 ? String(hues[0]) : null;
+}
+
+// Dim int → emoji. Only effects carry `dim` (1/2/3); other modules have dim == 0
+// and contribute nothing here. Same MoonLight key. Keeps emojiTagsFor() the
+// single place that assembles the chip set per type.
+const DIM_EMOJI = {
+    1: "📏",
+    2: "🟦",
+    3: "🧊",
+};
+
+// Split a string into grapheme clusters so multi-codepoint emoji (e.g. 🌫️,
+// which is base char + variation selector) stay whole. Falls back to a plain
+// code-point split if Intl.Segmenter is unavailable.
+const _graphemeSeg = (typeof Intl !== "undefined" && Intl.Segmenter)
+    ? new Intl.Segmenter(undefined, {granularity: "grapheme"})
+    : null;
+function graphemes(s) {
+    if (!s) return [];
+    if (_graphemeSeg) return [..._graphemeSeg.segment(s)].map(seg => seg.segment);
+    return [...s];
+}
+
+// All emoji for a type: role first, then dimensional (effects only), then each
+// curated tag emoji from tags(). Deduplicated, order preserved.
+function emojiTagsFor(t) {
+    const out = [];
+    const seen = new Set();
+    const push = (ch) => { if (ch && !seen.has(ch)) { seen.add(ch); out.push(ch); } };
+    push(ROLE_EMOJI[t.role]);
+    push(DIM_EMOJI[t.dim]);
+    for (const ch of graphemes(t.tags || "")) push(ch);
+    return out;
+}
+
+// The type picker serves two modes:
+//  - add (default): pick a type to create as a child of parentMod.
+//  - replace: pick a type to swap parentMod for, at the same position.
+// They differ only in the role filter and the commit action; the search box,
+// list, and keyboard nav are shared.
+function openTypePicker(parentMod, anchorEl) {
+    const roles = rolesAcceptedBy(parentMod);
+    // One candidate = no choice to make, so don't stage a picker to ask a question with one answer:
+    // "+" on Effects just adds a Layer. (Same filter openPicker uses, so the two can't disagree about
+    // what the candidates are.)
+    const candidates = availableTypes.filter(t => roles.includes(t.role));
+    if (candidates.length === 1) {
+        addModule(candidates[0].name, parentMod.name);
+        return;
+    }
+    openPicker(anchorEl, {
+        roles,
+        actionLabel: "create",
+        commit: (type) => addModule(type, parentMod.name)
+    });
+}
+
+// Replace mode: filter to the target module's own role (effect ↔ effect), and
+// pre-select the module's CURRENT type so the cursor lands on it (not the first row).
+function openReplacePicker(targetMod, anchorEl) {
+    openPicker(anchorEl, {
+        roles: [targetMod.role],
+        actionLabel: "replace",
+        currentType: targetMod.type,
+        commit: (type) => replaceModule(targetMod.name, type)
+    });
+}
+
+function openPicker(anchorEl, opts) {
+    // Close any existing picker
+    document.querySelectorAll(".type-picker").forEach(p => p.remove());
+
+    // Alphabetical by display name so the picker list is scannable regardless of registration
+    // order (localeCompare — case-insensitive, locale-aware).
+    const filtered = availableTypes
+        .filter(t => opts.roles.includes(t.role))
+        .sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
+
+    const picker = document.createElement("div");
+    picker.className = "type-picker";
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.placeholder = "search…";
+    search.className = "type-picker-search";
+    picker.appendChild(search);
+
+    // Emoji chip filter row — every distinct emoji across the role-filtered types.
+    // Toggling chips narrows the list (AND: a type must carry all active chips).
+    const activeChips = new Set();
+    const chipRow = document.createElement("div");
+    chipRow.className = "type-picker-chips";
+    const chipEmoji = [];
+    const chipSeen = new Set();
+    for (const t of filtered) {
+        for (const ch of emojiTagsFor(t)) {
+            if (!chipSeen.has(ch)) { chipSeen.add(ch); chipEmoji.push(ch); }
+        }
+    }
+    for (const emoji of chipEmoji) {
+        const chip = document.createElement("button");
+        chip.className = "type-picker-chip";
+        chip.textContent = emoji;
+        chip.addEventListener("click", () => {
+            if (activeChips.has(emoji)) { activeChips.delete(emoji); chip.classList.remove("active"); }
+            else { activeChips.add(emoji); chip.classList.add("active"); }
+            refresh();
+        });
+        chipRow.appendChild(chip);
+    }
+    if (chipEmoji.length > 0) picker.appendChild(chipRow);
+
+    const list = document.createElement("div");
+    list.className = "type-picker-list";
+    picker.appendChild(list);
+
+    const actions = document.createElement("div");
+    actions.className = "type-picker-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "cancel";
+    cancelBtn.addEventListener("click", () => picker.remove());
+    const createBtn = document.createElement("button");
+    createBtn.className = "create";
+    createBtn.textContent = opts.actionLabel;
+    createBtn.disabled = true;
+    actions.appendChild(cancelBtn);
+    actions.appendChild(createBtn);
+    picker.appendChild(actions);
+
+    let selectedType = null;
+
+    // Types matching the search box AND all active emoji chips. The query matches
+    // against both the raw typeName ("RainbowEffect") and the displayName
+    // ("Rainbow") supplied by /api/types so typing either form finds the row.
+    function currentMatches() {
+        const q = search.value.toLowerCase();
+        return filtered.filter(t => {
+            if (q) {
+                const raw = t.name.toLowerCase();
+                const disp = (t.displayName || t.name).toLowerCase();
+                if (!raw.includes(q) && !disp.includes(q)) return false;
+            }
+            if (activeChips.size > 0) {
+                const has = new Set(emojiTagsFor(t));
+                for (const chip of activeChips) if (!has.has(chip)) return false;
+            }
+            return true;
+        });
+    }
+
+    function refresh() {
+        const matches = currentMatches();
+        list.innerHTML = "";
+        // Highlight the module's current type if it's in the list (replace mode lands the cursor
+        // on what's already there); otherwise the first row.
+        let selIdx = opts.currentType ? matches.findIndex(t => t.name === opts.currentType) : -1;
+        if (selIdx < 0) selIdx = 0;
+        matches.forEach((t, i) => {
+            const item = document.createElement("div");
+            item.className = "type-picker-item" + (i === selIdx ? " selected" : "");
+            const emoji = document.createElement("span");
+            emoji.className = "type-picker-item-emoji";
+            emoji.textContent = emojiTagsFor(t).join("");
+            item.appendChild(emoji);
+            // Show the factory-stripped name ("Rainbow") not the typeName
+            // ("RainbowEffect"); the role text on the right already conveys
+            // "effect", so repeating it in the name would just be noise.
+            item.appendChild(document.createTextNode(t.displayName || t.name));
+            const role = document.createElement("span");
+            role.className = "role";
+            role.textContent = t.role;
+            item.appendChild(role);
+            item.addEventListener("click", () => {
+                list.querySelectorAll(".selected").forEach(x => x.classList.remove("selected"));
+                item.classList.add("selected");
+                selectedType = t.name;
+                createBtn.disabled = false;
+            });
+            item.addEventListener("dblclick", () => {
+                opts.commit(t.name);
+                picker.remove();
+            });
+            list.appendChild(item);
+        });
+        selectedType = matches.length > 0 ? matches[selIdx].name : null;
+        createBtn.disabled = !selectedType;
+        // Scroll the pre-selected row into view (it may be below the fold for a long list).
+        const selEl = list.querySelector(".type-picker-item.selected");
+        if (selEl) selEl.scrollIntoView({ block: "nearest" });
+    }
+
+    search.addEventListener("input", refresh);
+    search.addEventListener("keydown", (e) => {
+        const items = Array.from(list.querySelectorAll(".type-picker-item"));
+        const sel = list.querySelector(".selected");
+        const idx = items.indexOf(sel);
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            if (idx < items.length - 1) {
+                sel?.classList.remove("selected");
+                items[idx + 1].classList.add("selected");
+                selectedType = filteredAt(idx + 1)?.name;
+            }
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            if (idx > 0) {
+                sel?.classList.remove("selected");
+                items[idx - 1].classList.add("selected");
+                selectedType = filteredAt(idx - 1)?.name;
+            }
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            if (selectedType) {
+                opts.commit(selectedType);
+                picker.remove();
+            }
+        } else if (e.key === "Escape") {
+            picker.remove();
+        }
+    });
+
+    function filteredAt(i) {
+        return currentMatches()[i];
+    }
+
+    createBtn.addEventListener("click", () => {
+        if (selectedType) {
+            opts.commit(selectedType);
+            picker.remove();
+        }
+    });
+
+    anchorEl.appendChild(picker);
+    refresh();
+    search.focus();
+}
+
+// ---------------------------------------------------------------------------
+// 7. Drag-to-reorder (HTML5 DnD on desktop; touchstart-gated on mobile)
+// ---------------------------------------------------------------------------
+
+function attachDragHandlers(card, mod) {
+    card.draggable = true;
+
+    // Why we toggle `draggable` on mousedown instead of vetoing in dragstart:
+    // HTML5 dragstart's `e.target` is always the draggable element (the card),
+    // not the deepest element under the mouse — so closest(".control-row")
+    // never matches. The reliable signal is the *mousedown* target. Disable
+    // drag at mousedown when the grab landed on a control, re-enable on
+    // mouseup so the next click on the card body can still drag.
+    const gate = (e) => {
+        card.draggable = !e.target.closest(".control-row, .card-controls-collapse > summary");
+    };
+    card.addEventListener("mousedown", gate, true);   // capture: runs before the input
+    card.addEventListener("touchstart", gate, {capture: true, passive: true});
+
+    card.addEventListener("dragstart", (e) => {
+        // Innermost card wins — without stopPropagation a nested child's
+        // dragstart would bubble to the parent and the parent's listener
+        // would overwrite dataTransfer with its own name.
+        e.stopPropagation();
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", mod.name);
+        card.classList.add("dragging");
+    });
+    card.addEventListener("dragend", () => {
+        card.classList.remove("dragging");
+        document.querySelectorAll(".drag-over").forEach(c => c.classList.remove("drag-over"));
+    });
+    card.addEventListener("dragover", (e) => {
+        // Only allow drop on a true sibling — same .card-children container.
+        // Cards now nest, so equal data-depth is no longer enough: two effects
+        // under different Effects share a depth but aren't siblings.
+        const src = document.querySelector(".card.dragging");
+        if (!src || src === card) return;
+        if (src.parentElement === card.parentElement &&
+            card.parentElement &&
+            card.parentElement.classList.contains("card-children")) {
+            e.preventDefault();
+            card.classList.add("drag-over");
+        }
+    });
+    card.addEventListener("dragleave", () => {
+        card.classList.remove("drag-over");
+    });
+    card.addEventListener("drop", (e) => {
+        e.preventDefault();
+        // Innermost card wins — without stopPropagation the drop bubbles to every
+        // ancestor card that also has a drop handler, firing a SECOND move onto
+        // the grandparent's child list (e.g. dropping onto Mirror also dropped
+        // onto the Layer card → move into Effects, index 0 → undoing the first
+        // move). Same reason dragstart stops propagation above.
+        e.stopPropagation();
+        card.classList.remove("drag-over");
+        const srcName = e.dataTransfer.getData("text/plain");
+        if (!srcName || srcName === mod.name) return;
+        // Insert semantics (not swap): the dropped item takes the target row's
+        // slot and the others shift to fill — the standard reorderable-list
+        // behaviour (Finder, Trello, VS Code, SortableJS). Because we drop ONTO a
+        // row (not into a between-rows gap), the landing is the target's absolute
+        // index: dragging down lands after the target, dragging up lands before
+        // it. That's consistent ("take the target's slot"), just not always-before.
+        //
+        // Compute target absolute index within parent's children. Identify the
+        // drop-target by name, not by object identity — state is replaced on
+        // every WS push, so `mod` captured at render time is stale within ~1s.
+        const parent = findParent(mod.name);
+        if (!parent) return;
+        const targetIdx = (parent.children || []).findIndex(c => c.name === mod.name);
+        if (targetIdx < 0) return;
+        moveModuleTo(srcName, targetIdx);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 8. Status bar wiring
+// ---------------------------------------------------------------------------
+
+function setupStatusBarButtons() {
+    setupBrandNavigation();
+
+    document.getElementById("preview-reset")?.addEventListener("click", () => {
+        preview.resetCamera();
+    });
+
+    // Reboot: press once to arm, again to confirm — see armPressTwice. The glyph
+    // stays (no armedText); only the title changes.
+    const rebootBtn = document.getElementById("reboot-btn");
+    if (rebootBtn) {
+        armPressTwice(rebootBtn, rebootDevice, {armedTitle: "Click again to reboot"});
+    }
+    document.getElementById("theme-toggle")?.addEventListener("click", () => {
+        theme = (theme === "dark") ? "light" : "dark";
+        localStorage.setItem(LS_THEME, theme);
+        applyTheme(theme);
+        // Repaint the preview to the new theme's background — a live preview would
+        // pick it up on its next frame, but an idle one (no incoming frames) needs
+        // a nudge so the canvas doesn't keep the previous theme's clear color.
+        preview.redraw();
+    });
+
+    // Hamburger: toggles the side nav. On wide screens it collapses/expands the
+    // static column; on narrow screens (<820px) the same class drives a slide-in
+    // drawer over an overlay (CSS handles the responsive difference).
+    document.getElementById("nav-toggle")?.addEventListener("click", () => {
+        document.body.classList.toggle("nav-open");
+    });
+    document.getElementById("nav-overlay")?.addEventListener("click", closeNavDrawer);
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeNavDrawer();
+    });
+}
+
+function openBrandHome() {
+    if (!state?.modules?.length) return;
+    if (isHelioFirmware(deviceFirmwareInfo())) {
+        selectModule(HELIO_VIEW);
+        return;
+    }
+    selectModule(state.modules[0].name);
+}
+
+function setupBrandNavigation() {
+    const targets = [
+        document.getElementById("brand-logo"),
+        document.querySelector("#status-bar .brand"),
+    ].filter(Boolean);
+    for (const target of targets) {
+        target.classList.add("brand-home-link");
+        target.setAttribute("role", "button");
+        target.tabIndex = 0;
+        target.addEventListener("click", openBrandHome);
+        target.addEventListener("keydown", event => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            openBrandHome();
+        });
+    }
+}
+
+// Close the side nav. On wide screens this collapses the column; on narrow
+// screens it dismisses the slide-in drawer + overlay.
+function closeNavDrawer() {
+    document.body.classList.remove("nav-open");
+}
+
+function openNavDrawer() {
+    document.body.classList.add("nav-open");
+}
+
+function applyTheme(t) {
+    document.body.dataset.theme = t;
+    const btn = document.getElementById("theme-toggle");
+    if (btn) btn.textContent = (t === "dark") ? "☀" : "🌙";
+}
+
+
+const HELIO_LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 283.47 70.87"><g fill="#fff"><circle cx="27.63" cy="35.43" r="14.93"/><path d="M69.76 69.76h46.17V57.32H84.04V41.56h30.04V29.12H84.04V13.55h31.89V1.11H69.76v68.65Zm117.14 0h14.28V1.11H186.9v68.65ZM40.9 19.5c5.25-.58 9.21.39 10.64 3.05 2.23 4.13-2.32 11.13-10.64 17.39v29.84h14.36V1.09H40.9V19.5ZM0 69.78h14.36V51.37c-5.25.58-9.21-.39-10.64-3.05-2.23-4.13 2.32-11.13 10.64-17.39V1.09H0v68.69ZM248.03 0c-19.57 0-35.43 15.86-35.43 35.43s15.86 35.43 35.43 35.43S283.46 55 283.46 35.43 267.6 0 248.03 0Zm0 57.55c-12.22 0-22.12-9.9-22.12-22.12s9.9-22.12 22.12-22.12 22.12 9.9 22.12 22.12-9.9 22.12-22.12 22.12ZM142.84 1.11h-14.28v68.65h46.17V57.32h-31.89V1.11Z"/></g></svg>`;
+
+function isNebuliteFirmware(info = deviceFirmwareInfo()) {
+    return String(info?.firmware || "").startsWith("nebulite");
+}
+
+function productLabel(info = deviceFirmwareInfo()) { return isNebuliteFirmware(info) ? "NEBULITE" : "HELIO"; }
+
+function isHelioFirmware(info) {
+    if (!info) return false;
+    return isNebuliteFirmware(info) || String(info.brand || "").toUpperCase() === "HELIO" ||
+           String(info.product || "").toLowerCase() === "helio1" ||
+           String(info.firmware || "").toLowerCase() === "helio1";
+}
+
+function applyFavicon(helio) {
+    const favicon = document.getElementById("favicon");
+    if (!favicon) return;
+    favicon.type = helio ? "image/svg+xml" : "image/png";
+    favicon.href = helio ? "/helio-favicon.svg" : "/moonmodules-logo.png";
+}
+
+function applyBranding() {
+    const info = deviceFirmwareInfo();
+    const helio = isHelioFirmware(info);
+    preview.setProductInfo(info);
+    document.body.dataset.brand = helio ? "helio" : "projectmm";
+    applyFavicon(helio);
+    const brand = document.querySelector("#status-bar .brand");
+    if (brand) brand.textContent = helio ? productLabel(info) : "MoonLight";
+    const logo = document.getElementById("brand-logo");
+    if (logo) {
+        logo.hidden = isNebuliteFirmware(info);
+        logo.alt = helio ? "HELIO" : "MoonLight";
+        logo.src = helio ? "data:image/svg+xml;charset=utf-8," + encodeURIComponent(HELIO_LOGO_SVG)
+                         : "/moonmodules-logo.png";
+    }
+    for (const target of [brand, logo].filter(Boolean)) {
+        const label = helio ? "Open " + productLabel(info) : "Open home";
+        target.title = label;
+        target.setAttribute("aria-label", label);
+    }
+    const navToggle = document.getElementById("nav-toggle");
+    if (navToggle) {
+        navToggle.title = helio ? "Advanced controls" : "Toggle navigation";
+        navToggle.setAttribute("aria-label", helio ? "Open advanced controls" : "Toggle navigation");
+    }
+}
+
+function updateStatusBar() {
+    if (!state || !state.modules) return;
+    applyBranding();
+    const helio = isHelioFirmware(deviceFirmwareInfo());
+    const sys = state.modules.find(m => m.type === "SystemModule")
+             || state.modules.find(m => m.name === "System");
+    if (!sys) return;
+    const ctrls = sys.controls || [];
+
+    // Device name → header span + document.title
+    const nameCtrl = ctrls.find(c => c.name === "deviceName");
+    const nameSpan = document.getElementById("device-name");
+    if (nameCtrl && nameSpan && nameCtrl.value) {
+        const helio = isHelioFirmware(deviceFirmwareInfo());
+        const name = String(nameCtrl.value);
+        const product = helio ? productLabel() : "MoonLight";
+        const redundantHelioName = helio && name.trim().toUpperCase() === product.toUpperCase();
+        nameSpan.textContent = redundantHelioName ? "" : name;
+        const title = redundantHelioName ? product : product + " - " + name;
+        if (document.title !== title) {
+            document.title = title;
+        }
+    }
+
+    // System stats: "uptime · 🧠 NNK · 🧱 NNKB"
+    // 🧠 = internal-RAM free (heap progress total−used); 🧱 = largest contiguous
+    // internal-RAM block (the maxBlock control, already maxInternalAllocBlock).
+    // Both matter: free can be ample while fragmentation leaves no single block
+    // big enough for the next allocation.
+    const uptimeCtrl = ctrls.find(c => c.name === "uptime");
+    const heapCtrl = ctrls.find(c => c.name === "heap");
+    const blockCtrl = ctrls.find(c => c.name === "maxBlock");
+    const statsEl = document.getElementById("sys-stats");
+    if (statsEl) {
+        statsEl.hidden = helio;
+        const parts = [];
+        if (!helio) {
+            if (uptimeCtrl) parts.push(uptimeCtrl.value);
+            if (heapCtrl && heapCtrl.value !== undefined && heapCtrl.total) {
+                const freeKb = Math.round((heapCtrl.total - heapCtrl.value) / 1024);
+                parts.push("🧠 " + freeKb + "K");
+            }
+            // Skip on desktop, where the platform stub reports "0KB" (no real
+            // block measurement / unlimited heap) — same reason heap free above
+            // only shows when the heap progress control is present.
+            if (blockCtrl && blockCtrl.value && blockCtrl.value !== "0KB") {
+                parts.push("🧱 " + blockCtrl.value);
+            }
+        }
+        statsEl.textContent = parts.join(" · ");
+    }
+
+    // Hide reboot button on desktop builds — platform::reboot() just exits the process,
+    // which is not useful from the UI and can be mistaken for a crash.
+    const chipCtrl = ctrls.find(c => c.name === "chip");
+    const rebootBtn = document.getElementById("reboot-btn");
+    if (rebootBtn && chipCtrl) {
+        rebootBtn.hidden = helio || chipCtrl.value === "desktop";
+    }
+
+    // bootReason → crashed-state styling on reboot button
+    const reasonCtrl = ctrls.find(c => c.name === "bootReason");
+    if (rebootBtn && reasonCtrl) {
+        const crashed = ["PANIC", "INT_WDT", "TASK_WDT", "BROWNOUT"].includes(reasonCtrl.value);
+        rebootBtn.dataset.crashed = crashed ? "true" : "false";
+        if (crashed) rebootBtn.title = "Last boot: " + reasonCtrl.value + " (click to reboot)";
+        else rebootBtn.title = "Reboot device";
+    }
+
+    // Cache-first update check: instant from the localStorage cache, background-fetches only
+    // when stale (>1 h). Fire-and-forget — best-effort, never blocks the status-bar render.
+    checkFirmwareUpdate(false);
+}
+
+// ---------------------------------------------------------------------------
+// 8b. Firmware-update badge
+// ---------------------------------------------------------------------------
+// Browser-side "a newer firmware is out" check, modelled on ESP32-sveltekit's
+// UpdateIndicator (the upstream firmware lineage) — our own code. The device fetches
+// nothing; the browser compares the running version (FirmwareUpdateModule.version, pure
+// semver) against GitHub releases and, when newer AND a compatible .bin exists, shows the
+// status-bar badge. Two channels:
+//   - STABLE: a device compares against the newest stable release (the /latest endpoint
+//     excludes prereleases). Applies to every device.
+//   - DEV (latest): a device already on a prerelease build (-dev.<N>) ALSO compares against
+//     the moving `latest` release, so a stale latest build is nudged to the newest latest.
+//     The `latest` release's tag is "latest" (not a semver), so its version is read from the
+//     per-firmware manifest (manifest-<firmware>.json carries "version", e.g. 2.1.0-dev.7).
+// A stable update wins over a dev update. Cached in localStorage (1 h TTL) so it doesn't
+// slow page load; a fresh check is forced when the Firmware card opens. Best-effort: any
+// failure hides the badge, never throws.
+
+const RELEASES_API = "https://api.github.com/repos/MoonModules/projectMM/releases";
+const UPDATE_TTL_MS = 60 * 60 * 1000;                     // 1 h — best-effort, well under GitHub's rate limit
+const PICKER_RELEASE_KEY = "projectMM.picker.releaseTag"; // install-picker restores from this on init
+
+function safeLocalGet(key) { try { return localStorage.getItem(key); } catch (_) { return null; } }
+function safeLocalSet(key, v) { try { localStorage.setItem(key, v); } catch (_) { /* ignore */ } }
+
+// In-flight fetches keyed by cache slot. updateStatusBar() calls checkFirmwareUpdate(false)
+// every WS tick (1 Hz); on a cold cache they'd each start a duplicate releases/latest request
+// before the first writes the cache. Share the pending promise so concurrent callers reuse it.
+const inFlightFetches = {};
+
+// A cached JSON fetch: returns the parsed body, re-fetching only when the cache is older than
+// the TTL or `force` is set, and serving stale on a fetch failure. `key` is the cache slot.
+async function cachedJson(url, key, force) {
+    if (!force) {
+        const raw = safeLocalGet(key);
+        if (raw) {
+            try {
+                const obj = JSON.parse(raw);
+                if (Date.now() - obj.ts < UPDATE_TTL_MS) return obj.data;
+            } catch (_) { /* fall through to fetch */ }
+        }
+    }
+    // Coalesce concurrent fetches for the same slot onto one request.
+    if (inFlightFetches[key]) return inFlightFetches[key];
+    const p = (async () => {
+        try {
+            const res = await fetch(url, { headers: { accept: "application/json" } });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            safeLocalSet(key, JSON.stringify({ ts: Date.now(), data }));
+            return data;
+        } catch (e) {
+            // console.debug, not warn: an update check failing is routine and not
+            // actionable (the device may simply be offline, or GitHub rate-limited),
+            // so keep it out of the default console — debug is hidden unless the user
+            // opts into verbose. Both callers hit api.github.com, which sends
+            // Access-Control-Allow-Origin and so reads fine from the device origin;
+            // the failure path here is for the no-network / rate-limit case.
+            console.debug("[update] fetch failed:", url, e && e.message ? e.message : e);
+            const raw = safeLocalGet(key);                   // serve stale on failure
+            if (raw) {
+                try {
+                    const obj = JSON.parse(raw);
+                    // Refresh the timestamp so the per-tick check doesn't re-attempt a
+                    // failing fetch every second — back off until the next TTL window.
+                    safeLocalSet(key, JSON.stringify({ ts: Date.now(), data: obj.data }));
+                    return obj.data;
+                } catch (_) { /* none */ }
+            }
+            // No stale entry to serve: NEGATIVE-CACHE the failure (data:null) with a
+            // fresh timestamp so the TTL guard above suppresses the next attempt for
+            // the back-off window. Without this, every status-bar render (≈4×/s on
+            // each WS push) re-runs the failing fetch — an error storm in the console
+            // whenever the device is offline. A null cache hit returns "no update".
+            safeLocalSet(key, JSON.stringify({ ts: Date.now(), data: null }));
+            return null;
+        } finally {
+            delete inFlightFetches[key];                     // clear once settled, ok or not
+        }
+    })();
+    inFlightFetches[key] = p;
+    return p;
+}
+
+// Read the device's running version + firmware-variant key off the FirmwareUpdateModule.
+function deviceFirmwareInfo() {
+    const fw = state?.modules
+        ? findModule("Firmware") || state.modules.find(m => m.type === "FirmwareUpdateModule")
+        : initialFirmwareModule;
+    if (!fw) return null;
+    const ctrls = fw.controls || [];
+    const version = (ctrls.find(c => c.name === "version") || {}).value;
+    const firmware = (ctrls.find(c => c.name === "firmware") || {}).value;
+    const product = (ctrls.find(c => c.name === "product") || {}).value;
+    const brand = (ctrls.find(c => c.name === "brand") || {}).value;
+    const updateManifest = (ctrls.find(c => c.name === "updateManifest") || {}).value;
+    return version ? { version, firmware, product, brand, updateManifest } : null;
+}
+
+// Light the badge for an available update. `tag` is the release the picker should pre-select
+// (a vX.Y.Z stable tag, or "latest"); `label` is what the badge shows.
+function showUpdateBadge(badge, tag, label) {
+    badge.textContent = `⬆ ${label}`;
+    badge.title = `Firmware update available: ${label} — open Firmware to install`;
+    badge.dataset.tag = tag;
+    badge.hidden = false;
+}
+
+// Is there a newer STABLE release than the device's version, with a compatible .bin?
+// Returns the stable tag (e.g. "v2.1.0") or null. /latest excludes prereleases.
+async function stableUpdate(dev, force, semver) {
+    const rel = await cachedJson(`${RELEASES_API}/latest`, "projectMM.update.latest.v1", force);
+    if (!rel || !rel.tag_name) return null;
+    const assetNames = (rel.assets || []).map(a => a.name);
+    const hasBinary = !dev.firmware ||
+        assetNames.some(n => n === `firmware-${dev.firmware}-${rel.tag_name}.bin`);
+    return (semver.isNewer(rel.tag_name, dev.version) && hasBinary) ? rel.tag_name : null;
+}
+
+// For a device already on a -dev build: is the moving `latest` release newer? Returns its
+// version string (e.g. "2.1.0-dev.7") or null. The latest release's tag is "latest"; its
+// version is published as the release `name` (release.yml), which the GitHub API exposes
+// CORS-readably — unlike the manifest-*.json asset, whose release-asset URL redirects to
+// release-assets.githubusercontent.com (no CORS header), so the device-hosted UI can't read it.
+// We also require the matching firmware .bin asset so the badge never points at a build the
+// device can't install.
+async function devUpdate(dev, force, semver) {
+    if (!dev.firmware) return null;                          // can't match an asset without the key
+    const rel = await cachedJson(`${RELEASES_API}/tags/latest`, "projectMM.update.dev.v1", force);
+    const v = rel && rel.name;
+    if (!v) return null;
+    // Assets are versioned, not tagged: the `latest` release ships
+    // firmware-<fw>-v<version>.bin (release.yml stages PREFIX="firmware-...-v$V").
+    const hasBinary = (rel.assets || []).some(a => a.name === `firmware-${dev.firmware}-v${v}.bin`);
+    return (hasBinary && semver.isNewer(v, dev.version)) ? v : null;
+}
+
+// Show/hide the badge. `force` bypasses the cache (used when the Firmware card opens).
+// Stable update takes precedence; a -dev device additionally checks the latest channel.
+async function checkFirmwareUpdate(force) {
+    const badge = document.getElementById("fw-update-badge");
+    if (!badge) return;
+    const dev = deviceFirmwareInfo();
+    if (!dev) { badge.hidden = true; return; }
+    if (isHelioFirmware(dev)) { badge.hidden = true; return; }
+
+    const semver = await loadSemver();
+    const stableTag = await stableUpdate(dev, force, semver);
+    if (stableTag) { showUpdateBadge(badge, stableTag, stableTag); return; }
+
+    // Only a prerelease (-dev…) build follows the moving latest channel; a stable device is
+    // not nudged toward an unreleased build.
+    const onPrerelease = (semver.parse(dev.version)?.prerelease.length || 0) > 0;
+    if (onPrerelease) {
+        const devVer = await devUpdate(dev, force, semver);
+        if (devVer) { showUpdateBadge(badge, "latest", `latest (${devVer})`); return; }
+    }
+    badge.hidden = true;
+}
+
+// Badge click → pre-select the new release in the picker (it restores from PICKER_RELEASE_KEY
+// on init) and open the Firmware card, so the user lands one click from Install.
+function setupUpdateBadge() {
+    const badge = document.getElementById("fw-update-badge");
+    if (!badge) return;
+    badge.addEventListener("click", () => {
+        if (badge.dataset.tag) safeLocalSet(PICKER_RELEASE_KEY, badge.dataset.tag);
+        selectModule("Firmware");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 8c. Saved preset previews
+// ---------------------------------------------------------------------------
+
+function presetSafeName(name) {
+    return String(name || "preset")
+        .trim()
+        .replace(/[\\/:*?"<>|]+/g, "-")
+        .replace(/\s+/g, " ")
+        .slice(0, 48) || "preset";
+}
+
+function presetPath(name) {
+    return PRESET_DIR + "/" + name + ".json";
+}
+
+async function ensurePresetDir() {
+    try { await fetch("/api/dir?path=" + encodeURIComponent(PRESET_DIR), { method: "POST" }); }
+    catch (_) { /* already exists / offline gets handled by the caller's next request */ }
+}
+
+function clonePresetState() {
+    return JSON.parse(JSON.stringify(state || { modules: [] }));
+}
+
+async function saveCurrentPreset(name) {
+    if (!state) return;
+    const clean = presetSafeName(name);
+    const doc = {
+        schema: PRESET_SCHEMA,
+        name: clean,
+        capturedAt: new Date().toISOString(),
+        state: clonePresetState(),
+    };
+    await ensurePresetDir();
+    const res = await fetch("/api/file?path=" + encodeURIComponent(presetPath(clean)), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(doc, null, 2),
+    });
+    if (!res.ok) throw new Error(await errorMessage(res));
+}
+
+async function loadPresetDocs() {
+    await ensurePresetDir();
+    const res = await fetch("/api/dir?path=" + encodeURIComponent(PRESET_DIR));
+    if (!res.ok) return [];
+    const rows = await res.json();
+    const files = (Array.isArray(rows) ? rows : [])
+        .filter(r => !r.isDir && /\.json$/i.test(r.name))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    const docs = [];
+    for (const row of files) {
+        try {
+            const r = await fetch("/api/file?path=" + encodeURIComponent(PRESET_DIR + "/" + row.name));
+            if (!r.ok) continue;
+            const doc = await r.json();
+            if (doc && doc.state && Array.isArray(doc.state.modules)) {
+                docs.push({ file: row.name, name: doc.name || row.name.replace(/\.json$/i, ""), doc });
+            }
+        } catch (_) { /* skip a corrupt preset file; the File Manager can inspect it */ }
+    }
+    return docs;
+}
+
+function renderPresetsView(host) {
+    const wrap = document.createElement("section");
+    wrap.className = "presets-view";
+    const collection = document.createElement("section");
+    wrap.appendChild(collection);
+    host.appendChild(wrap);
+    mountHelioPresetCards(collection);
+}
+
+async function refreshPresetGrid(grid, status) {
+    status.textContent = "loading";
+    grid.replaceChildren();
+    try {
+        presetCache = await loadPresetDocs();
+        if (!presetCache.length) {
+            status.textContent = "no presets saved";
+            return;
+        }
+        status.textContent = `${presetCache.length} saved`;
+        for (const p of presetCache) grid.appendChild(createPresetCard(p, grid, status));
+        startHelioModePreviews();
+    } catch (err) {
+        status.textContent = "load failed: " + (err.message || err);
+    }
+}
+
+function createPresetCard(entry, grid, status) {
+    const card = document.createElement("article");
+    card.className = "preset-card";
+    const canvas = document.createElement("canvas");
+    canvas.className = "preset-preview";
+    canvas.width = 384;
+    canvas.height = 384;
+    canvas.dataset.presetFile = entry.file;
+    canvas._presetDoc = entry.doc;
+    card.appendChild(canvas);
+
+    const body = document.createElement("div");
+    body.className = "preset-body";
+    const name = document.createElement("div");
+    name.className = "preset-name";
+    name.textContent = entry.name;
+    const meta = document.createElement("div");
+    meta.className = "preset-meta";
+    const effects = presetEffects(entry.doc).map(m => m.type.replace(/Effect$/, ""));
+    meta.textContent = effects.length ? effects.slice(0, 3).join(" / ") : "saved setup";
+    body.append(name, meta);
+
+    const row = document.createElement("div");
+    row.className = "preset-card-actions";
+    const applyBtn = document.createElement("button");
+    applyBtn.className = "preset-tool";
+    applyBtn.textContent = "Apply";
+    applyBtn.title = "Apply matching saved control values";
+    applyBtn.addEventListener("click", () => applyPresetControls(entry.doc, status));
+    const delBtn = document.createElement("button");
+    delBtn.className = "preset-tool preset-tool--danger";
+    delBtn.textContent = "Delete";
+    delBtn.title = "Delete preset";
+    delBtn.addEventListener("click", async () => {
+        if (!confirm(`Delete ${entry.name}?`)) return;
+        const res = await fetch("/api/dir?path=" + encodeURIComponent(PRESET_DIR + "/" + entry.file),
+                                { method: "DELETE" });
+        if (!res.ok) status.textContent = "delete failed: " + await errorMessage(res);
+        await refreshPresetGrid(grid, status);
+    });
+    row.append(applyBtn, delBtn);
+    body.appendChild(row);
+    card.appendChild(body);
+    return card;
+}
+
+async function applyPresetControls(doc, status) {
+    const mods = flattenModules(doc?.state?.modules || []);
+    let sent = 0;
+    for (const mod of mods) {
+        if (!findModule(mod.name)) continue;
+        for (const ctrl of (mod.controls || [])) {
+            if (!EDITABLE_CONTROL_TYPES.has(ctrl.type)) continue;
+            await sendControl(mod.name, ctrl.name, ctrl.value);
+            sent++;
+        }
+    }
+    status.textContent = sent ? `applied ${sent} controls` : "nothing matching to apply";
+    setTimeout(refetchState, 350);
+}
+
+function flattenModules(mods, out = []) {
+    for (const m of mods || []) {
+        out.push(m);
+        if (m.children) flattenModules(m.children, out);
+    }
+    return out;
+}
+
+function presetEffects(doc) {
+    return flattenModules(doc?.state?.modules || []).filter(m => /Effect$/.test(m.type || ""));
+}
+
+function moduleByName(doc, name) {
+    return flattenModules(doc?.state?.modules || []).find(m => m.name === name);
+}
+
+function moduleByType(doc, type) {
+    return flattenModules(doc?.state?.modules || []).find(m => m.type === type);
+}
+
+function rgbwFromControls(mod, rgbOnly = false) {
+    const red = controlValue(mod, "red", null);
+    const green = controlValue(mod, "green", null);
+    const blue = controlValue(mod, "blue", null);
+    const white = controlValue(mod, "white", null);
+    if (red === null && green === null && blue === null && white === null) return null;
+    const r = clampByte(red);
+    const g = clampByte(green);
+    const b = clampByte(blue);
+    const w = clampByte(white);
+    return rgbOnly ? [r, g, b] : rgbwToRgb([r, g, b, w]);
+}
+
+function paletteAverage(pal) {
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < 64; i++) {
+        const c = paletteAt(pal, i / 63);
+        if (!c[0] && !c[1] && !c[2]) continue;
+        r += c[0] * c[0]; g += c[1] * c[1]; b += c[2] * c[2]; n++;
+    }
+    return n ? [clampByte(Math.sqrt(r / n)), clampByte(Math.sqrt(g / n)), clampByte(Math.sqrt(b / n))] : [0, 0, 0];
+}
+
+function paletteFromPreset(doc) {
+    const drivers = moduleByType(doc, "Drivers");
+    const ctrl = (drivers?.controls || []).find(c => c.name === "palette");
+    const opt = (ctrl?.options || [])[helioChoiceIndex(ctrl)];
+    const cols = String(opt?.colors || "").split(/\s+/).filter(Boolean)
+        .map(h => [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)])
+        .filter(c => c.every(Number.isFinite));
+    return cols.length ? cols : [[0, 0, 0], [255, 0, 0], [255, 160, 0], [255, 255, 255]];
+}
+
+function paletteBandAt(pal, x, brightness = 255, minRGB = 0, randomColors = false) {
+    const samples = [];
+    for (let i = 0; i < 64; i++) {
+        const pos = i / 63;
+        const c = paletteAt(pal, pos);
+        if (c[0] >= minRGB || c[1] >= minRGB || c[2] >= minRGB) samples.push(pos);
+    }
+    if (randomColors && samples.length > 1) {
+        let seed = 12345;
+        for (let i = samples.length - 1; i > 0; i--) {
+            seed = (seed * 25173 + 13849) >>> 0;
+            const j = seed % (i + 1);
+            [samples[i], samples[j]] = [samples[j], samples[i]];
+        }
+    }
+    const norm = Math.max(0, Math.min(1, Number(x) || 0));
+    const pos = samples.length ? samples[Math.min(samples.length - 1, Math.floor(norm * samples.length))]
+                               : norm;
+    return scaleRgb(paletteAt(pal, pos), brightness / 255);
+}
+
+function sineChannel(coord, phase, frequency, amplitude, offset) {
+    const v = 0.5 + 0.5 * Math.sin((coord * frequency + phase + offset) * Math.PI * 2);
+    return clampByte(v * amplitude);
+}
+
+function meterColor(frac, level = 1) {
+    return [clampByte(frac * 255 * level), clampByte((1 - frac) * 255 * level), 0];
+}
+
+function effectColor(effect, pal, t, x, y, audio, previewOpts = null) {
+    const type = effect?.type || "";
+    const savedRgb = rgbwFromControls(effect, previewOpts?.rgbOnly === true);
+    const speed = Number(controlValue(effect, "speed", controlValue(effect, "bpm", 60))) || 60;
+    const phase = t * speed / 60;
+
+    if (isHelioPortEffectType(type) || helioFactorySceneForType(type)) {
+        return helioScenePreviewColor(effect, pal, t, x, y, audio, previewOpts || { paletteByIndex });
+    }
+    if (type === "SolidEffect") {
+        const bri = clampByte(controlValue(effect, "brightness", 255));
+        const mode = Number(controlValue(effect, "colorMode", 0)) || 0;
+        if (mode === 0 && savedRgb) return scaleRgb(savedRgb, bri / 255);
+        if (mode === 2) return paletteAverage(pal);
+        if (mode === 3) return paletteBandAt(pal, y, bri, clampByte(controlValue(effect, "minRGB", 0)),
+                                             !!controlValue(effect, "randomColors", false));
+        if (mode === 4) return paletteBandAt(pal, x, bri, clampByte(controlValue(effect, "minRGB", 0)),
+                                             !!controlValue(effect, "randomColors", false));
+        return scaleRgb(paletteAt(pal, x), bri / 255);
+    }
+    if (type === "FixedRectangleEffect" && savedRgb) {
+        const whiteOnly = controlValue(effect, "alternateWhite", false) &&
+                          clampByte(controlValue(effect, "white", 0)) > 0 &&
+                          ((Math.floor(x * 12) + Math.floor(y * 12)) % 2);
+        return whiteOnly ? rgbwFromControls({ controls: [{ name: "white", value: controlValue(effect, "white", 0) }] }, previewOpts?.rgbOnly === true)
+                         : savedRgb;
+    }
+    if (type === "GameOfLifeEffect") {
+        const bg = [
+            clampByte(controlValue(effect, "backgroundColorR", 0)),
+            clampByte(controlValue(effect, "backgroundColorG", 0)),
+            clampByte(controlValue(effect, "backgroundColorB", 0)),
+        ];
+        const live = ((Math.sin((x * 19 + y * 23 + phase) * Math.PI * 2) + 1) * 0.5) > 0.62;
+        return live ? paletteAt(pal, x + y + phase * 0.1) : bg;
+    }
+    if (type === "RainbowEffect") return paletteAt(pal, (x + y) * 0.5 + phase);
+    if (type === "FireEffect") {
+        const heat = Math.max(0, 1 - y) * (0.55 + 0.45 * Math.sin((x * 7 + phase * 3) * Math.PI));
+        return mix([0, 0, 0], mix([255, 80, 0], [255, 240, 170], heat), heat);
+    }
+    if (type === "AudioSpectrumEffect") {
+        const band = Math.floor(x * 16);
+        const mag = audio.bands[band] || 0;
+        if ((1 - y) > mag) return [0, 0, 0];
+        const colorMode = Number(controlValue(effect, "colorMode", 0)) || 0;
+        return colorMode ? paletteAt(pal, band / 16) : meterColor(1 - y, mag);
+    }
+    if (type === "BlurzEffect") {
+        const band = strongestBand(audio);
+        const mag = Math.max(audio.level || 0, audioBand(audio, band));
+        const freqMap = controlValue(effect, "freqMap", false);
+        const geqScanner = controlValue(effect, "geqScanner", false);
+        const center = freqMap
+            ? band / 15
+            : (geqScanner ? (phase * 0.17) % 1 : hash01(Math.floor(t * 9)));
+        const d = Math.abs(x - center);
+        const wrap = Math.min(d, 1 - d);
+        const blur = clampByte(controlValue(effect, "blur", 127)) / 255;
+        const width = 0.018 + blur * 0.16;
+        const halo = Math.max(0, 1 - wrap / width);
+        const core = halo * halo;
+        const yFalloff = Math.max(0.18, 1 - Math.abs(y - 0.5) * 2.4);
+        return scaleRgb(paletteAt(pal, band / 16 + phase * 0.04), (0.18 + mag * 0.95) * core * yFalloff);
+    }
+    if (type === "GEQEffect" || type === "GEQ3DEffect" || type === "FreqMatrixEffect" ||
+        type === "FreqSawsEffect") {
+        const band = Math.floor(x * 16);
+        const mag = audio.bands[band] || 0;
+        return (1 - y) <= mag ? paletteAt(pal, band / 16 + phase * 0.03) : [0, 0, 0];
+    }
+    if (type === "AudioVolumeEffect" || type === "NoiseMeterEffect") {
+        const lit = (1 - y) <= audio.level;
+        return lit ? scaleRgb(paletteAt(pal, audio.level + phase * 0.04),
+                              clampByte(controlValue(effect, "brightness", 255)) / 255) : [0, 0, 0];
+    }
+    if (type === "SineEffect") {
+        const freq = Number(controlValue(effect, "frequency", 1)) || 1;
+        const amp = clampByte(controlValue(effect, "amplitude", 255));
+        return [
+            sineChannel(x, phase, freq, amp, 0),
+            sineChannel(y, phase, freq, amp, 1 / 3),
+            sineChannel(0, phase, freq, amp, 2 / 3),
+        ];
+    }
+    if (type === "WaveEffect") {
+        const wave = 0.5 + 0.5 * Math.sin((x * (controlValue(effect, "frequency", 3) || 3) + phase) * Math.PI * 2);
+        return paletteAt(pal, wave);
+    }
+    if (type === "LinesEffect") return paletteAt(pal, x * 3 + phase * 0.2);
+    if (type === "RingsEffect") {
+        const dx = x - 0.5, dy = y - 0.5;
+        return paletteAt(pal, Math.sqrt(dx * dx + dy * dy) * 2 + phase * 0.15 +
+                         controlValue(effect, "hue_shift", 0) / 255);
+    }
+    if (type === "PlasmaEffect") {
+        const scaleX = Math.max(1, Number(controlValue(effect, "scale_x", 48)) || 48);
+        const scaleY = Math.max(1, Number(controlValue(effect, "scale_y", 48)) || 48);
+        const hueShift = clampByte(controlValue(effect, "hue_shift", 0)) / 255;
+        const freqX = 256 / scaleX;
+        const freqY = 256 / scaleY;
+        const s1 = 0.5 + 0.5 * Math.sin((x * freqX + phase) * Math.PI * 2);
+        const s2 = 0.5 + 0.5 * Math.sin((y * freqY + phase * 2) * Math.PI * 2);
+        const s3 = 0.5 + 0.5 * Math.sin(((x + y) * freqX - phase * 3) * Math.PI * 2);
+        const s4 = 0.5 + 0.5 * Math.cos((x * freqY - y * freqX + phase) * Math.PI * 2);
+        return paletteAt(pal, (s1 + s2 + s3 + s4) * 0.25 + hueShift);
+    }
+    if (type === "NoiseEffect" || type === "Noise2DEffect" ||
+        type === "LavaLampEffect" || type === "MetaballsEffect") {
+        const v = 0.5 + 0.25 * Math.sin((x * 5 + phase) * Math.PI * 2)
+                      + 0.25 * Math.cos((y * 5 - phase * 0.7) * Math.PI * 2);
+        return paletteAt(pal, v);
+    }
+    if (type === "DistortionWavesEffect") {
+        const freqX = Math.max(1, Number(controlValue(effect, "freq_x", 3)) || 3);
+        const freqY = Math.max(1, Number(controlValue(effect, "freq_y", 3)) || 3);
+        const sx = 0.5 + 0.5 * Math.sin((x * freqX + phase) * Math.PI * 2);
+        const sy = 0.5 + 0.5 * Math.sin((y * freqY + phase * 1.3) * Math.PI * 2);
+        return paletteAt(pal, (sx + sy) * 0.5);
+    }
+    if (type === "RipplesEffect" || type === "SpiralEffect") {
+        const hueShift = controlValue(effect, "hue_shift", 0) / 255;
+        return paletteAt(pal, x * 0.55 + y * 0.45 + phase * 0.12 + hueShift);
+    }
+    if (type === "StarSkyEffect" || type === "StarFieldEffect") {
+        const twinkle = 0.28 + 0.72 * (0.5 + 0.5 * Math.sin((x * 17 + y * 11 + phase * 4) * Math.PI * 2));
+        return controlValue(effect, "usePalette", false) ? scaleRgb(paletteAt(pal, x + y + phase), twinkle)
+                                                        : scaleRgb([255, 255, 255], twinkle);
+    }
+    if (type === "RubiksCubeEffect" && !controlValue(effect, "usePalette", false)) {
+        const faces = [[255, 0, 0], [255, 120, 0], [0, 70, 255], [0, 180, 60], [255, 255, 255], [255, 220, 0]];
+        return faces[Math.floor(((x + y + phase * 0.1) % 1) * faces.length)];
+    }
+    if (type === "TextEffect") return paletteAt(pal, (controlValue(effect, "hue", 128) || 128) / 255);
+    if (savedRgb) return scaleRgb(savedRgb, clampByte(controlValue(effect, "brightness", 255)) / 255);
+    return paletteAt(pal, x + y * 0.35 + phase * 0.05);
+}
+
+function realAudioFromState() {
+    const audioModule = firstModuleByType("AudioService");
+    const rawLevel = Number(controlValue(audioModule, "level RMS", 0)) || 0;
+    const level = Math.max(0, Math.min(1, rawLevel / 255));
+    const bands = new Array(16).fill(0);
+    if (level <= 0) return { level: 0, bands };
+
+    const peakHz = parseFloat(String(controlValue(audioModule, "peakHz", 0))) || 0;
+    let center = 0;
+    if (peakHz > 0) {
+        const lo = 60;
+        const hi = 4000;
+        center = Math.max(0, Math.min(15, Math.round(Math.log2(Math.max(lo, peakHz) / lo) / Math.log2(hi / lo) * 15)));
+    }
+    for (let i = 0; i < 16; i++) {
+        bands[i] = level * Math.max(0, 1 - Math.abs(i - center) / 4);
+    }
+    return { level, bands };
+}
+
+function syntheticAudio(t, mode = 0, opts = {}) {
+    const beat = 0.5 + 0.5 * Math.sin(2 * Math.PI * 2 * t);
+    const kick = Math.pow(beat, 3);
+    const floor = opts.previewAudio ? 0.58 : 0.06;
+    const gain = opts.previewAudio ? 1.35 : 1;
+    const bands = [];
+    for (let i = 0; i < 16; i++) {
+        const carrier = 0.5 + 0.5 * Math.sin(2 * Math.PI * (2 * t + i / 5));
+        const falloff = 1 - i / 22;
+        const clap = Number(mode) === 1 && i >= 5 && i <= 9 ? kick * 0.35 : 0;
+        bands[i] = Math.max(floor, Math.min(1, (kick * (i < 3 ? 0.9 : 0.35) + clap + carrier * 0.35) * falloff * gain));
+    }
+    return { level: Math.max(opts.previewAudio ? 0.62 : 0.08, Math.min(1, kick * 0.85 + 0.12)), bands };
+}
+
+function effectUsesAudio(effect) {
+    const type = String(effect?.type || "");
+    if (type === "AudioSpectrumEffect" || type === "GEQEffect" || type === "GEQ3DEffect" ||
+        type === "BlurzEffect" ||
+        type === "NoiseMeterEffect" || type === "FreqMatrixEffect" || type === "FreqSawsEffect") return true;
+    const scene = helioFactorySceneForType(type);
+    return helioSceneUsesAudio(scene);
+}
+
+function presetAudio(t, effect = null, opts = {}) {
+    const real = realAudioFromState();
+    if (real.level > 0 || real.bands.some(v => v > 0)) return real;
+    // Match firmware: synthetic beat is opt-in through idleBeat, not an invisible default.
+    return (controlValue(effect, "idleBeat", false) || (opts.previewAudio && effectUsesAudio(effect)))
+        ? syntheticAudio(t, controlValue(effect, "sound simulation", 0), opts)
+        : real;
+}
+
+function presetLayout(doc) {
+    const layouts = moduleByType(doc, "Layouts");
+    const layout = flattenModules(layouts?.children || [])[0];
+    const type = layout?.type || "SingleRowLayout";
+    const width = Math.max(1, Number(controlValue(layout, "width", controlValue(layout, "nrOfLEDs", 64))) || 64);
+    const height = Math.max(1, Number(controlValue(layout, "height", controlValue(layout, "ledsPerTube", 1))) || 1);
+    if (type === "GridLayout" || type === "CubeLayout" || type === "PanelLayout") return { cols: Math.min(36, width), rows: Math.min(18, height) };
+    if (type === "SingleColumnLayout") return { cols: 6, rows: Math.min(36, height) };
+    if (type === "RingLayout" || type === "WheelLayout" || type === "Rings241Layout") return { radial: true, count: Math.min(96, width) };
+    return { cols: Math.min(64, width), rows: 1 };
+}
+
+function presetLooksHelio(doc) {
+    const fw = moduleByType(doc, "FirmwareUpdateModule");
+    const brand = controlValue(fw, "brand", "");
+    const product = controlValue(fw, "product", "");
+    const layout = moduleByType(doc, "RingLayout") || moduleByType(doc, "SingleRowLayout");
+    return String(brand).toUpperCase() === "HELIO" ||
+           String(product).toLowerCase() === "helio1" ||
+           String(layout?.name || "").toLowerCase().includes("helio");
+}
+
+function presetLedCount(doc) {
+    const layout = moduleByType(doc, "RingLayout") || moduleByType(doc, "SingleRowLayout") || moduleByType(doc, "GridLayout");
+    return Math.max(1, Number(controlValue(layout, "width", controlValue(layout, "nrOfLEDs", HELIO_DEFAULT_LED_COUNT))) || HELIO_DEFAULT_LED_COUNT);
+}
+
+function drawPresetCanvas(canvas, t) {
+    const doc = canvas._presetDoc;
+    if (!doc) return;
+    const pal = paletteFromPreset(doc);
+    const effects = presetEffects(doc);
+    const effect = effects.find(e => e.enabled !== false) || effects[0];
+    const audio = presetAudio(t, effect, { previewAudio: true });
+    const layout = presetLayout(doc);
+
+    if (isHelioFirmware(deviceFirmwareInfo()) || presetLooksHelio(doc)) {
+        drawHelioCardTracePreview(canvas, t, (x, y, tt) => effectColor(effect, pal, tt, x, y, audio,
+            { paletteByIndex, rgbOnly: isNebuliteFirmware(), ledCount: presetLedCount(doc) }), presetLedCount(doc));
+        return;
+    }
+
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#05070d";
+    ctx.fillRect(0, 0, w, h);
+
+    if (layout.radial) {
+        const cx = w / 2, cy = h / 2, r = Math.min(w, h) * 0.39;
+        const n = layout.count || 64;
+        for (let i = 0; i < n; i++) {
+            const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+            const x = 0.5 + Math.cos(a) * 0.5;
+            const y = 0.5 + Math.sin(a) * 0.5;
+            const c = effectColor(effect, pal, t, i / n, y, audio);
+            ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+            ctx.beginPath();
+            ctx.arc(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 3.4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        return;
+    }
+
+    const cols = layout.cols || 32, rows = layout.rows || 1;
+    const gap = rows === 1 ? 2 : 1;
+    const cellW = (w - 18) / cols;
+    const cellH = rows === 1 ? 24 : (h - 18) / rows;
+    const dot = Math.max(2, Math.min(cellW, cellH) * 0.72);
+    const ox = 9 + cellW / 2;
+    const oy = rows === 1 ? h / 2 : 9 + cellH / 2;
+    for (let yy = 0; yy < rows; yy++) {
+        for (let xx = 0; xx < cols; xx++) {
+            const nx = cols <= 1 ? 0 : xx / (cols - 1);
+            const ny = rows <= 1 ? 0.5 : yy / (rows - 1);
+            const c = effectColor(effect, pal, t, nx, ny, audio);
+            ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+            const px = ox + xx * cellW;
+            const py = oy + yy * cellH;
+            ctx.beginPath();
+            ctx.arc(px, py, Math.max(1.6, dot / 2 - gap), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8b. File Manager view
+// ---------------------------------------------------------------------------
+
+// Format a byte count as a short human size (matches the fs seam's uint32 sizes).
+function fmSize(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+// Per-module File Manager UI state, kept across state refreshes (the DOM is rebuilt on refetch, but
+// the tree's expand-state + selection are the user's, not the module's). Keyed by module name.
+const fmStateByMod = {};
+function fmState(mod) {
+    return (fmStateByMod[mod.name] ||= { expanded: new Set(["/"]), selected: "/" });
+}
+
+// Fetch one directory's children (name/isDir/size) from /api/dir. `hidden` includes dotfiles.
+async function fmFetchDir(absPath, hidden) {
+    const res = await fetch("/api/dir?path=" + encodeURIComponent(absPath) + (hidden ? "&hidden=1" : ""));
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const rows = await res.json();
+    return Array.isArray(rows) ? rows : [];
+}
+
+// Render the File Manager panel: a lazy expand/collapse folder tree (the standard VS Code / Explorer
+// shape — an expanded folder's children are loaded from /api/dir), plus a toolbar (show
+// hidden, new folder, delete on the selected node). Filesystem ops go through the module's controls
+// (path/new folder/delete); browsing is pure UI over /api/dir, so the module stays minimal.
+function renderFileManager(mod, host) {
+    const ctrl = (n) => (mod.controls || []).find(c => c.name === n);
+    const st = fmState(mod);
+    // The toggle is UI-owned: seed it from the persisted control on first render, then `st` is the
+    // source of truth. Reading it back from `mod` each render would revert the checkbox, since an
+    // in-panel re-render runs against the same (stale) state snapshot, before /api/state updates.
+    if (st.showHidden === undefined) st.showHidden = !!ctrl("show hidden")?.value;
+    const hidden = st.showHidden;
+
+    // Render into a single stable panel that we REPLACE on every re-render (expand / collapse /
+    // select / op) — reusing it in place rather than appending, so the tree updates inline instead
+    // of stacking a fresh copy below the old one.
+    let panel = host.querySelector(":scope > .fm-panel");
+    if (panel) panel.replaceChildren();
+    else { panel = document.createElement("div"); panel.className = "fm-panel"; host.appendChild(panel); }
+
+    // Show-hidden toggle: owned by the panel (not the generic control list) so flipping it can
+    // re-fetch the tree with the new `hidden` filter immediately, rather than waiting for a state
+    // refresh that never re-runs the /api/dir fetch. Reuses the same .switch pill markup every
+    // other bool control uses (common patterns first), so it reads consistently.
+    const hiddenRow = document.createElement("label");
+    hiddenRow.className = "fm-hidden-toggle";
+    hiddenRow.appendChild(document.createTextNode("show hidden"));
+    const sw = document.createElement("span");
+    sw.className = "switch";
+    const hiddenBox = document.createElement("input");
+    hiddenBox.type = "checkbox";
+    hiddenBox.checked = hidden;
+    hiddenBox.addEventListener("change", () => {
+        st.showHidden = hiddenBox.checked;                    // UI-owned source of truth
+        sendControl(mod.name, "show hidden", hiddenBox.checked);   // persist (best-effort, no await)
+        renderFileManager(mod, host);                         // re-list with the new filter
+    });
+    const track = document.createElement("span");
+    track.className = "switch-track";
+    sw.appendChild(hiddenBox);
+    sw.appendChild(track);
+    hiddenRow.appendChild(sw);
+    panel.appendChild(hiddenRow);
+
+    // Select a path level (from a breadcrumb crumb): update the selection, tidy the tree to just the
+    // path, and re-render. "Reveal and collapse siblings" — keep the ancestor chain root→…→crumb
+    // open, fold every other branch AND the clicked node's own descendants. Selecting a directory
+    // drives where ＋ folder/＋ file create and what delete targets.
+    const selectPath = (absPath, isDir) => {
+        st.selected = absPath;
+        st.selectedIsDir = isDir;
+        // Rebuild `expanded` as the ancestor chain root→…→crumb, plus the clicked node itself when
+        // it's a directory (so you see one level into it) — every other branch and anything deeper
+        // folds. Root is always expanded (the tree shows its children).
+        const segs = absPath.split("/").filter(Boolean);   // "/.config/foo" → [".config","foo"]
+        st.expanded = new Set(["/"]);
+        for (let i = 0; i < segs.length; i++) {
+            const p = "/" + segs.slice(0, i + 1).join("/");
+            // Include every ancestor; include the clicked node only if it's a directory.
+            if (i < segs.length - 1 || isDir) st.expanded.add(p);
+        }
+        renderFileManager(mod, host);
+    };
+
+    // Breadcrumb of the selected path, on its OWN row above the toolbar (a deep path wraps freely
+    // without crowding the buttons — key on narrow displays). Click a crumb to jump there; `root`
+    // deselects back to /.
+    const crumbs = document.createElement("div");
+    crumbs.className = "fm-crumbs";
+    const mkCrumb = (label, absPath, isDir) => {
+        const b = document.createElement("button");
+        b.className = "fm-crumb" + (absPath === st.selected ? " fm-crumb--here" : "");
+        b.textContent = label;
+        b.addEventListener("click", () => selectPath(absPath, isDir));
+        return b;
+    };
+    // (Re)build the breadcrumb from the current selection, into the stable `crumbs` element — called
+    // on first render and by refreshSelectionControls() when a file click updates the selection in place.
+    const rebuildCrumbs = () => {
+        crumbs.replaceChildren();
+        crumbs.appendChild(mkCrumb("root", "/", true));   // always present — the way back to /
+        const segs = st.selected.split("/").filter(Boolean);   // "/.config/foo" → [".config","foo"]
+        segs.forEach((s, i) => {
+            crumbs.appendChild(document.createTextNode(" / "));
+            // A crumb is a directory unless it's the last segment of a selected *file*.
+            const isLast = i === segs.length - 1;
+            const isDir = !isLast || st.selectedIsDir;
+            crumbs.appendChild(mkCrumb(s, "/" + segs.slice(0, i + 1).join("/"), isDir));
+        });
+    };
+    rebuildCrumbs();
+    panel.appendChild(crumbs);
+
+    // Refresh the controls that depend on the current selection WITHOUT rebuilding the tree: the
+    // breadcrumb and the delete button's disabled state. Used by the in-place file-click path so a
+    // file's row survives for its dblclick. (delBtn's press-twice handler reads st.selected live.)
+    const refreshSelectionControls = () => {
+        rebuildCrumbs();
+        delBtn.disabled = st.selected === "/";
+    };
+
+    // Toolbar (own row below the breadcrumb): New folder / New file / Delete / Refresh.
+    const bar = document.createElement("div");
+    bar.className = "fm-bar";
+
+    // A filesystem op is an HTTP call on /api/dir?path= (POST=mkdir, DELETE=remove) — the path
+    // rides the query, so nothing is stored/persisted on the device. On failure, surface the
+    // server's error; on success, re-render the tree from disk.
+    const runOp = async (op, targetPath) => {
+        const method = op === "delete" ? "DELETE" : "POST";
+        try {
+            const res = await fetch("/api/dir?path=" + encodeURIComponent(targetPath), { method });
+            if (!res.ok) alert(`${op} failed: ${await errorMessage(res)}`);
+        } catch (err) {   // a network error (offline / reset) would otherwise be an unhandled rejection
+            alert(`${op} failed: ${err.message || err}`);
+        }
+        renderFileManager(mod, host);  // rebuild the tree from /api/dir (fresh listing), success or handled failure
+    };
+
+    // A new file/folder is created inside the selected node if it's a folder, else next to it (in
+    // the selected file's parent). Shared by both create buttons.
+    const createBase = () => (st.selectedIsDir ? st.selected : fmParent(st.selected));
+
+    // Icon-only toolbar: each button shows a glyph; the `title` carries the word for the tooltip +
+    // screen readers (the standard icon-button pattern — an icon with an accessible label).
+    const newBtn = document.createElement("button");
+    newBtn.className = "fm-tool fm-tool--icon";
+    newBtn.textContent = "📁";
+    newBtn.title = "New folder — create a folder inside the selected folder";
+    newBtn.addEventListener("click", async () => {
+        const base = createBase();
+        const name = (prompt("New folder name in " + base + ":") || "").trim();
+        if (!name) return;             // blank or whitespace-only → no-op
+        st.expanded.add(base);         // reveal the new child
+        await runOp("new folder", joinFsPath(base, name));
+    });
+    bar.appendChild(newBtn);
+
+    // New file: no module op needed — the /api/file POST creates a file at a path (empty body), the
+    // same endpoint the editor saves through. Then re-render the tree from disk.
+    const newFileBtn = document.createElement("button");
+    newFileBtn.className = "fm-tool fm-tool--icon";
+    newFileBtn.textContent = "📝";
+    newFileBtn.title = "New file — create an empty file inside the selected folder";
+    newFileBtn.addEventListener("click", async () => {
+        const base = createBase();
+        const name = (prompt("New file name in " + base + ":") || "").trim();
+        if (!name) return;             // blank or whitespace-only → no-op
+        const filePath = joinFsPath(base, name);
+        try {
+            const res = await fetch("/api/file?path=" + encodeURIComponent(filePath), {
+                method: "POST", headers: { "Content-Type": "text/plain" }, body: "",
+            });
+            if (!res.ok) throw new Error(await errorMessage(res));
+        } catch (err) {
+            alert("create file failed: " + err.message);
+            return;
+        }
+        st.expanded.add(base);         // reveal the new file
+        renderFileManager(mod, host);  // re-list from disk
+    });
+    bar.appendChild(newFileBtn);
+
+    // Upload: pick desktop files and stream them into the selected folder via the same /api/file
+    // POST the drag-drop path uses (fmDropUpload) — a button for people who don't drag. A hidden
+    // <input type=file multiple> is the recognizable browser file-picker; clicking the button opens it.
+    const upBtn = document.createElement("button");
+    upBtn.className = "fm-tool fm-tool--icon";
+    upBtn.textContent = "↥";   // pairs with the per-row ↓ download glyph
+    upBtn.title = "Upload — upload files from your computer into the selected folder";
+    const upInput = document.createElement("input");
+    upInput.type = "file";
+    upInput.multiple = true;
+    upInput.style.display = "none";
+    upInput.addEventListener("change", async () => {
+        const files = Array.from(upInput.files || []);
+        upInput.value = "";                       // reset so re-picking the same file re-fires change
+        if (!files.length) return;
+        const base = createBase();
+        st.expanded.add(base);                    // reveal the destination folder
+        const skipped = await fmDropUpload(base, files);
+        renderFileManager(mod, host);             // re-list from disk
+        if (skipped.length) alert("Not uploaded:\n" + skipped.join("\n"));
+    });
+    upBtn.addEventListener("click", () => upInput.click());
+    bar.appendChild(upBtn);
+    bar.appendChild(upInput);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "fm-tool fm-tool--icon fm-tool--danger";
+    delBtn.textContent = "🗑";
+    delBtn.title = "Delete — delete the selected file or empty folder";
+    delBtn.disabled = st.selected === "/";   // never delete the root
+    armPressTwice(delBtn, () => runOp("delete", st.selected), { armedText: "✓" });
+    bar.appendChild(delBtn);
+
+    const refBtn = document.createElement("button");
+    refBtn.className = "fm-tool fm-tool--icon";
+    refBtn.textContent = "⟳";
+    refBtn.title = "Refresh";
+    refBtn.addEventListener("click", () => renderFileManager(mod, host));
+    bar.appendChild(refBtn);
+    panel.appendChild(bar);
+
+    // The tree. Root ("/") is always present and expanded; its children populate asynchronously.
+    const tree = document.createElement("div");
+    tree.className = "fm-tree";
+    // Dropping desktop files onto the tree's empty space uploads them into root.
+    fmMakeDropTarget(tree, "/", hidden, () => renderFileManager(mod, host), st);
+    panel.appendChild(tree);
+
+    // Render one directory's children into `container` at `depth`, recursing into expanded folders.
+    const renderChildren = async (dirPath, container, depth) => {
+        let rows;
+        try {
+            rows = await fmFetchDir(dirPath, hidden);
+        } catch (err) {
+            const e = document.createElement("div");
+            e.className = "fm-empty";
+            e.textContent = "list failed: " + err.message;
+            container.appendChild(e);
+            return;
+        }
+        if (rows.length === 0) {
+            const e = document.createElement("div");
+            e.className = "fm-empty";
+            e.style.paddingLeft = (depth * 16 + 20) + "px";
+            e.textContent = "empty";
+            container.appendChild(e);
+            return;
+        }
+        // Folders first, then files; each alphabetical — the conventional file-manager sort.
+        rows.sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name));
+        for (const entry of rows) {
+            const childPath = joinFsPath(dirPath, entry.name);
+            const isOpen = st.expanded.has(childPath);
+
+            const rowEl = document.createElement("div");
+            rowEl.className = "fm-row" + (childPath === st.selected ? " fm-row--sel" : "");
+            rowEl.style.paddingLeft = (depth * 16 + 4) + "px";
+
+            // Chevron: only folders can expand; a file gets a spacer so names line up.
+            const chev = document.createElement("span");
+            chev.className = "fm-chev";
+            chev.textContent = entry.isDir ? (isOpen ? "▾" : "▸") : "";
+            rowEl.appendChild(chev);
+
+            const icon = document.createElement("span");
+            icon.className = "fm-icon";
+            icon.textContent = entry.isDir ? (isOpen ? "📂" : "📁") : "📄";
+            rowEl.appendChild(icon);
+
+            const name = document.createElement("span");
+            name.className = "fm-name";
+            name.textContent = entry.name;
+            rowEl.appendChild(name);
+
+            const size = document.createElement("span");
+            size.className = "fm-size";
+            size.textContent = entry.isDir ? "" : fmSize(entry.size || 0);
+            rowEl.appendChild(size);
+
+            // Per-file download (device → desktop): a plain <a download> on /api/file forces a save
+            // with the right name, every browser, any file type — the portable counterpart to the
+            // drag-drop upload (a true drag-*out* has no cross-browser API). Folders get no ⤓;
+            // folder-as-zip is backlogged (needs a bundled zip lib + recursion).
+            if (!entry.isDir) {
+                const dl = document.createElement("a");
+                dl.className = "fm-dl";
+                dl.textContent = "⤓";
+                dl.title = "download";
+                dl.href = "/api/file?path=" + encodeURIComponent(childPath);
+                dl.setAttribute("download", entry.name);
+                dl.addEventListener("click", (ev) => ev.stopPropagation());   // don't select/open
+                rowEl.appendChild(dl);
+            }
+
+            // Single-click SELECTS (highlights, sets the op target for delete); a folder also
+            // toggles expand. DOUBLE-click OPENS a file in the editor — the VS Code / Finder /
+            // Explorer norm, and it keeps a distinct "selected but not opened" state for future
+            // rename / multi-select / context-menu features.
+            rowEl.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                st.selected = childPath;
+                st.selectedIsDir = entry.isDir;
+                if (entry.isDir) {
+                    // A folder click also expands/collapses — rows appear/disappear, so a full
+                    // re-render is needed.
+                    if (isOpen) st.expanded.delete(childPath);
+                    else st.expanded.add(childPath);
+                    renderFileManager(mod, host);
+                } else {
+                    // A file click only moves the selection — update the highlight IN PLACE, never
+                    // re-render. A re-render here would destroy this row mid-gesture, so the dblclick
+                    // that follows a double-click would land on a fresh element and openFileEditor
+                    // might not fire. Move the --sel class + refresh the selection-dependent controls.
+                    for (const r of panel.querySelectorAll(".fm-row--sel")) r.classList.remove("fm-row--sel");
+                    rowEl.classList.add("fm-row--sel");
+                    refreshSelectionControls();
+                }
+            });
+            if (!entry.isDir) {
+                rowEl.addEventListener("dblclick", (ev) => {
+                    ev.stopPropagation();
+                    openFileEditor(childPath, entry.size);   // size lets the editor detect a truncated read
+                });
+            }
+
+            // Drag-drop upload target: dropping desktop files onto a FOLDER row uploads them into
+            // that folder (tier 1: text/config ≤8KB — see fmDropUpload).
+            if (entry.isDir) fmMakeDropTarget(rowEl, childPath, hidden, () => renderFileManager(mod, host), st);
+            container.appendChild(rowEl);
+
+            // Recurse into an expanded folder (its own indented sub-container).
+            if (entry.isDir && isOpen) {
+                const sub = document.createElement("div");
+                sub.className = "fm-subtree";
+                container.appendChild(sub);
+                await renderChildren(childPath, sub, depth + 1);
+            }
+        }
+    };
+
+    renderChildren("/", tree, 0);
+
+    // Filesystem usage bar below the tree — the File Manager's own `filesystem` control (used /
+    // total bytes from the platform). Absent (e.g. desktop fs total 0) → nothing shown.
+    const fsCtrl = fmFilesystemUsage(mod);
+    if (fsCtrl) {
+        const usage = document.createElement("div");
+        usage.className = "fm-usage";
+        const name = document.createElement("span");
+        name.className = "fm-usage-name";
+        name.textContent = "Used";      // the bar/value is used space out of total (see the trailing label)
+        const bar = document.createElement("progress");
+        bar.value = Number(fsCtrl.value) || 0;
+        bar.max = Number(fsCtrl.total) || 1;
+        const lbl = document.createElement("span");
+        lbl.className = "fm-usage-label";
+        lbl.textContent = fmtProgressLabel(fsCtrl);
+        usage.appendChild(name);
+        usage.appendChild(bar);
+        usage.appendChild(lbl);
+        panel.appendChild(usage);
+    }
+
+    // "last saved" readout below the usage bar — how long ago config was persisted. The value is
+    // owned by the FilesystemModule engine (non-UI); the File Manager displays it because this is
+    // where filesystem state is topical (same reasoning as the usage bar).
+    const savedCtrl = (mod?.controls || []).find(c => c.name === "lastSaved");
+    if (savedCtrl) {
+        const row = document.createElement("div");
+        row.className = "fm-lastsaved";
+        row.textContent = `saved: ${savedCtrl.value ?? "never"}`;
+        panel.appendChild(row);
+    }
+}
+
+// The File Manager's own `filesystem` usage progress control (used/total bytes), or null if the
+// platform reports no partition. Rendered as the bar below the tree; skipped in the generic control
+// loop so it appears only here.
+function fmFilesystemUsage(mod) {
+    return (mod?.controls || []).find(c => c.name === "filesystem") || null;
+}
+
+// Format a file's text for the editor, by extension. JSON is re-indented (2 spaces) so the persisted
+// config files are readable; anything that doesn't parse is shown verbatim rather than erroring.
+// Extension seam for later: MoonLive `.ml` source wants syntax *highlighting* (a color layer over
+// the textarea), not reformatting — that's a bigger editor change, added when MoonLive `.ml` files
+// land on disk.
+function fmPrettify(text, relPath) {
+    if (relPath.endsWith(".json")) {
+        try { return JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+    }
+    return text;
+}
+
+// The parent directory of an absolute path ("/a/b" → "/a", "/a" → "/").
+function fmParent(absPath) {
+    const cut = absPath.lastIndexOf("/");
+    return cut <= 0 ? "/" : absPath.slice(0, cut);
+}
+
+// Join a dir + name with one slash (UI-side path building for the editor's path= query).
+function joinFsPath(dir, name) {
+    return dir.endsWith("/") ? dir + name : dir + "/" + name;
+}
+
+// Drag-drop upload (desktop → device). The device streams the body straight to the file (any size,
+// binary-safe), so the only client-side bound is a sanity cap matching the device's kUploadMax; a
+// file over it is skipped with a visible note (no silent drop). A too-big-for-free-space file is
+// also rejected device-side with a "not enough space" message.
+const FM_UPLOAD_CAP = 256 * 1024;   // matches HttpServerModule::kUploadMax
+
+// Wire an element as a drop target that uploads dropped files into `destDir`, then re-renders.
+function fmMakeDropTarget(el, destDir, hidden, rerender, st) {
+    el.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.add("fm-row--drop");
+    });
+    el.addEventListener("dragleave", (e) => {
+        e.stopPropagation();
+        el.classList.remove("fm-row--drop");
+    });
+    el.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        el.classList.remove("fm-row--drop");
+        const files = Array.from(e.dataTransfer?.files || []);
+        if (!files.length) return;
+        const skipped = await fmDropUpload(destDir, files);
+        if (destDir !== "/") st.expanded.add(destDir);   // reveal where they landed
+        rerender();
+        if (skipped.length) {
+            // Report what wasn't uploaded (over the size cap or a write error) rather than dropping
+            // it silently. The limit is derived from FM_UPLOAD_CAP so the text never drifts from it.
+            alert(`Not uploaded (over ${fmSize(FM_UPLOAD_CAP)} or failed):\n` + skipped.join("\n"));
+        }
+    });
+}
+
+// Upload each dropped file into destDir via /api/file. Returns the names skipped (too big / failed)
+// so the caller can report them. The File blob is sent as the body directly — the browser streams
+// its raw bytes (binary-safe), matching the device's streamed, byte-exact write.
+async function fmDropUpload(destDir, files) {
+    const skipped = [];
+    for (const file of files) {
+        if (file.size > FM_UPLOAD_CAP) { skipped.push(file.name + " (" + fmSize(file.size) + ")"); continue; }
+        try {
+            const res = await fetch("/api/file?path=" + encodeURIComponent(joinFsPath(destDir, file.name)), {
+                method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+            });
+            if (!res.ok) throw new Error(await errorMessage(res));   // surfaces "not enough space (N free)" etc.
+        } catch (err) {
+            skipped.push(file.name + " (" + err.message + ")");
+        }
+    }
+    return skipped;
+}
+
+// Open a modal text editor for the file at `relPath`. Loads via GET /api/file (streamed whole, any
+// size), saves via POST. A file that isn't valid text (a NUL byte, or UTF-8 decode damage) loads
+// read-only so a lossy re-save can't corrupt it. Uses the native <dialog> — no bespoke overlay code.
+async function openFileEditor(relPath, expectedSize) {
+    const dlg = document.createElement("dialog");
+    dlg.className = "fm-editor";
+    dlg.innerHTML =
+        '<form method="dialog" class="fm-editor-head">' +
+        '  <span class="fm-editor-path"></span>' +
+        '  <button value="close" class="fm-editor-x" title="close">✕</button>' +
+        '</form>' +
+        '<textarea class="fm-editor-body" spellcheck="false"></textarea>' +
+        '<div class="fm-editor-foot">' +
+        '  <span class="fm-editor-status"></span>' +
+        '  <button class="action-btn fm-editor-save">Save</button>' +
+        '</div>';
+    dlg.querySelector(".fm-editor-path").textContent = relPath;
+    const body = dlg.querySelector(".fm-editor-body");
+    const status = dlg.querySelector(".fm-editor-status");
+    const saveBtn = dlg.querySelector(".fm-editor-save");
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.showModal();
+
+    try {
+        const res = await fetch("/api/file?path=" + encodeURIComponent(relPath));
+        // Surface the server's own message (e.g. "not found") rather than a bare status code.
+        if (!res.ok) throw new Error(await errorMessage(res));
+        const text = await res.text();
+        // Truncation guard: serveFileContents streams the whole file but stops short on a read error
+        // (a filesystem fault mid-stream). Saving a short read back would overwrite the file with a
+        // truncated copy — so if the received byte count is under the size the listing reported, load
+        // read-only. TextEncoder gives the byte length (text.length is chars, not bytes).
+        if (typeof expectedSize === "number" &&
+            new TextEncoder().encode(text).length < expectedSize) {
+            body.value = text;
+            body.readOnly = true;
+            saveBtn.disabled = true;
+            status.textContent = "truncated read — read-only (save would corrupt the file)";
+        // The editor is text/config only: a <textarea> can't faithfully round-trip non-text bytes,
+        // so a re-save would corrupt the file. Treat it as binary — read-only, save disabled — if it
+        // has a NUL OR if res.text()'s UTF-8 decode left a replacement char (U+FFFD), which means the
+        // bytes weren't valid UTF-8 and are already lossy in the textarea. Use the per-row ⤓ to
+        // download such files intact.
+        } else if (text.indexOf("\0") !== -1 || text.indexOf("�") !== -1) {
+            body.value = text;
+            body.readOnly = true;
+            saveBtn.disabled = true;
+            status.textContent = "binary / non-text file — read-only";
+        } else {
+            body.value = fmPrettify(text, relPath);
+        }
+    } catch (err) {
+        body.value = "";
+        status.textContent = "load failed: " + err.message;
+        saveBtn.disabled = true;   // never let a Save post an empty body over a file that failed to load
+    }
+
+    saveBtn.addEventListener("click", async () => {
+        status.textContent = "saving…";
+        try {
+            const res = await fetch("/api/file?path=" + encodeURIComponent(relPath), {
+                method: "POST",
+                headers: { "Content-Type": "text/plain" },
+                body: body.value,
+            });
+            if (!res.ok) throw new Error(await errorMessage(res));
+            status.textContent = "saved";
+        } catch (err) {
+            status.textContent = "save failed: " + err.message;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 9. Boot
+// ---------------------------------------------------------------------------
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+else init();
