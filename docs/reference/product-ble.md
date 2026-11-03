@@ -252,11 +252,7 @@ A separate host integration test runs two peer mailboxes and two RPC sessions: o
 
 The app estimates every member's clock and round-trip uncertainty, converts a common desired start to each device uptime and reconciles execution results. Preserve uint32 wrap handling and per-member failures. Scheduled starts do not make BLE a mesh or share animation phase, random state or audio. Basic3/4/5 mixed groups and wearable mini-HELIO require their own app/device acceptance; a single HELIO test proves no measured group skew.
 
-Desktop tests with two independent firmware instances exercise different local
-clock origins, a shared deadline and a per-member group mismatch; the accepted
-member executes while the mismatched member reports its own error. These are
-deterministic scheduler tests, not a measurement of BLE latency, app clock
-estimation or synchronization on physical lights.
+Desktop tests with two independent firmware instances exercise different local clock origins, a shared deadline and a per-member group mismatch; the accepted member executes while the mismatched member reports its own error. These are deterministic scheduler tests, not a measurement of BLE latency, app clock estimation or synchronization on physical lights.
 
 ## Battery telemetry and standard BAS
 

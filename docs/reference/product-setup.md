@@ -10,7 +10,7 @@ The phone applies the same choices over BLE with the `setup` operation ([product
 
 The four 2021 ESP32 products follow the NEBULITE Smart ESP32 v0.5.0 source (`Funkelfetisch/NEBULITE-Smart` 9fbc10e1, `src/neopixel.cpp`): Croptop 8 and Fanny pack 4 RGB pixels on GPIO26, Backpack 6 on GPIO26 mirrored on GPIO17 and laid out as two columns down and back up, Jacket 50 split 19, 19 and 12 over GPIO26, GPIO17 and GPIO18. Each awaits physical qualification on its controller.
 
-Before any module starts, both NEBULITE firmwares settle their board pins. `nebulite-esp32` drives the buzzer's GPIO5 low and pulls GPIO2 down; `nebulite-s3` drives the Rev4 battery controller's enables, GPIO21 and GPIO14, high when GPIO10 reads high. Both boot with Wi-Fi off, so the phone app over BLE is the way in.
+Before any module starts, both NEBULITE firmwares settle their board pins. `nebulite-esp32` drives the buzzer's GPIO5 low and pulls GPIO2 down; `nebulite-s3` drives the Rev4 battery controller's enables, GPIO21 and GPIO14, high when GPIO10 reads high. Each prints the pins as their pads read back, level, output driver and internal pulls, on the serial console: `Board pins: GPIO5 LOW out GPIO2 LOW pull-down` on the classic board. Both boot with Wi-Fi off, so the phone app over BLE is the way in.
 
 ## Source profiles and manual white
 

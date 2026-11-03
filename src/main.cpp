@@ -165,6 +165,7 @@
 #include "core/util/PresetTemplates.h"
 
 #include <cstdio>
+#include <initializer_list>
 #include <cstdlib>
 #include <cstring>
 
@@ -195,6 +196,17 @@ static void printModuleMetrics(mm::MoonModule* mod, int depth) {
     }
 }
 
+/// The board pins a product firmware settles before any module starts, as the pads read back: their wiring is otherwise invisible, since no module claims them.
+static void printBoardPins(std::initializer_list<uint8_t> pins) {
+    std::printf("Board pins:");
+    for (const uint8_t gpio : pins) {
+        const auto pin = mm::platform::gpioLiveState(gpio);
+        std::printf(" GPIO%u %s%s%s%s", static_cast<unsigned>(gpio), pin.level ? "HIGH" : "LOW", pin.output ? " out" : "",
+                    pin.pullUp ? " pull-up" : "", pin.pullDown ? " pull-down" : "");
+    }
+    std::printf("\n");
+}
+
 static int savedHelioAudioMode() {
     constexpr const char* path = "/.config/Services.json";
     const long size = mm::platform::fsSize(path);
@@ -219,6 +231,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         // Veit's rule for the classic garments: GPIO2 (a strap pin, wired to the TOUCH2 pad) is pulled down, an input held low rather than driven.
         constexpr uint8_t kNebuliteClassicStrapGpio = 2;
         mm::platform::gpioInputBegin(kNebuliteClassicStrapGpio, mm::platform::GpioPull::Down);
+        printBoardPins({kNebuliteClassicBuzzerGpio, kNebuliteClassicStrapGpio});
     }
     // A Rev4 battery controller holds its own power on, so GPIO10 reading high means driving both enable lines before anything else; a USB controller reads it low and carries a button on that same GPIO21. From the pinned WLED source.
     if (std::strcmp(mm::kFirmwareName, "nebulite-s3") == 0) {
@@ -228,6 +241,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
             mm::platform::gpioWrite(kRev4EnableGpio, true);
             mm::platform::gpioWrite(kRev4MainEnableGpio, true);
         }
+        printBoardPins({kRev4ProbeGpio, kRev4EnableGpio, kRev4MainEnableGpio});
     }
     mm::registerModuleTypes();
     mm::Scheduler scheduler;

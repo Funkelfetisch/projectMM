@@ -157,8 +157,10 @@ GpioLiveState gpioLiveState(uint8_t gpio) {
     // Live pin DIRECTION straight off the pad config (not the role's intent): is the output driver / input buffer enabled right now. A role that should drive but reads back !output = the pin isn't being driven (a dead driver or wire fault), the mismatch the map flags.
     gpio_io_config_t io = {};
     if (gpio_get_io_config(static_cast<gpio_num_t>(gpio), &io) == ESP_OK) {
-        s.output = io.oe;
-        s.input  = io.ie;
+        s.output   = io.oe;
+        s.input    = io.ie;
+        s.pullUp   = io.pu;
+        s.pullDown = io.pd;
     }
     return s;
 }

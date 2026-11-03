@@ -222,6 +222,8 @@ struct GpioLiveState {
     bool level = false;    ///< current pad level, true being HIGH
     bool output = false;   ///< the pad's output driver is enabled right now
     bool input = false;    ///< the pad's input buffer is enabled right now; a pin can be both
+    bool pullUp = false;   ///< the pad's internal pull-up is enabled right now
+    bool pullDown = false; ///< the pad's internal pull-down is enabled right now
     uint8_t driveCap = 0;  ///< output drive strength 0..3 = WEAK / MEDIUM / STRONG / STRONGEST
 };
 /// Sample one pin's live state, on tick1s rather than per frame.
