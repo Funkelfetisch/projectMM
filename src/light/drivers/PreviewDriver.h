@@ -152,9 +152,12 @@ public:
         bleFrame_.invalidate();
     }
 
+    /// A disabled driver holds no pixel copy; prepare() sizes it again on the way back.
+    void onEnabled(bool on) override { if (!on) bleFrame_.reserve(0); }
+
     /// Rebuild the coordinate table for the new geometry and start a fresh epoch, canceling any in-flight send first since a resize reallocs the buffer a half-sent frame reads.
     void prepare() override {
-        bleFrame_.invalidate();
+        bleFrame_.reserve(sourceBuffer_ ? sourceBuffer_->count() : 0);
         // Cancel BEFORE the rebuild: an in-flight send holds a pointer about to dangle.
         if (broadcaster_) broadcaster_->cancelBufferedSend();
         else freePreviewBuffers();            // no broadcaster wired: nothing streams, release the buffers
@@ -635,7 +638,7 @@ private:
         return s > 255 ? 255 : static_cast<uint8_t>(s);
     }
 
-    PreviewFrameSnapshot bleFrame_;
+    PreviewFrameSnapshot bleFrame_{*this};
     Buffer* sourceBuffer_ = nullptr;
     BinaryBroadcaster* broadcaster_ = nullptr;
     bool aimTurn_ = false;          ///< alternates color/aim so each gets its own send slot

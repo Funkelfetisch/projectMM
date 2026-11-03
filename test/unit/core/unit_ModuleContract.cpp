@@ -32,7 +32,6 @@ const std::vector<Known> kNotPlaced = {
 const std::vector<Known> kKeepsMemory = {
     {"Effects", "its Layer keeps the pixel buffer while disabled"},
     {"Layer", "its pixel buffer_ is a plain Buffer that release() does not free"},
-    {"Drivers", "outputBuffer_ is a plain Buffer that release() does not free"},
     {"NdiDriver", "release() is overridden without chaining to the base, so the rgb_ and corrScratch_ scratch buffers stay, where the NDI library loads and the buffers exist", true},
 };
 
