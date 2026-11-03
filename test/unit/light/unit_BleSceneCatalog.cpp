@@ -1,4 +1,5 @@
 /// @module BleSceneCatalog
+#include <map>
 #include "doctest.h"
 #include "helio/BleSceneCatalog.h"
 #include "core/services/BleControlService.h"
@@ -128,6 +129,28 @@ TEST_CASE("BLE scenes: the shared catalog has stable IDs and bounded real contro
             REQUIRE(next->intValue > cursor); cursor = static_cast<uint16_t>(next->intValue);
         }
     }
+}
+
+TEST_CASE("BLE scenes: a control the catalogue names carries its label, so the app shows Intensity rather than effect intensity") {
+    std::map<std::string, std::string> labels;
+    for (uint16_t cursor = 0; cursor < 256;) {
+        char bytes[513]; mm::JsonSink sink(bytes, sizeof(bytes)); envelope(sink);
+        REQUIRE(mm::BleSceneCatalog::writeInfo(sink, "candle-multi", cursor) == nullptr); sink.append("}");
+        REQUIRE_FALSE(sink.overflowed());
+        mm::json::JsonDoc info; REQUIRE(mm::json::parse(bytes, info));
+        const auto* controls = mm::json::member(info, info.rootNode(), "controls"); REQUIRE(controls != nullptr);
+        for (const auto* control = info.node(controls->firstChild); control; control = info.node(control->next)) {
+            const auto* name = mm::json::member(info, control, "name"), *label = mm::json::member(info, control, "label");
+            if (name && label) labels[name->str] = label->str;
+        }
+        const auto* next = mm::json::member(info, info.rootNode(), "next");
+        if (!next || next->type == mm::json::JsonType::Null) break;
+        cursor = static_cast<uint16_t>(std::atoi(next->str));
+    }
+    CHECK(labels["speed"] == "Speed");
+    CHECK(labels["effect intensity"] == "Intensity");
+    CHECK(labels["output"] == "Output level");
+    CHECK(labels.count("palette") == 0);
 }
 
 TEST_CASE("BLE scenes: solid replaces competing effects, modifiers and extra layers as one complete scene") {

@@ -88,6 +88,7 @@ public:
             char head[192]; JsonSink object(head, sizeof(head));
             if (!first) object.append(",");
             object.append("{\"name\":"); object.writeJsonString(control.name);
+            if (const char* label = controlLabel(entry->id, control.name)) { object.append(",\"label\":"); object.writeJsonString(label); }
             object.append(",\"type\":"); object.writeJsonString(controlTypeName(control.type));
             object.append(",\"default\":"); writeValue(object, control);
             if (control.type != ControlType::Bool)
@@ -327,6 +328,12 @@ private:
     static const ControlDescriptor* control(const MoonModule* module, const char* name) {
         for (uint8_t i = 0; module && i < module->controls().count(); ++i)
             if (std::strcmp(module->controls()[i].name, name) == 0) return &module->controls()[i];
+        return nullptr;
+    }
+    /// The display name the catalogue gives a scene's control, or null where the control keeps its own name.
+    static const char* controlLabel(const char* scene, const char* control) {
+        for (const auto& row : product_scenes::kControlLabels)
+            if (std::strcmp(row.scene, scene) == 0 && std::strcmp(row.control, control) == 0) return row.label;
         return nullptr;
     }
     static const ControlDescriptor* descriptor(const Probe& probe, const Entry& entry, const char* name) {
