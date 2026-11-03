@@ -4,7 +4,7 @@ The `FirmwareUploadFrame`, `FirmwareUploadSession` and
 `FirmwareUploadCoordinator` classes are experimental transport-independent
 building blocks. They do not expose a BLE characteristic, authenticate a peer,
 verify a publisher signature or prove that an installed image can recover.
-The current controller continues to report `bleOta:false`.
+RPC2 now wires them, behind a signed release, as the update over BLE: see [the plan](../present/Plan-20261103%20-%20Firmware%20update%20over%20BLE.md).
 
 The existing begin frame is 38 bytes without a resume token and 54 bytes with
 one. Neither fits in a single ordinary ATT write at the default MTU of 23
@@ -33,9 +33,7 @@ aborted, hash-mismatched or failed commit. This can support an eventual
 device-confirmed receipt, but the status is volatile: it does not survive a
 reboot, authenticate the publisher, or prove that the new image booted.
 
-The app's current identity parser requires `bleOta:false` and `ota:http-app`.
-Changing either field before a coordinated compatible app rollout would prevent
-that app from recognizing the controller for ordinary lighting control.
+The App's identity parser accepts both values of `bleOta`; the change is recorded in MIGRATING.
 The current App controller's `info` parser was also exercised offline with an
 unknown additive field: it still accepts the response and retains its existing
 pixel-map capability. This only establishes a possible compatibility path;
@@ -71,7 +69,7 @@ verification is established by this primitive.
 
 The optional `FirmwareAuthorizedBackend` allows an upload session to check a
 policy over its exact requested image length and digest before opening a slot.
-It is not enabled for any transport. A host test combines this gate with the
+The update over BLE enables it with `FirmwareReleasePolicy`. A host test combines this gate with the
 PSA primitive and a simulated flash backend: an invalid signature or mismatched
 length cannot open a slot, changed image bytes cannot commit, and the expected
 image can. Its disposable test policy signs only the image digest and is not a
