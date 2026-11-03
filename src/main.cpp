@@ -215,6 +215,9 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     if (std::strcmp(mm::kFirmwareName, "nebulite-esp32") == 0) {
         constexpr uint8_t kNebuliteClassicBuzzerGpio = 5;
         mm::platform::gpioPreloadLowOutput(kNebuliteClassicBuzzerGpio);
+        // Veit's rule for the classic garments: GPIO2 (a strap pin, wired to the TOUCH2 pad) is pulled down, an input held low rather than driven.
+        constexpr uint8_t kNebuliteClassicStrapGpio = 2;
+        mm::platform::gpioInputBegin(kNebuliteClassicStrapGpio, mm::platform::GpioPull::Down);
     }
     // A Rev4 battery controller holds its own power on, so GPIO10 reading high means driving both enable lines before anything else; a USB controller reads it low and carries a button on that same GPIO21. From the pinned WLED source.
     if (std::strcmp(mm::kFirmwareName, "nebulite-s3") == 0) {
