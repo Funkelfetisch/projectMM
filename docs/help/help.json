@@ -487,6 +487,17 @@
    "doc": "light/layouts.md#panel",
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/layouts/PanelLayout.h"
   },
+  "PixelMapLayout": {
+   "line": "A bounded 2D point per output, listed in physical output order.\nCoordinates are integer `x,y` pairs separated by semicolons. Repeated\ncoordinates intentionally sample the same field point.",
+   "controls": {
+    "points": {
+     "line": ""
+    }
+   },
+   "role": "layout",
+   "dim": 2,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/layouts/PixelMapLayout.h"
+  },
   "RingLayout": {
    "line": "A ring of lights evenly spaced around a circle, or an arc of one.",
    "summary": "The lights start at `angleFirst` and span `rotation` degrees, a full turn drawing the whole circle. A center of its own places the ring anywhere, which is how CarLights and Rings241 build their lamps and discs from rings.",
@@ -1599,6 +1610,365 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/RainbowEffect.h",
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#rainboweffect"
   },
+  "NebuliteRainbowEffect": {
+   "line": "WLED Rainbow Cycle with the Rainbow palette used by the legacy wearable presets.\nThis single-segment scene blanks RGBW outside its selected physical range.",
+   "attribution": "WLED contributors; Rainbow palette by FastLED contributors",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "size": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteRainbowEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebuliterainboweffect"
+  },
+  "NebuliteBlinkEffect": {
+   "line": "Single-segment WLED Blink with palette 3, used by the old Blaulicht look.\nColor inputs are linear scene values; the output driver applies its curve.\nWLED's global frame time and palette transition can change its appearance,\nso this effect alone is not a verified migration of an archived preset.",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "red": {
+     "line": ""
+    },
+    "green": {
+     "line": ""
+    },
+    "blue": {
+     "line": ""
+    },
+    "secondary red": {
+     "line": ""
+    },
+    "secondary green": {
+     "line": ""
+    },
+    "secondary blue": {
+     "line": ""
+    },
+    "secondary white": {
+     "line": ""
+    },
+    "palette blend": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteBlinkEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebuliteblinkeffect"
+  },
+  "NebuliteSolidEffect": {
+   "line": "A constant RGBW color on one physical strip segment. This preserves the\narchived wearable looks' segment bounds; the output driver's curve is\napplied later and is not a claim of WLED gamma equivalence.",
+   "controls": {
+    "red": {
+     "line": ""
+    },
+    "green": {
+     "line": ""
+    },
+    "blue": {
+     "line": ""
+    },
+    "white": {
+     "line": ""
+    },
+    "brightness": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteSolidEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebulitesolideffect"
+  },
+  "NebuliteWashingEffect": {
+   "line": "Experimental physical-strip port of WLED Washing Machine, palette 1.\nIts phase and palette math match WLED, but random seed, initial palette,\nmissed frames and global palette sharing differ; it is not a qualified\nrestoration of the archived preset or its original output curve.",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteWashingEffect.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#nebulitewashingeffect"
+  },
+  "NebuliteSineEffect": {
+   "line": "Physical-strip Sine (WLED-MM FX 108) with palette 1. The random seed,\npalette lifetime and clock are local to this effect; physical equivalence\nwith a restored archived device remains unverified.",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "secondary red": {
+     "line": ""
+    },
+    "secondary green": {
+     "line": ""
+    },
+    "secondary blue": {
+     "line": ""
+    },
+    "secondary white": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteSineEffect.h"
+  },
+  "NebulitePaletteEffect": {
+   "line": "Archived WLED-MM Palette (FX 65), palette 3, moving-wrap mode 0.\nRGB output is uncorrected; WLED gamma, transitions and physical output need qualification.",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "red": {
+     "line": ""
+    },
+    "green": {
+     "line": ""
+    },
+    "blue": {
+     "line": ""
+    },
+    "secondary red": {
+     "line": ""
+    },
+    "secondary green": {
+     "line": ""
+    },
+    "secondary blue": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebulitePaletteEffect.h"
+  },
+  "NebuliteFireflyEffect": {
+   "line": "Archived WLED-MM Twinkleup (FX 106) with Fire palette 35 and no-wrap mode 0.\nRGB is uncorrected; source gamma and physical output need qualification.",
+   "attribution": "[WLED](https://moonmodules.org/MoonLight/reference/attributions.html#wled), [FastLED](https://moonmodules.org/MoonLight/reference/attributions.html#fastled), [Andrew Tuline](https://moonmodules.org/MoonLight/reference/attributions.html#andrew-tuline)",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "secondary red": {
+     "line": ""
+    },
+    "secondary green": {
+     "line": ""
+    },
+    "secondary blue": {
+     "line": ""
+    },
+    "secondary white": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteFireflyEffect.h"
+  },
+  "NebuliteSnowflakesEffect": {
+   "line": "Archived WLED-MM ColorTwinkles on a physical strip segment with palette 36.\nThe random stream is local to this effect, rather than WLED's global stream.",
+   "attribution": "[WLED](https://moonmodules.org/MoonLight/reference/attributions.html#wled), [FastLED](https://moonmodules.org/MoonLight/reference/attributions.html#fastled)",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "source brightness": {
+     "line": ""
+    },
+    "follow master": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteSnowflakesEffect.h"
+  },
+  "NebuliteFlowStripeEffect": {
+   "line": "Archived WLED Flow Stripe on a selected physical-order wearable segment.",
+   "attribution": "WLED contributors, [ldirko](https://moonmodules.org/MoonLight/reference/attributions.html#ldirko), [Andrew Tuline](https://moonmodules.org/MoonLight/reference/attributions.html#andrew-tuline), FastLED contributors",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteFlowStripeEffect.h"
+  },
+  "NebulitePlasmoidEffect": {
+   "line": "Experimental wearable port of WLED-MM FX 133 with random palette 74.\nAudio level scaling, local random stream and clock are not calibrated to\nan archived physical controller. Silence stays dark with the saved black\nsecondary color; optional simulation applies only with no audio service.",
+   "attribution": "WLED and FastLED contributors",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "audio floor": {
+     "line": ""
+    },
+    "simulate if no source": {
+     "line": ""
+    },
+    "secondary red": {
+     "line": ""
+    },
+    "secondary green": {
+     "line": ""
+    },
+    "secondary blue": {
+     "line": ""
+    },
+    "secondary white": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebulitePlasmoidEffect.h"
+  },
+  "NebuliteNoisefireEffect": {
+   "line": "Experimental physical-order port of archived WLED-MM FX 143.\nLive audio levels are not yet calibrated to the archived controller;\nOptional WLED beat simulation runs only when no AudioService is active;\na connected but quiet source stays quiet.",
+   "attribution": "WLED and FastLED contributors",
+   "controls": {
+    "speed": {
+     "line": ""
+    },
+    "effect intensity": {
+     "line": ""
+    },
+    "audio floor": {
+     "line": ""
+    },
+    "simulate if no source": {
+     "line": ""
+    },
+    "frame ms": {
+     "line": ""
+    },
+    "segment start": {
+     "line": ""
+    },
+    "segment stop": {
+     "line": ""
+    }
+   },
+   "role": "effect",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/NebuliteNoisefireEffect.h"
+  },
   "RandomEffect": {
    "line": "Lights one random light per frame in a random palette color over a fading background: a sparse, palette-tinted sparkle.",
    "summary": "The buffer dims a little, then one light takes a random palette color, and over many frames that scatters fading sparkles across the whole volume. `fade` sets the density: less lets them linger and fill, more leaves quick specks.",
@@ -1632,6 +2002,12 @@
     },
     "hue_shift": {
      "line": "Rotates every ring's hue."
+    },
+    "background brightness": {
+     "line": "Background brightness at hue_shift's palette position; a black palette color stays black."
+    },
+    "max pause ms": {
+     "line": "Maximum fully dark mapped-source interval in milliseconds; zero rescues the first dark frame."
     }
    },
    "role": "effect",
@@ -1642,10 +2018,11 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#ringseffect"
   },
   "HelioFactoryTestEffect": {
-   "line": "Deliberately selected production pattern for an assembled HELIO RGBW ring.\nIt is registered only in helio1 and is never part of the boot scene.\nThe operator must set the RingLayout and RMT lengths to the physical ring\ncount (156/258/360) and run this as the only enabled effect on its layer.",
+   "line": "Operator-selected RGBW channel patterns for a directly mapped ring.",
+   "summary": "@guide Match RingLayout and RMT lengths to the physical strip and use this effect alone on its layer.",
    "controls": {
     "phase": {
-     "line": ""
+     "line": "Selects blackout, channel checks, combined white or a moving pixel."
     }
    },
    "role": "effect",
@@ -1656,78 +2033,79 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#heliofactorytesteffect"
   },
   "HelioWledPresetsEffect": {
+   "line": "Curated HELIO scenes with manual selection or static and audio playlists.",
    "controls": {
     "playlist": {
-     "line": ""
+     "line": "Chooses the static or audio scene sequence."
     },
     "preset": {
-     "line": ""
+     "line": "Selects a scene while automatic playback is off."
     },
     "autoPlay": {
-     "line": ""
+     "line": "Cycles through the selected scene sequence."
     },
     "idleBeat": {
-     "line": ""
+     "line": "Supplies demo audio when live audio falls below the activity gate."
     },
     "speed": {
-     "line": ""
+     "line": "Changes the scene's motion, fade, spacing or event rate."
     },
     "effect intensity": {
-     "line": ""
+     "line": "Controls flicker, density, width, hue, audio or peak decay."
     },
     "custom 1": {
-     "line": ""
+     "line": "GEQ band count or Freqwave lower frequency bound."
     },
     "custom 2": {
-     "line": ""
+     "line": "Freqwave upper frequency bound."
     },
     "custom 3": {
-     "line": ""
+     "line": "Freqwave audio gain."
     },
     "palette": {
-     "line": ""
+     "line": "Selects the palette where the scene uses one."
     },
     "red": {
-     "line": ""
+     "line": "Primary red channel for scenes that use a primary color."
     },
     "green": {
-     "line": ""
+     "line": "Primary green channel for scenes that use a primary color."
     },
     "blue": {
-     "line": ""
+     "line": "Primary blue channel for scenes that use a primary color."
     },
     "white": {
-     "line": ""
+     "line": "White-die level for scenes that emit a separate white channel."
     },
     "secondary red": {
-     "line": ""
+     "line": "Red part of the accent color used by supported scenes."
     },
     "secondary green": {
-     "line": ""
+     "line": "Green part of the accent color used by supported scenes."
     },
     "secondary blue": {
-     "line": ""
+     "line": "Blue part of the accent color used by supported scenes."
     },
     "option 1": {
-     "line": ""
+     "line": "Smooths Freqmap, colors GEQ bars or scales Freqwave logarithmically."
     },
     "option 2": {
-     "line": ""
+     "line": "Smooths neighboring GEQ bands."
     },
     "option 3": {
-     "line": ""
+     "line": "Stored source flag, hidden in the available scenes."
     },
     "sound simulation": {
-     "line": ""
+     "line": "Chooses the rhythm when demo audio is enabled."
     },
     "audio map": {
-     "line": ""
+     "line": "Shifts the demo audio frequency sweep."
     },
     "output": {
-     "line": ""
+     "line": "Scales this scene's output channels."
     },
     "source defaults": {
-     "line": ""
+     "line": "Restores the selected scene's source settings."
     }
    },
    "role": "effect",
@@ -1736,96 +2114,115 @@
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#heliowledpresetseffect"
   },
   "HelioCandleMultiEffect": {
+   "line": "Independent candle flickers with primary-color or palette shading.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioColorTwinklesEffect": {
+   "line": "Sparse colored sparkles that fade in and out along the strip.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioFreqMapAmberEffect": {
+   "line": "A palette-colored point sweeping along the strip with a fading trail.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioLakeEffect": {
+   "line": "Layered brightness waves moving through a primary color or palette.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioLoadingEffect": {
+   "line": "A moving head fading into the strip's background palette.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioPinkPaletteEffect": {
+   "line": "A palette spread across the strip, with adjustable drift.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioPhasedEffect": {
+   "line": "Phase-shifted waves reveal and fade colors from a palette.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioRippleEffect": {
+   "line": "Random expanding ripples with fading mirrored color arcs.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioRunningEffect": {
+   "line": "Traveling color waves with adjustable spacing.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioStarburstEffect": {
+   "line": "Audio-triggered bursts that scatter bright fragments along the strip.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioGravCenterEffect": {
+   "line": "An audio-level meter expanding symmetrically from the strip center.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioJugglesEffect": {
+   "line": "Oscillating dots that blend accent and palette colors with audio.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioMultiCometEffect": {
+   "line": "Audio-triggered comets traveling along the strip with fading trails.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioNoiseMeterEffect": {
+   "line": "A noise-colored level meter whose width follows the audio input.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioPlasmoidEffect": {
+   "line": "Audio-reactive plasma bands shaped by intersecting spatial waves.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioFreqMapWideEffect": {
+   "line": "An audio-frequency point with a fading palette trail and optional smoothing.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioGEQEffect": {
+   "line": "Audio spectrum bars with optional peak markers and band smoothing.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioGravFreqEffect": {
+   "line": "A centered audio meter whose palette position follows frequency.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
   },
   "HelioFreqWaveEffect": {
+   "line": "Audio-colored waves moving outward from the strip center.",
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
@@ -4030,6 +4427,9 @@
      "line": "The board model, which selects the installer's catalog entry.",
      "more": "Tooling sets it, since a device cannot identify its own hardware."
     },
+    "physicalDiameterCm": {
+     "line": "Installed sphere diameter in centimetres; zero means the owner has not supplied it."
+    },
     "firmware": {
      "line": "The build variant, kept for the MoonBase recovery image to read."
     },
@@ -4365,40 +4765,40 @@
    "line": "Continuous BH1750 illuminance, sampled on a worker so I²C never blocks rendering.\nPrior art: ROHM BH1750FVI Technical Note Rev.D, H-resolution mode and raw / 1.2 lux.",
    "controls": {
     "automatic": {
-     "line": ""
+     "line": "Use the sensor's target brightness while a valid reading is available."
     },
     "lux": {
-     "line": ""
+     "line": "Latest measured illuminance; the initial placeholder indicates an unknown reading."
     },
     "target": {
-     "line": ""
+     "line": "Last calculated brightness target, or the manual-mode label."
     },
     "darkLux": {
-     "line": ""
+     "line": "Illuminance paired with the dark-end brightness of the response curve."
     },
     "darkBrightness": {
-     "line": ""
+     "line": "Brightness paired with the dark-end illuminance."
     },
     "brightLux": {
-     "line": ""
+     "line": "Illuminance paired with the bright-end brightness of the response curve."
     },
     "brightBrightness": {
-     "line": ""
+     "line": "Brightness paired with the bright-end illuminance."
     },
     "hysteresisLux": {
-     "line": ""
+     "line": "Illuminance change needed to update the accepted reading and target brightness."
     },
     "bus": {
-     "line": ""
+     "line": "I²C controller connected to the illuminance sensor."
     },
     "sda": {
-     "line": ""
+     "line": "GPIO carrying the sensor's I²C data signal."
     },
     "scl": {
-     "line": ""
+     "line": "GPIO carrying the sensor's I²C clock signal."
     },
     "address": {
-     "line": ""
+     "line": "I²C address selected by the sensor's address pin."
     }
    },
    "role": "service",
@@ -4411,7 +4811,10 @@
    "line": "One background sampler for up to two independent, explicitly configured BatteryChannel children.\n@guide A mains-only product has no battery children. Sampling never runs on the render thread, and charging remains unknown without a qualified detector.",
    "controls": {
     "pollSeconds": {
-     "line": "Seconds between measurement batches; stale lifetime is configured independently per battery."
+     "line": "Interval between measurement batches; each channel sets its own sample lifetime."
+    },
+    "configuration": {
+     "line": ""
     }
    },
    "role": "service",
@@ -4427,13 +4830,13 @@
      "line": "Stable physical battery identity, first or second, independent of the module's display name."
     },
     "sample": {
-     "line": "Pack identity, validity, sample age and optional voltage estimate in the shared transport JSON format."
+     "line": "Pack identity, validity, age and optional voltage estimate as JSON."
     },
     "presence": {
-     "line": "Declared battery installation: unknown, present or absent; ADC voltage alone proves none of these."
+     "line": "Declared installation: unknown, present or absent; independent of measured voltage."
     },
     "adcPin": {
-     "line": "Calibrated ADC input from this board's battery divider, unset until the board profile declares it."
+     "line": "ADC input for the board's battery divider; configure from verified wiring."
     },
     "gainNumerator": {
      "line": "Numerator of the explicit battery-voltage to ADC-voltage ratio."
@@ -4448,10 +4851,10 @@
      "line": "Explicit opt-in to the configured linear voltage estimate."
     },
     "emptyMv": {
-     "line": "Measured/modelled voltage at the discharged endpoint; zero leaves percentage unknown."
+     "line": "Measured/modeled voltage at the discharged endpoint; zero leaves percentage unknown."
     },
     "fullMv": {
-     "line": "Measured/modelled voltage at the charged endpoint; it must exceed emptyMv."
+     "line": "Measured/modeled voltage at the charged endpoint; it must exceed emptyMv."
     },
     "staleSeconds": {
      "line": "How long a last successful sample remains current after read failures."
@@ -4463,7 +4866,7 @@
      "line": "The switch's active level; the board profile owns its polarity."
     },
     "settleMs": {
-     "line": "Qualified settling delay after enabling the divider; zero with a gate leaves sampling disabled."
+     "line": "Divider settling delay; gated inputs require a qualified nonzero delay."
     }
    },
    "role": "service",
@@ -4471,8 +4874,49 @@
    "doc": "core/services.md#battery-channel",
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/BatteryChannel.h"
   },
+  "HelioRemoteService": {
+   "line": "HELIO and NEBULITE handset commands use native presets, the solid scene and a temporary output overlay.\nExplicit editable bindings take priority over the product commands.",
+   "controls": {
+    "auto interval seconds": {
+     "line": ""
+    },
+    "automatic": {
+     "line": ""
+    },
+    "timer maximum minutes": {
+     "line": ""
+    },
+    "music mode": {
+     "line": ""
+    },
+    "timer remaining": {
+     "line": ""
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#helio-remote",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/helio/HelioRemoteService.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#helioremoteservice"
+  },
+  "BleRemoteService": {
+   "line": "An SP648E RS-protocol handset driving the existing control surface through passive BLE observation.",
+   "controls": {
+    "keys": {
+     "line": ""
+    },
+    "reception": {
+     "line": ""
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#ble-remote",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/BleRemoteService.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#bleremoteservice"
+  },
   "BleControlService": {
-   "line": "Encrypted, epoch-scoped BLE requests with explicit live state and named scheduled operations.\n@technical The framing, session and complete-scene contract lives in reference/product-ble.md.",
+   "line": "Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state and named scheduled operations.\n@technical The framing, session and complete-scene contract lives in reference/product-ble.md.",
    "controls": {
     "group": {
      "line": "Persisted group membership; empty leaves the group."
@@ -4482,6 +4926,18 @@
     },
     "batteryServices": {
      "line": "BAS declarations remain fixed until the next real service startup."
+    },
+    "productProfile": {
+     "line": ""
+    },
+    "pairing": {
+     "line": "Repeat-pairing counters and the remaining explicit repair window."
+    },
+    "link diagnostics": {
+     "line": ""
+    },
+    "repairPairing": {
+     "line": "Authorize one stale-bond replacement for three minutes; other phones keep their bonds."
     }
    },
    "role": "service",
@@ -5251,6 +5707,9 @@
     },
     "wifiEnabled": {
      "line": "Persisted product choice; BLE stays independent of this IP-interface flag."
+    },
+    "wifiPowerSave": {
+     "line": "Let the radio sleep between beacons once the station is up, trading latency for current."
     },
     "mDNS": {
      "line": "The `<name>.local` hostname, on IPv4 and IPv6.",

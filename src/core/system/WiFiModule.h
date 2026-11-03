@@ -219,6 +219,43 @@ public:
     /// Scan once the device's own access point is up with nobody on it, so a phone joining it finds the networks already listed.
     void onAccessPointStarted() { requestScan(); }
 
+    /// Look for the networks in range, as the `scan` button does; the results arrive on a later tick.
+    void requestScan() { scanRequested_ = true; scanRequestedMs_ = platform::millis(); }
+    /// Where the scan stands: "waiting" for the radio, "scanning", or "idle".
+    const char* scanState() const MM_NONBLOCKING { return scanRequested_ ? "waiting" : scanning_ ? "scanning" : "idle"; }
+    /// When the last scan finished, 0 before the first, so a reader tells a fresh scan from an earlier one.
+    uint32_t scannedAt() const MM_NONBLOCKING { return scannedMs_; }
+
+    /// Every page leaves room for the cursor and the caller's closing braces.
+    static constexpr size_t kPageTail = sizeof("],\"next\":16}}") - 1;
+    /// As many whole scanned networks from `offset` as the sink holds, each `[ssid, rssi, flags]` with flags 1 secured and 2 known; the cursor is the next network's index and null marks the end.
+    void writeNetworks(JsonSink& sink, uint8_t offset) const {
+        sink.append("\"networks\":[");
+        uint8_t next = offset;
+        for (; next < foundCount_; ++next) {
+            const platform::WifiNetwork& n = found_[next];
+            char item[208]; JsonSink row(item, sizeof(item));   // a 32-byte name of control characters escapes to 192 bytes
+            if (next > offset) row.append(",");
+            row.append("["); row.writeJsonString(n.ssid);
+            row.appendf(",%d,%u]", static_cast<int>(n.rssi), (n.secured ? 1u : 0u) | (indexOfSsid(n.ssid) >= 0 ? 2u : 0u));
+            // The first network always goes in, so every cursor advances; one that does not fit shows as the caller's overflow.
+            if (row.overflowed() || (next > offset && row.size() + kPageTail > sink.room())) break;
+            sink.append(item, row.size());
+        }
+        sink.append("],\"next\":");
+        if (next < foundCount_) sink.appendf("%u", static_cast<unsigned>(next));
+        else sink.append("null");
+    }
+
+    /// Join a network now, connect-first: a given password is tried and saved only once it joined; none takes a known network's saved password, or joins an open one.
+    bool join(const char* ssid, const char* password) {
+        const int k = ssid ? indexOfSsid(ssid) : -1;
+        if (!password && k >= 0) return requestJoin(ssid, rows_[k].password, rows_[k].id);
+        return requestJoin(ssid, password, 0);
+    }
+    /// How the last join asked for went: "joining", "joined", "wrong-password", "not-found", "failed" or "refused", null before the first.
+    const char* joinState() const MM_NONBLOCKING { return joinState_; }
+
     // Joining a network from the card, connect-first as a phone does: the device joins at once, and saves a scanned network only once it joined.
 
     /// A join the user asked for from the card, which the network module carries out.
@@ -233,6 +270,7 @@ public:
     /// The join succeeded: a scanned network is remembered at the top; the joined network's row id.
     uint32_t joinSucceeded() {
         uint32_t id = 0;
+        joinState_ = "joined";
         if (request_ && request_->knownId) id = request_->knownId;
         else if (request_ && remember(request_->ssid, request_->password)) id = rows_[0].id;
         else if (request_) { endRequest(kListFull); return 0; }   // joined, but not kept: the card says why
@@ -241,11 +279,12 @@ public:
     }
     /// The join failed, which the card says in words, and the network is not saved.
     void joinFailed(platform::WifiFailure why) {
-        endRequest(why == platform::WifiFailure::WrongPassword ? "incorrect password"
-                 : why == platform::WifiFailure::NotFound ? "network not found" : "could not join");
+        const bool wrong = why == platform::WifiFailure::WrongPassword, missing = why == platform::WifiFailure::NotFound;
+        joinState_ = wrong ? "wrong-password" : missing ? "not-found" : "failed";
+        endRequest(wrong ? "incorrect password" : missing ? "network not found" : "could not join");
     }
     /// The join cannot happen now, for the reason given.
-    void joinRefused(const char* why) { endRequest(why); }
+    void joinRefused(const char* why) { joinState_ = "refused"; endRequest(why); }
 
     // ListSource: the known networks.
 
@@ -488,7 +527,6 @@ private:
     uint32_t scannedMs_ = 0;      ///< when the last scan finished, 0 before the first
     bool     scanRequested_ = false;
     uint32_t scanRequestedMs_ = 0;   ///< when the waiting request was made, so a radio that never takes it ends it
-    void requestScan() { scanRequested_ = true; scanRequestedMs_ = platform::millis(); }
     bool     scanning_ = false;
     uint32_t scanStartedMs_ = 0;
     static constexpr uint32_t kScanTimeoutMs = 15000;   ///< a scan takes two to five seconds
@@ -499,6 +537,7 @@ private:
     char*    pendingPassword_ = nullptr;   ///< what was typed for a scanned network, on the heap only while typed
     uint32_t pendingId_ = 0;           ///< the scanned row that password belongs to
     uint32_t joinedId_ = 0;            ///< the known network carrying the device, by row id, so a reorder keeps it; 0 for none
+    const char* joinState_ = nullptr;  ///< how the last join asked for went, for an app that cannot read the card's words
     uint8_t  joinedIp_[4] = {};
     /// The links to the device on its new network, on the heap only while the access point is held after a join from it.
     struct Handoff {
@@ -545,6 +584,7 @@ private:
         mm::formatTo(request_->password, sizeof(request_->password), "%s", password ? password : "");
         request_->knownId = knownId;
         request_->seq = ++requestSeq_;
+        joinState_ = "joining";
         mm::formatTo(statusStr_, sizeof(statusStr_), "joining %s", ssid);
         setStatus(statusStr_);
         return true;

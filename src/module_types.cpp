@@ -200,6 +200,7 @@
 #include "core/services/Bh1750Service.h"
 #include "core/services/BatteryService.h"
 #include "core/services/BleControlService.h"
+#include "helio/HelioRemoteService.h"
 #include "core/system/TasksModule.h"
 #include "core/system/PinsModule.h"
 #include "core/services/AnalogService.h"
@@ -423,6 +424,8 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::Bh1750Service>("Bh1750Service", "core/services.md#bh1750");
     mm::ModuleFactory::registerType<mm::BatteryService>("BatteryService", "core/services.md#battery");
     mm::ModuleFactory::registerType<mm::BatteryChannel>("BatteryChannel", "core/services.md#battery-channel");
+    mm::ModuleFactory::registerType<mm::HelioRemoteService>("HelioRemoteService", "core/services.md#helio-remote");
+    mm::ModuleFactory::registerType<mm::BleRemoteService>("BleRemoteService", "core/services.md#ble-remote");
     mm::ModuleFactory::registerType<mm::BleControlService>("BleControlService", "core/services.md#ble-control");
     mm::ModuleFactory::registerType<mm::I2cBusModule>("I2cBusModule", "core/system.md#i2c-bus");
     mm::ModuleFactory::registerType<mm::TasksModule>("TasksModule", "core/system.md#tasks");

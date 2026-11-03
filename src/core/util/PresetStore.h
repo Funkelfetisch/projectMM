@@ -214,9 +214,12 @@ public:
         if (!valid) return valid;
         Result result;
         std::memcpy(result.etag, file.etag, sizeof(result.etag));
-        result.state = applyStateDocument(scheduler, file.text);
+        // A validated look changes only Effects and live palette values. Other services keep running.
+        result.state = applyStateDocument(scheduler, file.text, StateSource::Request,
+                                          lookOnly ? scheduler.firstByName("Effects") : nullptr);
         if (result.state.ok) {
-            scheduler.prepareTree();
+            if (lookOnly) scheduler.preparePending();
+            else scheduler.prepareTree();
             if (!scheduler.preparationResult().ok) {
                 const uint16_t changes = result.state.changes;
                 result.state = scheduler.preparationResult();

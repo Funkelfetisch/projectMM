@@ -22,6 +22,11 @@ inline bool isProductFirmware(const char* name) {
                     std::strcmp(name, "nebulite-esp32") == 0);
 }
 
+/// The NEBULITE garments, worn on a battery and driven by their own app: the radio they boot with is BLE alone. The family by its name prefix, the same rule `isNebuliteFirmware` in the dashboard applies, so a garment added later needs neither edited.
+inline bool isNebuliteFirmware(const char* name) {
+    return name && std::strncmp(name, "nebulite", 8) == 0;
+}
+
 /// The release channel it shipped on (`MM_RELEASE`), such as `latest` or `v1.0.0`, empty for a local build.
 extern const char* const kRelease;
 

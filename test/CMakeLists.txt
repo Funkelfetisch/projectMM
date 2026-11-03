@@ -8,6 +8,8 @@ add_executable(mm_tests
     unit/core/unit_PartitionTables.cpp
     unit/core/unit_SpscRing.cpp
     unit/core/unit_BleControlService.cpp
+    unit/core/unit_BleRemoteService.cpp
+    unit/light/unit_HelioRemoteService.cpp
     unit/light/unit_MiniLedPowerSequence.cpp
     unit/core/unit_BleAdvertisement.cpp
     unit/core/unit_PresetStore.cpp
@@ -322,9 +324,9 @@ target_link_libraries(mm_tests PRIVATE mm_core mm_platform)
 if(NOT MSVC)
     target_compile_options(mm_tests PRIVATE -Wno-error=double-promotion)
 endif()
-# GCC 16.2 reports three false positives, each through a test's inlining, so they stop being fatal on the test target only, from that version on: -Wnull-dereference on `this` read through std::function plumbing, -Warray-bounds on MoonModule::setName's bounded memcpy inlined into DOCTEST_ANON_FUNCs, and -Wmaybe-uninitialized past a loop's own bound in unit_Hub75Driver_pins.cpp. GCC 16.1 is clean.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16.2)
-    target_compile_options(mm_tests PRIVATE -Wno-error=null-dereference -Wno-error=array-bounds -Wno-error=maybe-uninitialized)
+# GCC 15 and 16.2 report false positives, each through a test's inlining, so they stop being fatal on the test target only, from GCC 15 on: -Wnull-dereference on `this` read through std::function plumbing, -Warray-bounds on a bounded copy inlined into DOCTEST_ANON_FUNCs (MoonModule::setName's memcpy, BleRpcSession's validated 32-character token), -Wmaybe-uninitialized past a loop's own bound in unit_Hub75Driver_pins.cpp, and (GCC 15) -Wdangling-pointer on a stack module stored as lastEnabledEffect_, which ~MoonModule clears. GCC 16.1 is clean.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    target_compile_options(mm_tests PRIVATE -Wno-error=null-dereference -Wno-error=array-bounds -Wno-error=maybe-uninitialized -Wno-error=dangling-pointer=)
 endif()
 # doctest.h forward-declares `std::tuple`, which the VS 2026 MSVC STL flags as specializing a standard template (C5285): vendored test code, so test target only.
 if(MSVC)

@@ -490,3 +490,33 @@ TEST_CASE("render-split: repeated task snapshots preserve the worker and changin
     }
     r.drivers.release();
 }
+
+TEST_CASE("render-split: scoped effect rebuild reconnects unchanged output geometry") {
+    for (bool multicore : {false, true}) {
+        INFO(multicore);
+        Rig r(16);
+        MockDriver output;
+        r.drivers.multicore = multicore;
+        r.drivers.addChild(&output);
+        mm::Scheduler scheduler;
+        scheduler.addModule(&r.layouts);
+        scheduler.addModule(&r.layers);
+        scheduler.addModule(&r.drivers);
+        scheduler.setup();
+        REQUIRE(output.src_ != nullptr);
+        for (uint8_t value : {17, 91, 143}) {
+            r.drivers.quiesceRenderSplit();
+            REQUIRE(output.src_ == nullptr);
+            // Preset replacement rebuilds Effects while keeping the same Layer and dimensions.
+            scheduler.prepareSubtree(&r.layers);
+            REQUIRE(output.src_ != nullptr);
+            CHECK(output.layer() == &r.layerA);
+            CHECK(r.drivers.renderSplitActive() == multicore);
+            r.layerA.buffer().data()[0] = value;
+            r.drivers.tick();
+            r.drivers.waitForTaskSnapshot();
+            CHECK(output.src_->data()[0] == value);
+        }
+        r.drivers.release();
+    }
+}

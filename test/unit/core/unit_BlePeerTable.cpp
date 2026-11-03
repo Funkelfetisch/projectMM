@@ -204,3 +204,43 @@ TEST_CASE("BLE peer disconnect: rejected and registered peers both restart adver
     CHECK(peripheral.connection.load() == UINT16_MAX); CHECK(peripheral.connectionCount.load() == 0);
     CHECK(peripheral.linkDisconnected.load() == 3);
 }
+
+TEST_CASE("BLE peer table: link security belongs to one connection and starts open on every reconnect") {
+    using Link = mm::platform::BleLinkSecurity;
+    mm::BlePeerTable<2> peers;
+    REQUIRE(peers.connect(10)); REQUIRE(peers.connect(20));
+    const uint8_t frame[] = {'x', '\n'};
+    char out[4] = {}; uint64_t first = 0, second = 0;
+    REQUIRE(peers.feed(10, frame, sizeof(frame)) == mm::BleMessage::Result::Ready);
+    REQUIRE(peers.feed(20, frame, sizeof(frame)) == mm::BleMessage::Result::Ready);
+    REQUIRE(peers.take(out, sizeof(out), first) == 1); REQUIRE(peers.take(out, sizeof(out), second) == 1);
+    uint16_t handle = 0;
+    REQUIRE(peers.security(first, handle) != nullptr);
+    CHECK(handle == 10); CHECK(*peers.security(first, handle) == Link::Open);
+    CHECK(peers.secured(10, true));
+    CHECK(*peers.security(first, handle) == Link::Encrypted);
+    CHECK(*peers.security(second, handle) == Link::Open);
+    CHECK(peers.secured(10, false));
+    CHECK(*peers.security(first, handle) == Link::Encrypted);
+    CHECK(peers.secured(20, false));
+    CHECK(*peers.security(second, handle) == Link::Failed);
+    CHECK_FALSE(peers.secured(30, true));
+    REQUIRE(peers.disconnect(10));
+    CHECK(peers.security(first, handle) == nullptr);
+    REQUIRE(peers.connect(10));
+    REQUIRE(peers.feed(10, frame, sizeof(frame)) == mm::BleMessage::Result::Ready);
+    uint64_t again = 0; REQUIRE(peers.take(out, sizeof(out), again) == 1);
+    CHECK(*peers.security(again, handle) == Link::Open);
+}
+
+TEST_CASE("BLE link security: an open link asks once, pairing waits, and a failure is told once before asking again") {
+    using Link = mm::platform::BleLinkSecurity;
+    Link link = Link::Open; bool ask = false;
+    CHECK(mm::platform::requestLinkSecurity(link, ask) == Link::Pairing); CHECK(ask);
+    CHECK(mm::platform::requestLinkSecurity(link, ask) == Link::Pairing); CHECK_FALSE(ask);
+    link = Link::Failed;
+    CHECK(mm::platform::requestLinkSecurity(link, ask) == Link::Failed); CHECK_FALSE(ask);
+    CHECK(mm::platform::requestLinkSecurity(link, ask) == Link::Pairing); CHECK(ask);
+    link = Link::Encrypted;
+    CHECK(mm::platform::requestLinkSecurity(link, ask) == Link::Encrypted); CHECK_FALSE(ask);
+}

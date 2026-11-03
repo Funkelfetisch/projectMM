@@ -67,6 +67,10 @@ public:
     void setAccessPoint(AccessPointModule* a) { ap_ = a; }
     /// Opt-in on BLE-controlled products: keep IP recovery on upstream builds unchanged.
     void allowWifiToggle(bool allow) { wifiToggle_ = allow; }
+    /// The switch's position on a device never told otherwise, set while the tree is built so a persisted `wifiEnabled` still overlays it: a garment reached over BLE boots with the radio down and costs no current until an address is asked for.
+    void setWifiDefaultEnabled(bool enabled) { wifiEnabled_ = wifiAppliedEnabled_ = enabled; }
+    /// Whether the radio sleeps between beacons on a device never told otherwise, set the same way: a garment pays nothing to hold an idle association, where a controller taking Art-Net keeps its latency.
+    void setWifiPowerSaveDefault(bool enabled) { wifiPowerSave_ = enabled; }
 
     /// Persist and apply the power cap, before credentials arriving with it are used.
     void setTxPowerSetting(uint8_t dBm) {
@@ -142,6 +146,9 @@ public:
         controls_.addReadOnly("mode", modeStr_, sizeof(modeStr_));
         if constexpr (platform::hasWiFi) {
             if (wifiToggle_) controls_.addControl("wifiEnabled", wifiEnabled_);
+            // Expert-only, below the switch it only matters under: sleeping between beacons costs latency on anything unasked for, so a controller taking Art-Net leaves it off and a battery product turns it on.
+            controls_.addControl("wifiPowerSave", wifiPowerSave_);
+            controls_.setAdvanced(controls_.count() - 1);
         }
 
         // Expert-only: discovery works without it.
@@ -206,6 +213,7 @@ public:
         syncAccessPoint(now);
         syncMdns();
         syncTxPower();
+        syncPowerSave();
         // An interface change applies live where the hardware allows, the cascade then waiting on it again, unless WiFi carries the device, which it leaves alone.
         if (ethernet_ && ethernet_->syncLive() && state_ != State::ConnectedSta && state_ != State::WaitingSta) {
             state_ = State::WaitingEth;
@@ -236,6 +244,8 @@ private:
     /// Persisted product choice; BLE stays independent of this IP-interface flag.
     bool wifiEnabled_ = true;
     bool wifiAppliedEnabled_ = true;
+    /// Let the radio sleep between beacons once the station is up, trading latency for current.
+    bool wifiPowerSave_ = false;
     Scheduler* scheduler_ = nullptr;
     SystemModule* systemModule_ = nullptr;
     EthernetModule* ethernet_ = nullptr;   ///< the wired interface's settings, absent on a build without Ethernet
@@ -560,6 +570,9 @@ private:
     /// The applied TX power setting, negative until the first apply; the platform takes quarter-decibels, and this value detects a change.
     int16_t appliedTxPowerSetting_ = -1;
 
+    /// The applied power saving as 0 or 1, negative until the first apply, so a stopped radio re-applies rather than reading as synced.
+    int8_t appliedPowerSave_ = -1;
+
     /// The joined network's IP settings as last applied, so an edit to them re-applies live.
     IpApplied appliedStaIp_;
 
@@ -747,6 +760,41 @@ private:
     }
 
 public:
+    /// Why WiFi cannot be set up now, or null: a build without it, or the product's WiFi switch off, which only the switch lifts.
+    const char* wifiUnavailable() const MM_NONBLOCKING {
+        if (!platform::hasWiFi || !wifi_) return "wifi-unavailable";
+        return wifiToggle_ && !wifiEnabled_ ? "wifi-disabled" : nullptr;
+    }
+    /// Scan for the networks in range, or say why not.
+    const char* scanWifi() {
+        if (const char* why = wifiUnavailable()) return why;
+        wifi_->requestScan();
+        return nullptr;
+    }
+    /// Join a network now, connect-first as the card does, or say why not; the cascade carries it out on its next tick.
+    const char* joinWifi(const char* ssid, const char* password) {
+        if (const char* why = wifiUnavailable()) return why;
+        return wifi_->join(ssid, password) ? nullptr : "memory";
+    }
+    /// The station and access point as an app shows them, then as many scanned networks from `offset` as `sink` holds; product-ble.md documents the shape.
+    void writeWifi(JsonSink& sink, uint8_t offset) const {
+        const bool station = state_ == State::WaitingSta || state_ == State::ConnectedSta;
+        const WiFiModule::JoinRequest* asked = wifi_ ? wifi_->joinRequest() : nullptr;
+        const char* ssid = !station || !wifi_ ? nullptr : asked && startedSeq_ == asked->seq ? asked->ssid : wifi_->ssidAt(staIndex());
+        sink.append("{\"enabled\":"); sink.writeBool(!wifiUnavailable());
+        sink.append(",\"ssid\":"); if (ssid && ssid[0]) sink.writeJsonString(ssid); else sink.append("null");
+        uint8_t ip[4] = {};
+        if constexpr (platform::hasWiFi) { if (state_ == State::ConnectedSta) platform::wifiStaGetIPv4(ip); }
+        char ipText[16]; formatDottedQuad(ipText, ip);
+        sink.append(",\"ip\":"); if (ip[0] || ip[1] || ip[2] || ip[3]) sink.writeJsonString(ipText); else sink.append("null");
+        sink.append(",\"ap\":"); if (apUp_) sink.writeJsonString(ap_ ? ap_->name() : readDeviceName()); else sink.append("null");
+        sink.append(",\"join\":"); if (wifi_ && wifi_->joinState()) sink.writeJsonString(wifi_->joinState()); else sink.append("null");
+        sink.append(",\"scan\":"); sink.writeJsonString(wifi_ ? wifi_->scanState() : "idle");
+        sink.appendf(",\"scanAt\":%lu,", static_cast<unsigned long>(wifi_ ? wifi_->scannedAt() : 0));
+        if (wifi_) wifi_->writeNetworks(sink, offset); else sink.append("\"networks\":[],\"next\":null");
+        sink.append("}");
+    }
+
     /// The current address as octets, all zero meaning not connected.
     void currentIp(uint8_t out[4]) const {
         out[0] = out[1] = out[2] = out[3] = 0;
@@ -858,8 +906,18 @@ private:
         }
     }
 
-    /// Forget the applied cap, since stopping the radio resets what it holds.
-    void noteRadioStopped() { appliedTxPowerSetting_ = -1; }
+    /// Push the radio's power saving whenever it changes, idempotently, in syncTxPower's shape.
+    void syncPowerSave() {
+        if constexpr (!platform::hasWiFi) return;
+        const int8_t wanted = wifiPowerSave_ ? 1 : 0;
+        if (wanted == appliedPowerSave_) return;
+        const bool radioUp = (state_ == State::ConnectedSta || state_ == State::WaitingSta || apUp_);
+        if (!radioUp) return;   // the station's own join sets the baseline, so there is nothing to lift yet
+        if (platform::wifiSetPowerSave(wifiPowerSave_)) appliedPowerSave_ = wanted;
+    }
+
+    /// Forget the applied cap and power saving, since stopping the radio resets what it holds.
+    void noteRadioStopped() { appliedTxPowerSetting_ = -1; appliedPowerSave_ = -1; }
 
     /// Start, restart or stop the local-name advertisement to match the state.
     void syncMdns() {

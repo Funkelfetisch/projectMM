@@ -492,6 +492,7 @@ TEST_CASE("Preset application remains successful when only its output guard allo
     const auto saved = mm::PresetStore::put("Sparkles", kLook, mm::PresetStore::Mode::Create);
     REQUIRE(saved);
     device.effect->refuseAllocationsAfterPrepare = true;
+    device.scheduler.requestPrepare(device.effects); // Inject refusal at the next actual scoped rebuild.
     const auto result = mm::PresetStore::apply(device.scheduler, "Sparkles", saved.etag);
     mm::platform::setTestAllocRefusedFrom(0);
     CHECK(result.status == 200);
@@ -522,6 +523,7 @@ TEST_CASE("Preset HTTP reports a completed apply with a warning when its output 
     REQUIRE(saved);
     mm::PresetStore::notifyChanged(device.scheduler, "Sparkles");
     device.effect->refuseAllocationsAfterPrepare = true;
+    device.scheduler.requestPrepare(device.effects); // Inject refusal at the next actual scoped rebuild.
     const auto reply = device.request("POST", "/api/presets/Sparkles/apply", "{}", tagHeader(saved.etag));
     mm::platform::setTestAllocRefusedFrom(0);
     REQUIRE(status(reply, 200));

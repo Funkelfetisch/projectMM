@@ -785,7 +785,6 @@ Left out of the plan that makes Ethernet, WiFi and the access point Network subm
 - **Roaming** between access points of one network while connected, by signal threshold (802.11k/v/r where the chip supports it).
 - **Enterprise WiFi**: WPA2/WPA3-Enterprise with a username, a password or a certificate.
 - **Pinning a network to one access point** (BSSID) or one band.
-- **WiFi power save**: the modem-sleep mode, traded against latency for Art-Net and the UI.
 - **The country code**, set by hand where adopting the router's country is not enough.
 - **The access point's address**, fixed at 4.3.2.1.
 - **IPv6 beyond link-local**: global addresses and a static one; the station and Ethernet carry a link-local address, which mDNS advertises.

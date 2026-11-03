@@ -17,6 +17,7 @@
 #include "core/moonlive/script_catalog.h"       // the tags each factory palette declares
 #include "core/util/LightOutput.h"   // the seam the domain-neutral WLED, MQTT and MoonStats consumers read
 #include "platform/platform.h"
+#include "helio/RemoteTimer.h"
 
 #include <cstring>  // std::strcmp in onControlChanged
 #include <atomic>   // encodeDone_: the render↔encode cross-core handoff flag
@@ -557,7 +558,7 @@ public:
         // A failed allocation leaves data_ null, which tick() checks before blending.
         Layer* const out = effects_ ? effects_->firstEnabledLayer() : layer_;
         const uint8_t enabled = effects_ ? effects_->enabledLayerCount() : (layer_ ? 1 : 0);
-        const bool needOutput = out && (enabled > 1 || out->lut().hasLUT());
+        const bool needOutput = out && (enabled > 1 || out->lut().hasLUT() || ActiveInstance<RemoteTimer>::active());
 
         // The split wants a buffer even in the identity case: core 1 reads it while core 0 renders.
         const bool haveLights = out && out->physicalLightCount() > 0;
@@ -601,9 +602,10 @@ public:
         preparedShape_ = sourceShape();
     }
 
-    /// Prepare again when a rebuild of one layer changed what this container sized from; a rebuild of the tree already did.
+    /// Rebuild changed geometry and reconnect output detached during a structural mutation.
     void onTreePrepared() override {
-        if (effectivelyEnabled() && sourceShape() != preparedShape_) applyState();
+        const auto shape = sourceShape();
+        if (effectivelyEnabled() && (shape != preparedShape_ || (shape.out && !source_))) applyState();
     }
 
     /// Composite the layers into the output buffer, then hand it to the drivers, on the encode core when the render is split.
@@ -622,6 +624,10 @@ public:
         EffectBase* const wired = outputBuffer_.data() && srcLayer ? srcLayer->wiringSource() : nullptr;
         composite(srcLayer, wired);
         wiredLast_ = wired != nullptr;
+        if (auto* timer = ActiveInstance<RemoteTimer>::active(); timer && outputBuffer_.data()) {
+            if (timer->render(outputBuffer_.span(), outputBuffer_.channelsPerLight(), platform::millis()))
+                wiredLast_ = false;
+        }
         // A socket write still lands in lwIP on core 0, so core 1 builds and core 0 sends.
         if (renderSplitActive_) {
             encodeDone_.store(false, std::memory_order_release);

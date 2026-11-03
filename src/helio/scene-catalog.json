@@ -528,7 +528,7 @@
       "palette": 0,
       "controls": {
         "count": 4,
-        "speed": 42,
+        "speed": 1,
         "thickness": 5,
         "hue_shift": 0,
         "background brightness": 0,

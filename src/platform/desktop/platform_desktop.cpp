@@ -1998,6 +1998,10 @@ bool wifiSetTxPower(int8_t quarterDbm) {
     if (testApUp_) { testTxPower_ = quarterDbm; return true; }
     return quarterDbm == 0;
 }
+// No radio to put to sleep, so the seam keeps what it was asked for and a host test reads the product's choice back.
+static bool testWifiPowerSave_ = false;
+bool testLastWifiPowerSave() { return testWifiPowerSave_; }
+bool wifiSetPowerSave(bool sleepBetweenBeacons) { testWifiPowerSave_ = sleepBetweenBeacons; return true; }
 
 static bool testMdns_ = false;      // the host has no mDNS responder of ours, so a test opts in
 static uint32_t testMdnsInits_ = 0;

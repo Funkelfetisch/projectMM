@@ -299,7 +299,7 @@ inline bool parseInputPin(const char* valueJson, int8_t& pin) {
 
 /// The action half as editable fields, so a user retargets an input without the interface: @xref{a-set-needs-a-release-to-clear-it|why a Set is not always offered}.
 inline void writeInputActionDetailFields(JsonSink& sink, const InputAction& a,
-                                         bool hasRelease = true) {
+                                         bool hasRelease = true, bool absoluteSet = false) {
     // A dropdown and a number rather than a text box, a typo otherwise being invisible until the input does nothing.
     sink.appendf("{\"name\":\"target\",\"type\":\"select\",\"optionsRef\":\"targets\",\"value\":%d},"
                  "{\"name\":\"number\",\"type\":\"uint8\",\"value\":%d},",
@@ -312,7 +312,7 @@ inline void writeInputActionDetailFields(JsonSink& sink, const InputAction& a,
                  "{\"name\":\"value\",\"type\":\"uint8\",\"value\":%d,"
                  "\"min\":%d,\"max\":%d}",
                  kindValue,
-                 hasRelease ? "[\"toggle\",\"set\",\"delta\"]"
+                 (hasRelease || absoluteSet) ? "[\"toggle\",\"set\",\"delta\"]"
                             : "[\"toggle\",\"set (needs a release)\",\"delta\"]",
                  static_cast<int>(a.value),
                  static_cast<int>(kMinActionValue), static_cast<int>(kMaxActionValue));

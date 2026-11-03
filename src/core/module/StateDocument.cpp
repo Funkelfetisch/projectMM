@@ -111,6 +111,7 @@ struct Applier {
     const JsonDoc& doc;
     StateDocumentResult& r;
     StateSource source = StateSource::Request;
+    MoonModule* prepareScope = nullptr;
     bool structural = false;
     // The modules the document being applied creates, replaces or points at a new source, whose controls appear only at the rebuild.
     static constexpr uint8_t kMaxRebuilt = 16;
@@ -371,6 +372,14 @@ struct Applier {
     bool setControl(MoonModule* m, const char* key, const JsonNode* value) {
         JsonSink sink;
         if (!wrapValue(sink, value)) return fail("out of memory");
+        // A scoped document settles enabled changes with the same subtree as its structural edits.
+        if (prepareScope && std::strcmp(key, "enabled") == 0) {
+            m->setEnabled(json::parseBool(sink.data(), "value"));
+            if (!live()) m->markDirty();
+            structural = true;
+            r.changes++;
+            return true;
+        }
         const Scheduler::SetControlResult result = s.setControl(m->name(), key, sink.data(), live());
         const bool compiles = m->declaresControlsAtPrepare();
         if (result == Scheduler::SetControlResult::Ok && compiles && m->affectsPrepare(key)) markRebuilt(m);
@@ -645,18 +654,18 @@ void closePath(JsonSink& sink, uint8_t depth) {
 }
 
 // One prepare and one full resync for the whole document, however much it changed; the scripts compile at that prepare, and the controls they declare are set right after it.
-void settle(Scheduler& scheduler, bool structural, const StateDocumentResult& r, bool live) {
+void settle(Scheduler& scheduler, bool structural, const StateDocumentResult& r, bool live, MoonModule* prepareScope) {
     if (structural) {
-        scheduler.requestPrepareTree();
+        scheduler.requestPrepare(prepareScope);
         MoonModule::notifySchemaChanged();
     }
-    if (r.deferred) scheduler.requestPrepareTree();
+    if (r.deferred) scheduler.requestPrepare(prepareScope);
     if (r.changes && !live) scheduler.noteDirty();
 }
 
 }  // namespace
 
-StateDocumentResult applyStateDocument(Scheduler& scheduler, const char* text, StateSource source) {
+StateDocumentResult applyStateDocument(Scheduler& scheduler, const char* text, StateSource source, MoonModule* prepareScope) {
     StateDocumentResult r;
     const uint8_t deferredBefore = g_deferredCount;
     JsonDoc doc;
@@ -664,12 +673,12 @@ StateDocumentResult applyStateDocument(Scheduler& scheduler, const char* text, S
     const JsonNode* root = doc.rootNode();
     if (!root || root->type != JsonType::Object) { r.ok = false; r.error = "a document is a JSON object"; return r; }
 
-    Applier a{scheduler, doc, r, source};
+    Applier a{scheduler, doc, r, source, prepareScope};
     for (int pass = 0; pass < 3 && a.runPass(pass, root); pass++) {}
     // A failed document leaves nothing waiting for the rebuild: what came before the failure stays applied, but no deferred write lands after it.
     if (!r.ok) dropDeferredSince(deferredBefore, r);
     // At boot the phases after the load set up, build and prepare the whole tree, and the file already holds what was loaded.
-    if (source != StateSource::Boot) settle(scheduler, a.structural, r, source == StateSource::Live);
+    if (source != StateSource::Boot) settle(scheduler, a.structural, r, source == StateSource::Live, prepareScope);
     return r;
 }
 

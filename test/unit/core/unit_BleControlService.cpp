@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <string>
+#include <utility>
 
 namespace {
 constexpr const char* kBleTestEpoch = "00000000000000000000000000000001";
@@ -88,7 +90,7 @@ struct BleTree {
         service.setEpochForTest(kBleTestEpoch);
         hello(kBleTestNonce);
     }
-    ~BleTree() { scheduler.release(); }
+    ~BleTree() { scheduler.release(); mm::platform::setTestBleLinkSecurity(mm::platform::BleLinkSecurity::Open); }
     std::string reply() const { return service.response(); }
     void hello(const char* nonce) {
         const std::string request = std::string("{\"$v\":1,\"$id\":1,\"$op\":\"hello\",\"$nonce\":\"") + nonce + "\"}";
@@ -474,6 +476,31 @@ TEST_CASE("BLE can change existing ambient controls but cannot replace services 
         tree.send(request, 100);
         CHECK(tree.reply().find("scope") != std::string::npos);
     }
+}
+
+TEST_CASE("BLE get names the ambient-light service and its automatic switch, so the app can toggle auto brightness") {
+    struct Ambient : mm::MoonModule {
+        bool automatic = true;
+        void defineControls() override { controls_.addControl("automatic", automatic); }
+    };
+    BleTree tree;
+    tree.send(R"({"$v":1,"$id":20,"$op":"get"})", 100);
+    CHECK(tree.reply().find("\"ambient\":") == std::string::npos);
+
+    auto* services = new mm::MoonModule(); services->setName("Services");
+    auto* ambient = new Ambient(); ambient->setName("Ambient Light"); ambient->setTypeName("Bh1750Service"); ambient->defineControls();
+    services->addChild(ambient); tree.scheduler.addModule(services);
+    tree.send(R"({"$v":1,"$id":21,"$op":"get"})", 100);
+    CHECK(tree.reply().find(R"("ambient":{"service":"Ambient Light","automatic":true})") != std::string::npos);
+
+    tree.send(R"({"$v":1,"$id":22,"$op":"patch","Services":{"Ambient Light":{"automatic":false}}})", 100);
+    tree.finishPrepare(100);
+    tree.send(R"({"$v":1,"$id":23,"$op":"get"})", 100);
+    CHECK(tree.reply().find(R"("ambient":{"service":"Ambient Light","automatic":false})") != std::string::npos);
+
+    ambient->setEnabled(false);
+    tree.send(R"({"$v":1,"$id":24,"$op":"get"})", 100);
+    CHECK(tree.reply().find("\"ambient\":") == std::string::npos);
 }
 
 TEST_CASE("BLE RPC2 new central sessions distinguish same-ID reads from a retained old-central result") {
@@ -1154,4 +1181,266 @@ TEST_CASE("BLE pixel-map RPC reads bounded current coordinates and rejects stale
     map->setEnabled(false);
     tree.send(R"({"$v":1,"$id":7,"$op":"pixel-map"})",106);
     CHECK(tree.reply().find("\"map\":null") != std::string::npos);
+}
+
+namespace {
+// A BLE product with Network, its station and its access point wired as main wires them, on the desktop's radio seams,
+// reached over a link the phone already encrypted.
+struct BleWifiTree : BleTree {
+    mm::NetworkModule* net = new mm::NetworkModule();
+    mm::WiFiModule* wifi = new mm::WiFiModule();
+    mm::AccessPointModule* ap = new mm::AccessPointModule();
+    explicit BleWifiTree(bool apAvailable = false) {
+        mm::platform::setTestNowMs(1000);
+        mm::platform::setTestBleLinkSecurity(mm::platform::BleLinkSecurity::Encrypted);
+        mm::platform::setTestWifiStaAvailable(true);
+        mm::platform::setTestWifiApAvailable(apAvailable);
+        net->setName("Network"); net->setTypeName("NetworkModule");
+        for (mm::MoonModule* child : {static_cast<mm::MoonModule*>(wifi), static_cast<mm::MoonModule*>(ap)}) {
+            child->markWiredByCode();
+            net->addChild(child);
+        }
+        net->setWiFi(wifi); net->setAccessPoint(ap); net->allowWifiToggle(true);
+        scheduler.addModule(net);
+        net->rebuildControls(); wifi->rebuildControls();
+        net->setup();
+    }
+    ~BleWifiTree() {
+        mm::platform::setTestWifiScan(nullptr, 0);
+        mm::platform::setTestWifiStaIPv4(nullptr);
+        mm::platform::setTestWifiFailure(mm::platform::WifiFailure::None);
+        mm::platform::setTestWifiStaAvailable(false);
+        mm::platform::setTestWifiApAvailable(false);
+        mm::platform::setTestNowMs(0);
+    }
+};
+
+// The reply's wifi object, the reply itself held to the 512-byte long read.
+struct WifiReply {
+    mm::json::JsonDoc doc;
+    const mm::json::JsonNode* wifi = nullptr;
+    explicit WifiReply(const std::string& text) {
+        CHECK(text.size() <= 512);
+        REQUIRE(mm::json::parse(text.c_str(), doc));
+        wifi = mm::json::member(doc, doc.rootNode(), "wifi");
+        REQUIRE(wifi != nullptr);
+    }
+    const mm::json::JsonNode* field(const char* key) const {
+        const auto* node = mm::json::member(doc, wifi, key);
+        REQUIRE(node != nullptr);
+        return node;
+    }
+    /// A string field's value, or "null".
+    std::string text(const char* key) const {
+        const auto* node = field(key);
+        return node->type == mm::json::JsonType::String ? node->str : "null";
+    }
+};
+}  // namespace
+
+TEST_CASE("BLE WiFi setup lists the networks the device's own radio found, as many per reply as fit") {
+    BleWifiTree tree;
+    mm::platform::WifiNetwork found[16] = {};
+    for (int i = 0; i < 16; ++i) {
+        std::snprintf(found[i].ssid, sizeof(found[i].ssid), "venue-network-long-name-%02d", i);
+        found[i].rssi = static_cast<int8_t>(-40 - i);
+        found[i].secured = i % 2 == 0;
+    }
+    mm::platform::setTestWifiScan(found, 16);
+    tree.wifi->remember("venue-network-long-name-03", "saved-pass");
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi-scan"})", 1000);
+    checkEnvelope(tree.reply(), 2, tree.session, "wifi-scan");
+    CHECK(WifiReply(tree.reply()).text("scan") == "waiting");
+    tree.net->tick1s();
+    std::string names;
+    uint32_t offset = 0, scanAt = 0;
+    uint16_t id = 3;
+    int pages = 0;
+    for (bool more = true; more; ++pages) {
+        const std::string request = R"({"$v":1,"$id":)" + std::to_string(id) + R"(,"$op":"wifi","$offset":)" + std::to_string(offset) + "}";
+        tree.send(request.c_str(), 1000);
+        checkEnvelope(tree.reply(), id++, tree.session, "wifi");
+        WifiReply page(tree.reply());
+        CHECK(page.text("scan") == "idle");
+        if (!pages) scanAt = static_cast<uint32_t>(mm::json::readInt(page.field("scanAt"), 0));
+        CHECK(static_cast<uint32_t>(mm::json::readInt(page.field("scanAt"), 0)) == scanAt);   // every page names the same scan
+        const auto* networks = page.field("networks");
+        REQUIRE(mm::json::arraySize(page.doc, networks) > 0);
+        for (int k = 0; k < mm::json::arraySize(page.doc, networks); ++k) {
+            const auto* row = mm::json::element(page.doc, networks, k);
+            const auto* ssid = mm::json::element(page.doc, row, 0);
+            REQUIRE(ssid != nullptr);
+            const int index = static_cast<int>(offset) + k;
+            CHECK(std::string(ssid->str) == found[index].ssid);
+            CHECK(mm::json::readInt(mm::json::element(page.doc, row, 1), 0) == found[index].rssi);
+            const int flags = (found[index].secured ? 1 : 0) | (index == 3 ? 2 : 0);   // secured, and known
+            CHECK(mm::json::readInt(mm::json::element(page.doc, row, 2), -1) == flags);
+            names += ssid->str;
+        }
+        const auto* next = page.field("next");
+        more = next->type == mm::json::JsonType::Int;
+        if (more) offset = static_cast<uint32_t>(mm::json::readInt(next, 0));
+    }
+    CHECK(scanAt > 0);
+    CHECK(names.find("venue-network-long-name-15") != std::string::npos);
+    CHECK(pages <= 3);   // sixteen long names in three round trips
+}
+
+TEST_CASE("BLE WiFi join is connect-first: the device joins at once and saves the network only once it joined") {
+    BleWifiTree tree;
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi-join","$ssid":"venue","$password":"secret-pass"})", 1000);
+    checkEnvelope(tree.reply(), 2, tree.session, "wifi-join");
+    CHECK(WifiReply(tree.reply()).text("join") == "joining");
+    CHECK(tree.wifi->knownCount() == 0);
+    tree.net->tick1s();
+    CHECK(std::string(mm::platform::testLastStaSsid()) == "venue");
+    tree.send(R"({"$v":1,"$id":3,"$op":"wifi"})", 1000);
+    {
+        WifiReply joining(tree.reply());
+        CHECK(joining.text("ssid") == "venue");
+        CHECK(joining.text("ip") == "null");
+    }
+    const uint8_t ip[4] = {192, 168, 4, 20};
+    mm::platform::setTestWifiStaIPv4(ip);
+    tree.net->tick1s();
+    tree.send(R"({"$v":1,"$id":4,"$op":"wifi"})", 1000);
+    WifiReply joined(tree.reply());
+    CHECK(joined.text("join") == "joined");
+    CHECK(joined.text("ssid") == "venue");
+    CHECK(joined.text("ip") == "192.168.4.20");
+    REQUIRE(tree.wifi->knownCount() == 1);
+    CHECK(std::string(tree.wifi->passwordAt(0)) == "secret-pass");
+}
+
+TEST_CASE("BLE WiFi join with a wrong password says so and saves nothing") {
+    BleWifiTree tree;
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi-join","$ssid":"venue","$password":"wrong-pass"})", 1000);
+    tree.net->tick1s();
+    mm::platform::setTestWifiFailure(mm::platform::WifiFailure::WrongPassword);
+    mm::platform::setTestNowMs(1000 + 11000);   // past the join window
+    tree.net->tick1s();
+    tree.send(R"({"$v":1,"$id":3,"$op":"wifi"})", 12000);
+    WifiReply failed(tree.reply());
+    CHECK(failed.text("join") == "wrong-password");
+    CHECK(failed.text("ip") == "null");
+    CHECK(tree.wifi->knownCount() == 0);
+}
+
+TEST_CASE("BLE WiFi join without a password uses the saved one, and a new password replaces it only once it joined") {
+    BleWifiTree tree;
+    tree.wifi->remember("home", "saved-pass");
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi-join","$ssid":"home"})", 1000);
+    REQUIRE(tree.wifi->joinRequest() != nullptr);
+    CHECK(std::string(tree.wifi->joinRequest()->password) == "saved-pass");
+    tree.send(R"({"$v":1,"$id":3,"$op":"wifi-join","$ssid":"home","$password":"typo-pass"})", 1000);
+    tree.net->tick1s();
+    mm::platform::setTestWifiFailure(mm::platform::WifiFailure::WrongPassword);
+    mm::platform::setTestNowMs(1000 + 11000);
+    tree.net->tick1s();
+    CHECK(std::string(tree.wifi->passwordAt(0)) == "saved-pass");
+}
+
+TEST_CASE("BLE WiFi status shows the access point the device opened when no network joined") {
+    BleWifiTree tree(true);
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi"})", 1000);
+    WifiReply status(tree.reply());
+    CHECK(status.text("ap") == tree.ap->name());
+    CHECK(status.text("ssid") == "null");
+    CHECK(status.text("ip") == "null");
+    CHECK(status.field("enabled")->type == mm::json::JsonType::Bool);
+}
+
+TEST_CASE("BLE WiFi setup is refused while the product's WiFi switch is off, which BLE turns back on") {
+    BleWifiTree tree;
+    tree.send(R"({"$v":1,"$id":2,"$op":"patch","Network":{"wifiEnabled":false}})", 1000);
+    REQUIRE(tree.reply().find("\"ok\":true") != std::string::npos);
+    tree.finishPrepare(1000);
+    tree.send(R"({"$v":1,"$id":3,"$op":"wifi-scan"})", 1000);
+    CHECK(replyString(tree.reply(), "error") == "wifi-disabled");
+    tree.send(R"({"$v":1,"$id":4,"$op":"wifi-join","$ssid":"venue","$password":"secret-pass"})", 1000);
+    CHECK(replyString(tree.reply(), "error") == "wifi-disabled");
+    CHECK(tree.wifi->joinRequest() == nullptr);
+    tree.send(R"({"$v":1,"$id":5,"$op":"wifi"})", 1000);
+    CHECK(tree.reply().find("\"enabled\":false") != std::string::npos);
+    tree.send(R"({"$v":1,"$id":6,"$op":"patch","Network":{"wifiEnabled":true}})", 1000);
+    tree.finishPrepare(1000);
+    tree.send(R"({"$v":1,"$id":7,"$op":"wifi-scan"})", 1000);
+    CHECK(tree.reply().find("\"ok\":true") != std::string::npos);
+}
+
+TEST_CASE("BLE WiFi requests with a missing or oversized name, password or field are refused before any join") {
+    BleWifiTree tree;
+    uint16_t id = 2;
+    for (const auto& [request, error] : std::initializer_list<std::pair<const char*, const char*>>{
+             {R"("$op":"wifi-join","$password":"secret-pass")", "ssid"},
+             {R"("$op":"wifi-join","$ssid":"")", "ssid"},
+             {R"("$op":"wifi-join","$ssid":"123456789012345678901234567890123")", "ssid"},
+             {R"("$op":"wifi-join","$ssid":"venue","$password":12345678)", "password"},
+             {R"("$op":"wifi-join","$ssid":"venue","$password":"1234567890123456789012345678901234567890123456789012345678901234")", "password"},
+             {R"("$op":"wifi-join","$ssid":"venue","$offset":0)", "fields"},
+             {R"("$op":"wifi-scan","$ssid":"venue")", "fields"},
+             {R"("$op":"wifi","$offset":256)", "offset"}}) {
+        const std::string text = R"({"$v":1,"$id":)" + std::to_string(id) + "," + request + "}";
+        tree.send(text.c_str(), 1000);
+        CHECK(replyString(tree.reply(), "error") == error);
+        ++id;
+    }
+    CHECK(tree.wifi->joinRequest() == nullptr);
+}
+
+TEST_CASE("BLE WiFi password travels only on an encrypted link, which the secure op asks the phone to pair") {
+    BleWifiTree tree;
+    mm::platform::setTestBleLinkSecurity(mm::platform::BleLinkSecurity::Open);
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi-join","$ssid":"venue","$password":"secret-pass"})", 1000);
+    CHECK(replyString(tree.reply(), "error") == "encryption-required");
+    CHECK(tree.wifi->joinRequest() == nullptr);
+    CHECK(mm::platform::testBleSecurityRequests() == 0);
+    tree.send(R"({"$v":1,"$id":3,"$op":"secure"})", 1000);
+    checkEnvelope(tree.reply(), 3, tree.session, "secure");
+    CHECK(replyString(tree.reply(), "link") == "pairing");
+    tree.send(R"({"$v":1,"$id":4,"$op":"secure"})", 1000);
+    CHECK(replyString(tree.reply(), "link") == "pairing");
+    CHECK(mm::platform::testBleSecurityRequests() == 1);
+    mm::platform::setTestBleLinkSecurity(mm::platform::BleLinkSecurity::Encrypted);
+    tree.send(R"({"$v":1,"$id":5,"$op":"secure"})", 1000);
+    CHECK(replyString(tree.reply(), "link") == "encrypted");
+    tree.send(R"({"$v":1,"$id":6,"$op":"wifi-join","$ssid":"venue","$password":"secret-pass"})", 1000);
+    CHECK(WifiReply(tree.reply()).text("join") == "joining");
+    CHECK(mm::platform::testBleSecurityRequests() == 0);
+}
+
+TEST_CASE("BLE WiFi join with the saved password needs no encryption, since no secret crosses the air") {
+    BleWifiTree tree;
+    mm::platform::setTestBleLinkSecurity(mm::platform::BleLinkSecurity::Open);
+    tree.wifi->remember("home", "saved-pass");
+    tree.send(R"({"$v":1,"$id":2,"$op":"wifi-join","$ssid":"home"})", 1000);
+    REQUIRE(tree.wifi->joinRequest() != nullptr);
+    CHECK(std::string(tree.wifi->joinRequest()->password) == "saved-pass");
+}
+
+TEST_CASE("BLE secure reports a failed pairing once, and the next request asks the phone again") {
+    BleTree tree;
+    mm::platform::setTestBleLinkSecurity(mm::platform::BleLinkSecurity::Failed);
+    tree.send(R"({"$v":1,"$id":2,"$op":"secure"})", 1000);
+    CHECK(replyString(tree.reply(), "link") == "failed");
+    CHECK(mm::platform::testBleSecurityRequests() == 0);
+    tree.send(R"({"$v":1,"$id":3,"$op":"secure"})", 1000);
+    CHECK(replyString(tree.reply(), "link") == "pairing");
+    CHECK(mm::platform::testBleSecurityRequests() == 1);
+    tree.send(R"({"$v":1,"$id":4,"$op":"secure","$pair":true})", 1000);
+    CHECK(replyString(tree.reply(), "error") == "fields");
+}
+
+TEST_CASE("BLE WiFi setup is offered only where a network module runs") {
+    {
+        BleTree tree;
+        tree.send(R"({"$v":1,"$id":2,"$op":"info"})", 1000);
+        CHECK(tree.reply().find("\"wifiOp\":false") != std::string::npos);
+        tree.send(R"({"$v":1,"$id":3,"$op":"wifi"})", 1000);
+        CHECK(replyString(tree.reply(), "error") == "wifi-unavailable");
+    }
+    BleWifiTree tree;
+    tree.send(R"({"$v":1,"$id":2,"$op":"info"})", 1000);
+    CHECK(tree.reply().find("\"wifiOp\":true") != std::string::npos);
+    CHECK(tree.reply().size() <= 512);
 }

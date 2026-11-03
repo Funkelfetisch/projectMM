@@ -2,6 +2,8 @@
 
 The NEBULITE dashboard offers product setup directly in its Setup section. Choices come from the same [device-model catalogue](../../mooninstaller/deviceModels.json) as the installer, filtered by the running firmware and reported chip family. A new unconfigured output opens the section; existing custom output wiring keeps it collapsed.
 
+The shared codebase currently has separate HELIO and NEBULITE firmware targets. This menu selects a compatible output profile; it does not switch firmware families or read PCB hardware-ID inputs. Automatic board identification is not implemented.
+
 Applying a choice sends one native state document containing only `System.deviceModel`, `Drivers` and `Layouts`. Output and layout children follow the selected profile and are explicitly enabled. The parent groups' enabled state is preserved. Radio, battery, audio, effects, groups and preset configuration are outside this operation. The dashboard confirms the actual model, enabled outputs, output settings and layout before reporting success; a model name alone is insufficient. An uncertain write response exposes a readback action rather than automatically replaying the write. The general state API has no atomic configuration precondition for concurrent setup clients.
 
 The generated browser table is checked against the catalogue when bundling. Regenerate it with `uv run moondeck/build/gen_product_profiles.py` after changing these product entries.

@@ -1,24 +1,26 @@
 #pragma once
 #include "core/util/BleConnectionRegistry.h"
 #include "core/util/BlePeerIo.h"
+#include "platform/platform.h"
 #include <array>
 #include <cstdio>
 #include <cstring>
 #include <new>
 
 namespace mm {
-/// Independently framed requests and long-read replies; caller owns synchronization.
+/// The heap behind the peers past the two held inline; a test substitutes one that counts or refuses.
 struct BlePeerAllocator {
     static BlePeerIo* create() { return new (std::nothrow) BlePeerIo(); }
     static void destroy(BlePeerIo* io) { delete io; }
 };
+/// Independently framed requests and long-read replies; caller owns synchronization.
 template <size_t Capacity, typename Allocator = BlePeerAllocator>
 class BlePeerTable {
     static_assert(Capacity > 0);
     using Registry = BleConnectionRegistry<Capacity>;
     using Token = typename Registry::Token;
     static constexpr size_t kInlinePeers = Capacity < 2 ? Capacity : 2;
-    struct Entry { Token token{}; BlePeerIo* io = nullptr; uint8_t subscriptions = 0; };
+    struct Entry { Token token{}; BlePeerIo* io = nullptr; uint8_t subscriptions = 0; platform::BleLinkSecurity security{}; };
 public:
     BlePeerTable() = default;
     BlePeerTable(const BlePeerTable&) = delete;
@@ -34,6 +36,7 @@ public:
             if (!entry.io) { identities_.disconnect(token); return false; }
             entry.io->reset();
             entry.subscriptions = 0;
+            entry.security = platform::BleLinkSecurity::Open;
             entry.io->publish(initial_);
             entry.token = token;
             return true;
@@ -50,6 +53,22 @@ public:
         if (index >= kInlinePeers) Allocator::destroy(entry->io);
         entry->token = {}; entry->io = nullptr; entry->subscriptions = 0;
         return true;
+    }
+    /// Record the security manager's verdict on a connection; a failure never demotes an encrypted link.
+    bool secured(uint16_t handle, bool encrypted) {
+        auto* entry = findHandle(handle);
+        if (!entry) return false;
+        if (encrypted || entry->security != platform::BleLinkSecurity::Encrypted)
+            entry->security = encrypted ? platform::BleLinkSecurity::Encrypted : platform::BleLinkSecurity::Failed;
+        return true;
+    }
+    /// The link security behind `generation`, and the connection a pairing request goes to; null once it is gone.
+    platform::BleLinkSecurity* security(uint64_t generation, uint16_t& handle) {
+        for (auto& entry : entries_) if (entry.token && entry.token.generation == generation) {
+            handle = entry.token.handle;
+            return &entry.security;
+        }
+        return nullptr;
     }
     BleMessage::Result feed(uint16_t handle, const uint8_t* bytes, size_t length) {
         auto* entry = findHandle(handle);

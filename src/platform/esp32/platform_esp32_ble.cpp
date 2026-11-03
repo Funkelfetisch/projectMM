@@ -1,6 +1,7 @@
 /// NimBLE control transport: the host task owns pairing, advertisements and notifications; the render task copies bounded messages (Espressif bleprph pattern).
 #include "platform/platform.h"
 #include "core/util/BleMessage.h"
+#include "core/util/SpscRing.h"
 #include "core/util/BlePeerTable.h"
 #include "platform/esp32/BleAdvertisementRefresh.h"
 #include "platform/esp32/BleConnectionPolicy.h"
@@ -64,6 +65,10 @@ struct BatteryGatt {
 };
 
 struct Peripheral {
+    std::atomic<bool> observing{false}, synchronized{false};
+    SpscRing<BleAdvertisement, 64> reports;
+    std::atomic<uint32_t> dropped{0};
+    ble_npl_event observerChanged;
     std::mutex mutex;
     std::array<uint8_t, 16> epoch{};
     BlePeerTable<kPeerCapacity> peers;
@@ -84,6 +89,8 @@ struct Peripheral {
     ble_gatt_svc_def services[2] = {};
     ble_npl_event changed;
     ble_npl_event advertisementChanged;
+    ble_npl_event secure;
+    std::atomic<uint16_t> securing{BLE_HS_CONN_HANDLE_NONE};
     std::array<uint8_t, 13> advertisement{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255};
     std::array<uint8_t, 13> advertised{};
     uint32_t advertisementAt = 0;
@@ -138,6 +145,7 @@ bool validIdentity(const char* name, const char* identity) {
 
 int gapEvent(ble_gap_event* event, void* arg);
 void advertise();
+void updateObserver(ble_npl_event*);
 int accessBattery(uint16_t, uint16_t, ble_gatt_access_ctxt* context, void* arg);
 void notifyBatteries(ble_npl_event* event);
 
@@ -232,6 +240,17 @@ void requestConnectionHint(uint16_t handle) {
 int gapEvent(ble_gap_event* event, void* arg) {
     auto* peripheral = static_cast<Peripheral*>(arg);
     switch (event->type) {
+        case BLE_GAP_EVENT_DISC:
+            if (peripheral->observing.load() && event->disc.length_data <= 31) {
+                BleAdvertisement report; report.receivedMs = millis();
+                report.length = event->disc.length_data; report.rssi = event->disc.rssi;
+                report.addressType = event->disc.addr.type;
+                std::memcpy(report.address, event->disc.addr.val, 6);
+                std::memcpy(report.data, event->disc.data, report.length);
+                if (peripheral->reports.push(&report, 1) != 1) peripheral->dropped.fetch_add(1);
+            }
+            break;
+        case BLE_GAP_EVENT_DISC_COMPLETE: updateObserver(nullptr); break;
         case BLE_GAP_EVENT_CONNECT:
             ESP_LOGI(kBleTag, "connect status=%d handle=%u", event->connect.status,
                      static_cast<unsigned>(event->connect.conn_handle));
@@ -278,9 +297,12 @@ int gapEvent(ble_gap_event* event, void* arg) {
             }
             break;
         }
-        case BLE_GAP_EVENT_ENC_CHANGE:
+        case BLE_GAP_EVENT_ENC_CHANGE: {
             ESP_LOGI(kBleTag, "encryption status=%d", event->enc_change.status);
+            std::lock_guard<std::mutex> lock(peripheral->mutex);
+            peripheral->peers.secured(event->enc_change.conn_handle, event->enc_change.status == 0);
             break;
+        }
         case BLE_GAP_EVENT_REPEAT_PAIRING: {
             peripheral->repeatRequests.fetch_add(1);
             const uint16_t repairHandle = peripheral->connectionCount.load() == 1 ? peripheral->connection.load() : BLE_HS_CONN_HANDLE_NONE;
@@ -412,6 +434,28 @@ void notifyChanged(ble_npl_event* event) {
             ble_gatts_notify_custom(targets[n], peripheral->valueHandle, buffer);
 }
 
+// The peripheral asks; the central runs the pairing, and its verdict arrives as BLE_GAP_EVENT_ENC_CHANGE.
+void requestSecurity(ble_npl_event* event) {
+    auto* peripheral = static_cast<Peripheral*>(ble_npl_event_get_arg(event));
+    const uint16_t connection = peripheral->securing.exchange(BLE_HS_CONN_HANDLE_NONE);
+    if (connection == BLE_HS_CONN_HANDLE_NONE) return;
+    const int status = ble_gap_security_initiate(connection);
+    if (status == 0 || status == BLE_HS_EALREADY) return;
+    ESP_LOGW(kBleTag, "security request: %d", status);
+    std::lock_guard<std::mutex> lock(peripheral->mutex);
+    peripheral->peers.secured(connection, false);
+}
+
+void updateObserver(ble_npl_event*) {
+    if (!active || !active->synchronized.load()) return;
+    if (active->observing.load() && !ble_gap_disc_active()) {
+        ble_gap_disc_params params{}; params.itvl = 16; params.window = 16; params.passive = 1;
+        params.filter_duplicates = 0; params.disable_observer_mode = 0;
+        const int rc = ble_gap_disc(active->addressType, BLE_HS_FOREVER, &params, gapEvent, active);
+        if (rc) ESP_LOGW(kBleTag, "observer start: %d", rc);
+    } else if (!active->observing.load() && ble_gap_disc_active()) ble_gap_disc_cancel();
+}
+
 void synchronize() {
     if (!active) return;
     int status = ble_hs_util_ensure_addr(0);
@@ -420,11 +464,37 @@ void synchronize() {
     // Reinitialize the RAM-only changed range on every boot, including removal of BAS from an existing bond's database.
     ble_svc_gatt_changed(1, 0xffff);
     recordBondStorage(*active);
+    active->synchronized.store(true);
     advertise();
+    updateObserver(nullptr);
 }
 
 void hostTask(void*) { nimble_port_run(); nimble_port_freertos_deinit(); }
 }  // namespace
+
+bool bleObserverStart(BleObserverHandle& handle) {
+    if (handle.impl && handle.impl == active && active->observing.load()) return true;
+    handle.impl = nullptr;
+    if (!active || active->observing.exchange(true)) return false;
+    BleAdvertisement stale;
+    while (active->reports.pop(&stale, 1)) {}
+    active->dropped.store(0); handle.impl = active;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &active->observerChanged);
+    return true;
+}
+bool bleObserverStop(BleObserverHandle& handle) {
+    if (handle.impl && handle.impl == active) {
+        active->observing.store(false);
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &active->observerChanged);
+    }
+    handle.impl = nullptr; return true;
+}
+bool bleObserverReceive(BleObserverHandle& handle, BleAdvertisement& report) MM_NONBLOCKING {
+    return handle.impl && handle.impl == active && active->observing.load() && active->reports.pop(&report, 1) == 1;
+}
+uint32_t bleObserverDropped(const BleObserverHandle& handle) MM_NONBLOCKING {
+    return handle.impl && handle.impl == active ? active->dropped.load() : 0;
+}
 
 bool bleControlAvailable() MM_NONBLOCKING { return true; }
 
@@ -453,9 +523,11 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     esp_fill_random(peripheral->epoch.data(), peripheral->epoch.size());
     active = peripheral;
     ble_hs_cfg.sync_cb = synchronize;
+    ble_hs_cfg.reset_cb = [](int) { if (active) active->synchronized.store(false); };
+    ble_npl_event_init(&peripheral->observerChanged, updateObserver, peripheral);
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
-    // The ordinary lighting service is open to nearby controllers. It does
-    // not request persistent keys or require pairing for its GATT operations.
+    // The ordinary lighting service is open to nearby controllers. It does not
+    // request persistent keys, and pairs only when bleControlSecurity asks for a secret.
     ble_hs_cfg.sm_bonding = 0;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
@@ -488,6 +560,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_hs_cfg.store_status_arg = peripheral;
     ble_npl_event_init(&peripheral->changed, notifyChanged, peripheral);
     ble_npl_event_init(&peripheral->advertisementChanged, advertisementChanged, peripheral);
+    ble_npl_event_init(&peripheral->secure, requestSecurity, peripheral);
     handle.impl = peripheral;
     nimble_port_freertos_init(hostTask);
     return true;
@@ -603,6 +676,23 @@ bool bleControlAllowRepair(BleControlHandle& handle) MM_NONBLOCKING {
     if (!lock.owns_lock() || !BleRepeatPairing::mayArm(observed, peripheral->connection.load(), peripheral->connectionCount.load())) return false;
     peripheral->repeatPairing.arm(pairingTimeMs());
     return true;
+}
+
+BleLinkSecurity bleControlSecurity(BleControlHandle& handle, uint64_t generation, bool request) MM_NONBLOCKING {
+    auto* peripheral = static_cast<Peripheral*>(handle.impl);
+    if (!peripheral) return BleLinkSecurity::Open;
+    std::unique_lock<std::mutex> lock(peripheral->mutex, std::try_to_lock);
+    uint16_t connection = BLE_HS_CONN_HANDLE_NONE;
+    BleLinkSecurity* link = lock.owns_lock() ? peripheral->peers.security(generation, connection) : nullptr;
+    if (!link) return BleLinkSecurity::Open;
+    if (!request) return *link;
+    bool ask = false;
+    const BleLinkSecurity reported = requestLinkSecurity(*link, ask);
+    if (ask) {
+        peripheral->securing.store(connection);
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->secure);
+    }
+    return reported;
 }
 
 bool bleControlPublishBattery(BleControlHandle& handle, const BleBatterySnapshot& batteries) MM_NONBLOCKING {

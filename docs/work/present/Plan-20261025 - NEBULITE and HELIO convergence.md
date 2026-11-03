@@ -47,3 +47,29 @@ Veit explicitly requested publication as a MoonModules/MoonLight pull request on
 The common product tree is based on upstream `abcdaec97adcb5664081d056628e6ea34309f8dc`; a fresh remote main check on 26 October still returns that SHA. The scoped BLE contribution is PR158. Installed HELIO RPC2 image `a41701b9` passes native session and software-reboot checks. The existing app owner reports a real Native132 connection and catalogue discovery; Native133 first-pair tests retain the exclusive device lease. Firmware performs no device writes before explicit handback.
 
 The next product preset/UI candidate passes the combined host suite and both native builds. It is preserved rather than installed during that lease. [Product presets and usage](Plan-20261026%20-%20product%20presets%20and%20usage.md) owns its exact acceptance and open telemetry work; [battery and groups](Plan-20261026%20-%20HELIO%20NEBULITE%20battery%20and%20groups.md) owns app, per-pack and physical group acceptance. Earlier checkpoints in this plan remain dated evidence, not the current installed identity.
+
+## Checkpoint, 2 November 2026: shared handset
+
+Product boot now wires the shared handset as `Services.Remote` for HELIO and NEBULITE targets. Saved settings, disabled state and editable key bindings overlay that service. White commands and static-mode confirmation support RGB strips alongside a separate white output; native RGBW retains its dedicated white channel. See [handset behavior](../../reference/helio-remote.md).
+
+The `nebulite-s3` desktop passes 14 handset cases (2,197 assertions), four BLE remote transport cases (68 assertions), and 219 driver cases (3,197 assertions). An isolated cold boot and filesystem restart retain a disabled Remote, a custom interval and a custom White binding, with exactly one Remote service. The pinned ESP-IDF 6.1 S3 build passes: application image 2,952,688 bytes, SHA-256 `ccb06ad19db6d1ddc41ddc766d5b7c7e1c0bbac4fa46fd643eaf9c045c5b6746`, with 193,040 bytes free in its application partition. Evidence and the bench candidate are preserved in `/home/veit/Documents/ChatGPT/HELIO/nebulite-handset-20261102/`.
+
+No device was flashed for this checkpoint. Croptop and Jacket/Vest retain their source-derived profiles and need identified-board, handset-radio and physical-output acceptance. The classic ESP32 target remains experimental with no qualified product pin profile.
+
+### Hardware-ID dependency
+
+The shared firmware does not yet read the three ternary hardware-ID inputs; `System.deviceModel` remains configuration. The first export audit found identical fitted dividers; that historical snapshot is preserved in `hardware-id-audit.json`. Following the delivered PCB-owner handoff, the owner implemented distinct fitting codes in the saved native S/M/L originals on 2 November. The current native BOMs were independently rechecked:
+
+| HELIO size | HW2/HW1/HW0 | Excluded resistors |
+|---|---|---|
+| S / 30 cm | 010 | R22, R26 |
+| M / 50 cm | 020 | R22, R25, R26 |
+| L / 70 cm | 100 | R22, R24 |
+
+The PCB owner's native BOM and strict DRC proofs are under `/home/veit/git/helio-pcb/audit-work/hw-id-implementation-20261102/`. These fitting changes do not update existing physical boards, production exports, mixed panels or the JLC cart. Legacy NEBULITE code uniqueness remains open. The middle voltage requires qualified sampling before Wi-Fi for the documented GPIO14/15/16 ADC2 assignment; see Espressif's [S3 oneshot driver guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32s3/api-reference/peripherals/adc_oneshot.html). Firmware does not probe these pins or select outputs automatically.
+
+### USB installation, 2 November 2026
+
+With fresh owner authorization, the connected USB board was identified as ESP32-S3, 8 MB flash, MAC `DC:54:75:CC:82:00`. A complete 8 MB pre-flash backup was retained before installing `nebulite-s3` through MoonDeck's flash wrapper. Its normal native build refresh recompiled only `build_info.cpp`, updating the build timestamp and resulting binary identity; the tested application sources stayed unchanged. The installed 2,952,688-byte image has SHA-256 `55c08b6367e7907b63a18d263413ebd9ede760565fdb9e4af8fdc55b645fdf29` and is preserved as `nebulite-s3-usb-installed.bin`. The write completed with verified data hashes. The board rebooted successfully, answered Improv, and exposed RPC2 BLE identity with the same canonical MAC and firmware `nebulite-s3`. The serial log shows both BLE and Remote services running. This is bench firmware/runtime acceptance; physical handset reception and garment output remain unqualified for this installation.
+
+The board is unprovisioned and starts access point `MM-8200`, with its local page at `http://4.3.2.1/` after joining that AP. The host remains on its existing Ethernet network; HTTP reachability from that network was not established. Current setup selects a compatible NEBULITE product profile within the installed target; it does not yet offer a cross-family HELIO/NEBULITE selector. `usb-acceptance.json` and the `usb-*` logs in the evidence directory record the installation and its limits.

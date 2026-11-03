@@ -178,6 +178,11 @@ public:
     }
     /// How many bytes the buffer or slice holds; a socket sink holds none, and `written()` counts what went out.
     size_t size() const { return fixed_ ? fixedLen_ : heapLen_; }
+    /// Bytes a fixed slice still takes before overflow trips, so a paged writer fills a page without overflowing it; the growing and socket modes have no ceiling.
+    size_t room() const {
+        if (!fixed_) return SIZE_MAX;
+        return overflowed_ || fixedLen_ + 1 >= fixedCap_ ? 0 : fixedCap_ - 1 - fixedLen_;
+    }
 
     /// Hand the block to the caller and give up ownership, so a large built document is not copied out; nothing in the other modes.
     char* detach() {

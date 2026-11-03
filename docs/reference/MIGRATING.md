@@ -44,6 +44,14 @@ A MatrixPortal ran the `esp32s3-zero` image, which keeps working on it but uses 
 
 A universe carries exactly `channels_per_universe` channels, 510 by default, as Network Receive and xLights read them, so a fixture can straddle two universes. It was cut down to whole fixtures, 508 channels for RGBW, which a receiver reading 510 placed one channel off from the second universe on. RGB at 510 is unchanged.
 
+### A NEBULITE garment boots with its radio off
+
+**Action: *nothing* on a device that already holds a saved `wifiEnabled`. On a fresh or erased one, reach it with the NEBULITE app and turn WiFi on there when a browser is wanted.**
+
+`nebulite-s3` and `nebulite-esp32` start with `Network.wifiEnabled` off, where every firmware started with it on. No station joins, no access point opens and no WiFi provisioning runs until the switch is turned on, so a garment spends no current on a radio while it is only lighting, which is most of its life. The app carries that switch, as the `wifiToggle` in its BLE identity has always said, and the owner turns it on for an update or a venue. Once it is on, the radio also sleeps between beacons, which the new advanced `wifiPowerSave` control holds; it costs latency on anything the device did not ask for, so every other firmware leaves it off.
+
+A device that already holds a saved `wifiEnabled` keeps it, because the saved value overlays the default: a garment the owner switched on stays switched on. Only a device with no saved value takes the new one. The installer still configures a fresh garment over USB, that path being serial rather than WiFi. HELIO and every generic MoonLight build are unchanged.
+
 ### A driver's `count` of 0 reads to the last light, and the window counts past 65535
 
 **Action: *re-set a control* on a display of more than 65535 lights. Where a driver's `count` is 65535, the old default reading to the last light, set it to 0. A 65535 set as a window's length stays.**

@@ -1342,7 +1342,7 @@ bool wifiStaInit(const char* ssid, const char* password) {
     // DHCP hostname (option 12), after esp_wifi_start: the STA netif isn't "ready" (set_hostname returns IF_NOT_READY) until the WiFi driver glue starts it. Association + DHCP happen later still, so the name lands in the lease request.
     applyHostname(staNetif_);
 
-    // Disable modem power saving, whose default sleeps the radio between beacons and stalls socket handling. The whole lineage turns it off, a wall-powered controller having no battery to save. Non-fatal if it fails.
+    // Start every join awake: the stack's default sleeps the radio between beacons and stalls socket handling, and a wall-powered controller has no battery to save. A battery product lifts this once its station is up. Non-fatal if it fails.
     if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK) {
         ESP_LOGW(NET_TAG, "WiFi power-save disable failed: %s", esp_err_to_name(err));
     }
@@ -1557,6 +1557,17 @@ bool wifiSetTxPower(int8_t quarterDbm) {
     return true;
 }
 
+bool wifiSetPowerSave(bool sleepBetweenBeacons) {
+    if (!wifiInitDone_) return false;   // esp_wifi_set_ps needs the stack started, as the join path's own call does
+    esp_err_t err = esp_wifi_set_ps(sleepBetweenBeacons ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(NET_TAG, "WiFi power-save %s failed: %s", sleepBetweenBeacons ? "on" : "off", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(NET_TAG, "WiFi power-save %s", sleepBetweenBeacons ? "modem sleep between beacons" : "off");
+    return true;
+}
+
 #else // MM_NO_WIFI: Ethernet-only build: WiFi compiled out.
 
 // Stubs so the linker is satisfied: platform.h declares these and NetworkModule's discarded `if constexpr (hasWiFi)` branch still ODR-uses them. With hasWiFi false the calls are not generated, so --gc-sections drops the stubs.
@@ -1578,6 +1589,8 @@ uint32_t wifiApClientCount() { return 0; }
 int wifiTxPower() { return 0; }
 // Match the API contract: 0 is a successful no-op even when WiFi isn't compiled in. Any non-zero value (actual cap attempt) returns false because there's no radio to set.
 bool wifiSetTxPower(int8_t quarterDbm) { return quarterDbm == 0; }
+// There is no radio to put to sleep, and the caller's `if constexpr (hasWiFi)` branch never reaches this.
+bool wifiSetPowerSave(bool /*sleepBetweenBeacons*/) { return false; }
 
 #endif // MM_NO_WIFI
 

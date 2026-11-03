@@ -14,4 +14,24 @@ bool bleControlConnected(const BleControlHandle&) MM_NONBLOCKING { return false;
 bool bleControlPairingState(const BleControlHandle&, BlePairingState& state) MM_NONBLOCKING { state = {}; return false; }
 bool bleControlLinkState(const BleControlHandle&, BleLinkState& state) MM_NONBLOCKING { state = {}; return false; }
 bool bleControlAllowRepair(BleControlHandle&) MM_NONBLOCKING { return false; }
+#ifndef ESP_PLATFORM
+namespace { BleLinkSecurity testLink = BleLinkSecurity::Open; uint32_t testSecurityRequests = 0; }
+void setTestBleLinkSecurity(BleLinkSecurity link) { testLink = link; testSecurityRequests = 0; }
+uint32_t testBleSecurityRequests() { return testSecurityRequests; }
+BleLinkSecurity bleControlSecurity(BleControlHandle&, uint64_t, bool request) MM_NONBLOCKING {
+    bool ask = false;
+    const BleLinkSecurity reported = request ? requestLinkSecurity(testLink, ask) : testLink;
+    testSecurityRequests += ask;
+    return reported;
+}
+#else
+BleLinkSecurity bleControlSecurity(BleControlHandle&, uint64_t, bool) MM_NONBLOCKING { return BleLinkSecurity::Open; }
+#endif
 }  // namespace mm::platform
+
+namespace mm::platform {
+bool bleObserverStart(BleObserverHandle&) { return false; }
+bool bleObserverStop(BleObserverHandle& h) { h.impl = nullptr; return true; }
+bool bleObserverReceive(BleObserverHandle&, BleAdvertisement&) MM_NONBLOCKING { return false; }
+uint32_t bleObserverDropped(const BleObserverHandle&) MM_NONBLOCKING { return 0; }
+}

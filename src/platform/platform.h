@@ -791,6 +791,13 @@ bool wifiSetTxPower(int8_t quarterDbm);
 int8_t testLastTxPower();
 #endif
 
+/// Let the radio sleep between beacons, or keep it awake: sleeping cuts what a battery spends holding an idle association and costs latency on anything unasked for, so a controller streaming Art-Net stays awake. Needs the station started.
+bool wifiSetPowerSave(bool sleepBetweenBeacons);
+#ifndef ESP_PLATFORM   // a host-test seam, which no ESP32 code calls
+/// What was last asked of the radio's power saving, for a host test.
+bool testLastWifiPowerSave();
+#endif
+
 /// Advertise this device over mDNS as `_http._tcp` and `_wled._tcp`, which is how the WLED app and Home Assistant find it.
 bool mdnsInit(const char* deviceName);
 /// Announce one more service on this board's name, such as `_apple-midi`/`_udp`, now and after every mdnsInit; a second call moves its port.
@@ -920,8 +927,17 @@ inline constexpr size_t kBleControlPeerCapacity = CONFIG_BT_NIMBLE_MAX_CONNECTIO
 inline constexpr size_t kBleControlPeerCapacity = 2;
 #endif
 static_assert(kBleControlPeerCapacity >= 1 && kBleControlPeerCapacity <= 8);
-/// One GATT control peripheral, independent of Wi-Fi association.
+/// One open GATT control peripheral, independent of Wi-Fi association, which encrypts a link on request.
 struct BleControlHandle { void* impl = nullptr; };
+/// How far one connection's encryption has come: control works on any link, and secrets travel only on Encrypted.
+enum class BleLinkSecurity : uint8_t { Open, Pairing, Encrypted, Failed };
+/// One request for encryption: an open link starts pairing and sets `ask`, and a failure is reported once before the link counts as open again.
+inline BleLinkSecurity requestLinkSecurity(BleLinkSecurity& link, bool& ask) MM_NONBLOCKING {
+    ask = link == BleLinkSecurity::Open;
+    const BleLinkSecurity reported = ask ? BleLinkSecurity::Pairing : link;
+    link = link == BleLinkSecurity::Failed ? BleLinkSecurity::Open : reported;
+    return reported;
+}
 /// Host-lifetime repeat-pairing counters, with no peer addresses or key material.
 struct BlePairingState {
     uint32_t requests = 0; ///< Repeat requests received by the native callback.
@@ -975,6 +991,14 @@ bool bleControlPairingState(const BleControlHandle& handle, BlePairingState& sta
 bool bleControlLinkState(const BleControlHandle& handle, BleLinkState& state) MM_NONBLOCKING;
 /// Authorize one peer-bond replacement during the next three minutes; no keys are deleted here.
 bool bleControlAllowRepair(BleControlHandle& handle) MM_NONBLOCKING;
+/// The link security of the connection behind `generation`; `request` asks that central to pair (SMP Security Request, no bond).
+BleLinkSecurity bleControlSecurity(BleControlHandle& handle, uint64_t generation, bool request) MM_NONBLOCKING;
+#ifndef ESP_PLATFORM   // host-test seams, which no ESP32 code calls
+/// Make every connection start from this link security, as the security manager leaves it.
+void setTestBleLinkSecurity(BleLinkSecurity link);
+/// The pairing requests sent since the last setTestBleLinkSecurity.
+uint32_t testBleSecurityRequests();
+#endif
 
 /// One UDP socket: the wire every light protocol sends and receives on.
 class UdpSocket {
@@ -1680,3 +1704,26 @@ void setTestVideoCaptureColor(uint8_t r, uint8_t g, uint8_t b);
 void setTestVideoCaptureDecodeFails(bool fail);
 
 } // namespace mm::platform
+
+namespace mm::platform {
+/// One passive observer sharing the peripheral's NimBLE host; payloads are copied without AD parsing.
+struct BleObserverHandle { void* impl = nullptr; };
+/// A legacy advertisement as received, including payloads that are not valid AD field sequences.
+struct BleAdvertisement {
+    uint32_t receivedMs = 0;
+    uint8_t address[6] = {};
+    uint8_t addressType = 0;
+    int8_t rssi = 0;
+    uint8_t length = 0;
+    uint8_t data[31] = {};
+};
+/// Start observation without duplicate, service or name filters; one observer owns its receive queue.
+bool bleObserverStart(BleObserverHandle& handle);
+/// Release observation; a failed last-host stop retains the handle for retry.
+bool bleObserverStop(BleObserverHandle& handle);
+/// Take one bounded report, false when empty; no radio work or USB output runs on this path.
+bool bleObserverReceive(BleObserverHandle& handle, BleAdvertisement& report) MM_NONBLOCKING;
+/// Reports dropped because the bounded consumer queue filled.
+uint32_t bleObserverDropped(const BleObserverHandle& handle) MM_NONBLOCKING;
+
+}

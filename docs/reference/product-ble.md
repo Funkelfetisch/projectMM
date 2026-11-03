@@ -23,7 +23,7 @@ After connecting, the current ESP32 source requests four seconds of link supervi
 
 On the 29 October bench image `759d30f2…`, a Mi9 app and a Linux client connected at the same time, received distinct sessions in the same epoch, and Mi9 obtained correlated read-only results while Linux remained connected. This establishes that observed overlap, not a two-phone or concurrent-write acceptance. The subsequent reconnect sequence and Linux final read did not complete before the test timeout. The newer source's advertising restart change has not been installed in this image.
 
-The current source candidate exposes lighting GATT reads and commands without requiring pairing or encryption; public identity reports `security: "open"`. Any nearby compatible client can control the permitted functions, including the Wi-Fi on/off switch. Credentials, files and firmware upload are outside this BLE channel. Epochs, sessions, challenges and group names correlate work; they are not account ownership, an exclusive owner lock or additional authentication. A separate optional access-control design remains unimplemented. Existing bonds are not deliberately deleted; the behavior of existing and newly connecting phones requires device testing.
+The current source candidate exposes lighting GATT reads and commands without requiring pairing or encryption; public identity reports `security: "open"`. Any nearby compatible client can control the permitted functions, including the Wi-Fi on/off switch. Files and firmware upload are outside this BLE channel. A Wi-Fi password travels only on a link the phone encrypted, as [Wi-Fi setup](#wi-fi-setup) describes. Epochs, sessions, challenges and group names correlate work; they are not account ownership, an exclusive owner lock or additional authentication. A separate optional access-control design remains unimplemented. Existing bonds are not deliberately deleted; the behavior of existing and newly connecting phones requires device testing.
 
 The RPC peer container is capacity-parameterized: a host test exercises eight independent sessions, retained replies and one disconnected client's resume while the other seven remain active. The transport peer table, active-owner snapshot and RPC session allocation share the configured radio capacity, with a compile-time maximum of eight. The S3 source configuration requests eight simultaneous links and nine controller activities; the classic ESP32 configuration remains at two links. Runtime RAM, packet buffers and coexistence with Wi-Fi and LED rendering need physical qualification; this is not an eight-phone acceptance claim.
 
@@ -96,12 +96,12 @@ Every other request requires `$e`, nonzero uint32 `$s`, `$v:1`, `$id:1..65535` a
 ```
 
 ```json
-{"v":1,"id":2,"ok":true,"now":1100,"e":"00112233445566778899aabbccddeeff","s":1,"r":3,"op":"get","state":{"on":true,"brightness":96,"palette":0,"wifiEnabled":true,"ambientTarget":null},"queued":false,"group":"","pending":null,"terminal":null}
+{"v":1,"id":2,"ok":true,"now":1100,"e":"00112233445566778899aabbccddeeff","s":1,"r":3,"op":"get","state":{"on":true,"brightness":96,"palette":0,"wifiEnabled":true,"ambientTarget":null,"ambient":{"service":"Ambient Light","automatic":true}},"queued":false,"group":"","pending":null,"terminal":null}
 ```
 
-`state` contains available actual master `on`, `brightness`, numeric `palette`, `wifiEnabled` and `ambientTarget`. Missing controls remain omitted; `ambientTarget` is null without an active valid sensor override. `queued:true` means a job waits for its deadline. During preparation it becomes false while `pending.state` is `applying`; it does not prove completion.
+`state` contains available actual master `on`, `brightness`, numeric `palette`, `wifiEnabled` and `ambientTarget`. Missing controls remain omitted; `ambientTarget` is null without an active valid sensor override. `ambient` names the enabled ambient-light service and its `automatic` switch, which a `patch` of `{"Services":{"<service>":{"automatic":false}}}` turns off; it is absent without such a service. `queued:true` means a job waits for its deadline. During preparation it becomes false while `pending.state` is `applying`; it does not prove completion.
 
-`info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired` and `profileOp` in its common envelope. The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
+`info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired`, `profileOp` and `wifiOp` in its common envelope. The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
 
 An `info` exchange from the source candidate, with illustrative session and time values:
 
@@ -141,17 +141,64 @@ Allowed roots are `Drivers`, `Effects`, the single network field `Network:{"wifi
 
 With ambient control active, master brightness is the manual fallback. An explicitly manual operation also patches the actual existing BH1750 service, for example `Services:{"Ambient Light":{"automatic":false}}`. The app must not silently disable automation merely because it writes brightness. Native W remains independent of RGB. Some apply-time errors can follow earlier mutations, so after failure read actual state rather than assuming rollback.
 
+## Wi-Fi setup
+
+When `info.wifiOp` is true, three operations set up Wi-Fi with the device's own radio. They use the network module's scan, its connect-first join, and its cascade, which tries the known networks first and opens the access point when none joins. Each reply carries the same `wifi` object after the common envelope:
+
+| Field | Meaning |
+|---|---|
+| `enabled` | False while the product's Wi-Fi switch is off; `wifi-scan` and `wifi-join` then fail `wifi-disabled` |
+| `ssid` | The network the station has joined or is joining, or null |
+| `ip` | The station's IPv4 address once it has one, or null |
+| `ap` | The device's own access point name while it is open, or null |
+| `join` | How the last join went: `joining`, `joined`, `wrong-password`, `not-found`, `failed` or `refused`; null before the first |
+| `scan` | `waiting` for the radio, `scanning` or `idle` |
+| `scanAt` | Device uptime in milliseconds when the last scan finished; 0 before the first |
+| `networks` | Scanned networks from the offset, each `[ssid, rssi, flags]`: flag 1 marks a secured network, flag 2 a known one |
+| `next` | Index of the first network on the following page, or null at the end |
+
+`wifi` takes an optional `$offset` from 0 to 255 and returns as many whole networks as fit the 512-byte response, strongest first. A network that hides its name is left out, and each name appears once. When `scanAt` differs from the first page's, a newer scan finished: read again from offset 0.
+
+`wifi-scan` takes no fields. The device scans by itself only when its access point opens. A scan takes the radio off-channel for a few seconds, which can drop network light input while connected. Read `wifi` until `scan` is `idle`: a `scanAt` newer than the one in the `wifi-scan` reply carries the new result, and an unchanged one means the radio could not scan.
+
+`wifi-join` takes `$ssid` of 1 to 32 bytes and an optional `$password` of at most 63 bytes, which needs an encrypted link. The device joins at once and saves the network only once it joined, as its own page does. Without `$password`, a known network joins with its saved password and an unknown one joins as open. A password given for a known network replaces the saved one only after a successful join. Read `wifi` until `join` leaves `joining`, which takes up to the station's join window plus its wait for a lease. When the network does not join, the device tries its known networks and then opens its access point.
+
+```json
+{"$v":1,"$e":"00112233445566778899aabbccddeeff","$s":1,"$id":9,"$op":"wifi-join","$ssid":"venue","$password":"secret-pass"}
+```
+
+```json
+{"v":1,"id":9,"ok":true,"now":5000,"e":"00112233445566778899aabbccddeeff","s":1,"r":10,"op":"wifi-join","wifi":{"enabled":true,"ssid":null,"ip":null,"ap":"MM-ABCD","join":"joining","scan":"idle","scanAt":4000,"networks":[["home",-48,3],["venue",-60,1]],"next":null}}
+```
+
+A password travels only on an encrypted link. On an open link, `wifi-join` with `$password` fails `encryption-required` and the device discards the password, which has already crossed the air, so a client encrypts first. `secure` takes no fields and asks the phone to pair: the device sends an SMP Security Request, and the phone's LE Secure Connections pairing, Just Works without a bond, encrypts this connection until it ends. The reply carries `link`:
+
+| `link` | Meaning |
+|---|---|
+| `pairing` | The phone was asked and is pairing; it may show its own prompt first |
+| `encrypted` | The password may follow on this connection |
+| `failed` | The phone declined, or the pairing timed out; told once, and the next `secure` asks again |
+| `open` | The device could not read the link just now; the next `secure` asks |
+
+Read `secure` about once a second until `link` leaves `pairing`, allowing the time a person takes to accept the prompt. Just Works pairing protects the password from a listener, not from an attacker who relays the connection while it pairs. A join with the saved password sends no secret and needs no encryption.
+
+```json
+{"v":1,"id":8,"ok":true,"now":4900,"e":"00112233445566778899aabbccddeeff","s":1,"r":10,"op":"secure","link":"encrypted"}
+```
+
+The product's Wi-Fi switch is the `Network.wifiEnabled` patch under [Live and saved changes](#live-and-saved-changes). A build without a network module reports `info.wifiOp:false` and fails these operations with `wifi-unavailable`. Malformed fields fail `ssid`, `password`, `offset` or `fields` before any join starts. `secure` arrived with `wifiOp`, so `info.wifiOp:true` also means `secure` is there.
+
 ## Complete scenes and their controls
 
-Product scene callbacks use one canonical scene source for firmware and dashboard data. The candidate catalog contains the 23 HELIO entries plus `solid`; discover its actual content and generated revision rather than assuming a fixed count or WLED effect numbers. `scenes` takes `$offset`, starting at0, and returns one entry per page:
+Product scene callbacks use one canonical scene source for firmware and dashboard data. The candidate catalog contains the 23 HELIO entries plus `solid`; discover its actual content and generated revision rather than assuming a fixed count or WLED effect numbers. `scenes` takes `$offset`, starting at 0, and returns as many whole entries as fit the 512-byte response:
 
 ```json
 {"$v":1,"$e":"00112233445566778899aabbccddeeff","$s":1,"$id":5,"$op":"scenes","$offset":0}
 ```
 
-The envelope adds `catalog`, `scenes:[{"id":"solid","name":"Solid RGBW","audio":false,"rgbw":true}]` and `next:1`, or a null next cursor at the end. IDs are stable strings such as `solid` and `colortwinkles`. The `audio` flag identifies the scene's input dependency; it does not transmit phone audio. `rgbw` means the scene exposes native W, while actual output channels come from `info`.
+The envelope adds `catalog`, `scenes:[{"id":"solid","name":"Solid RGBW","audio":false,"rgbw":true},…]` and `next`, the index of the first scene on the following page, or a null next cursor at the end. IDs are stable strings such as `solid` and `colortwinkles`. The `audio` flag identifies the scene's input dependency; it does not transmit phone audio. `rgbw` means the scene exposes native W, while actual output channels come from `info`.
 
-`scene-info` takes `$scene` and `$offset` and returns `catalog`, `scene`, `controls` and `next`. A page contains at most one actual descriptor: `name`, `type`, `default`, numeric `min`/`max` when applicable. Select/palette pages also contain `optionCount`, `optionOffset` and `options:[{"value":0,"label":"…"}]`. Each option is a separate continuation page with the same control name; merge those pages by that name and their option offsets. Follow `next` until null. Defaults and scene identity come from the generated catalog; types, ranges and options come from registered firmware controls.
+`scene-info` takes `$scene` and `$offset` and returns `catalog`, `scene`, `controls` and `next`. A page holds as many descriptors as fit the 512-byte response, each with `name`, `type`, `default` and numeric `min`/`max` when applicable. A select or palette descriptor also carries `optionCount`, `optionOffset` and `options:[{"value":0,"label":"…"},…]`, its options contiguous from `optionOffset`. A list that does not fit continues as the first descriptor of the next page, under the same control name with a later `optionOffset`; merge by that name and offset. The cursor counts parts, one per plain control and one per option, so a scene with a 60-entry palette takes about thirteen pages rather than seventy, and the 24-scene catalog five rather than 24. Follow `next` until null. Defaults and scene identity come from the generated catalog; types, ranges and options come from registered firmware controls.
 
 `scene` requires `$scene`, `$catalog`, `$live`, optional `controls` and optional `$at`/`$group`. Controls use their actual names and typed numeric/bool values, including spaces in names such as `effect intensity`. Defaults fill omitted exposed controls; unknown names, wrong types, invalid ranges or catalog mismatch fail before scene application. For example:
 

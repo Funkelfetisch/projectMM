@@ -269,6 +269,51 @@ TEST_CASE("BLE scenes: Snowflakes keeps the archived controls and rejects invali
     CHECK(tree.state() == unchanged);
 }
 
+TEST_CASE("BLE scenes: pages fill the 512-byte response, so a scene's controls and its palette list take a handful of round trips") {
+    uint16_t cursor = 0, pages = 0;
+    for (; pages < 24; ++pages) {
+        char bytes[513]; mm::JsonSink sink(bytes, sizeof(bytes)); envelope(sink);
+        REQUIRE(mm::BleSceneCatalog::writePage(sink, cursor) == nullptr); sink.append("}");
+        REQUIRE_FALSE(sink.overflowed());
+        mm::json::JsonDoc page; REQUIRE(mm::json::parse(bytes, page));
+        const auto* next = mm::json::member(page, page.rootNode(), "next"); REQUIRE(next != nullptr);
+        if (next->type == mm::json::JsonType::Null) { ++pages; break; }
+        REQUIRE(next->intValue > cursor + 1); cursor = static_cast<uint16_t>(next->intValue);
+    }
+    CHECK(pages <= 8);   // 35 scenes, one per page before packing
+
+    for (const char* scene : {"ripple", "lake", "geq", "solid"}) {
+        CAPTURE(scene);
+        std::string names; long options = 0, expected = -1; uint16_t at = 0, count = 0;
+        for (; count < 32; ++count) {
+            char bytes[513]; mm::JsonSink sink(bytes, sizeof(bytes)); envelope(sink);
+            REQUIRE(mm::BleSceneCatalog::writeInfo(sink, scene, at) == nullptr); sink.append("}");
+            REQUIRE_FALSE(sink.overflowed());
+            mm::json::JsonDoc info; REQUIRE(mm::json::parse(bytes, info));
+            const auto* controls = mm::json::member(info, info.rootNode(), "controls"); REQUIRE(controls != nullptr);
+            for (const auto* control = info.node(controls->firstChild); control; control = info.node(control->next)) {
+                const auto* name = mm::json::member(info, control, "name"); REQUIRE(name != nullptr);
+                const auto* list = mm::json::member(info, control, "options");
+                if (!list) { names += name->str; names += ","; continue; }
+                const auto* offset = mm::json::member(info, control, "optionOffset"); REQUIRE(offset != nullptr);
+                // A list continues exactly where the previous page stopped, with each value its own index.
+                if (offset->intValue == 0) { names += name->str; names += ","; options = 0; }
+                REQUIRE(offset->intValue == options);
+                expected = mm::json::member(info, control, "optionCount")->intValue;
+                for (const auto* option = info.node(list->firstChild); option; option = info.node(option->next))
+                    CHECK(mm::json::member(info, option, "value")->intValue == options++);
+            }
+            const auto* next = mm::json::member(info, info.rootNode(), "next"); REQUIRE(next != nullptr);
+            if (next->type == mm::json::JsonType::Null) { ++count; break; }
+            REQUIRE(next->intValue > at); at = static_cast<uint16_t>(next->intValue);
+        }
+        if (expected >= 0) CHECK(options == expected);
+        CHECK(count <= 14);   // 66 to 73 pages before packing
+        const bool palette = names.find("palette,") != std::string::npos;
+        CHECK(palette == (std::strcmp(scene, "solid") != 0));
+    }
+}
+
 TEST_CASE("BLE scenes: invalid catalog, controls, ranges and allocation failure leave the running scene intact") {
     SceneTree tree; REQUIRE(tree.apply("solid").ok); const auto original = tree.state();
     CHECK_FALSE(mm::BleSceneCatalog::apply(tree.scheduler, "solid", "wrong", "{}", true).ok);

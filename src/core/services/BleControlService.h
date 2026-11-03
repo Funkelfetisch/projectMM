@@ -14,6 +14,7 @@
 #include "core/util/ScratchBuffer.h"
 #include "core/services/Bh1750Service.h"
 #include "core/services/BatteryService.h"
+#include "core/system/NetworkModule.h"
 #include "platform/platform.h"
 
 #include <charconv>
@@ -23,7 +24,7 @@
 
 namespace mm {
 
-/// Epoch-scoped BLE requests with explicit live state and named scheduled operations.
+/// Epoch-scoped BLE requests on an open link, encrypted on request for secrets, with explicit live state and named scheduled operations.
 /// @technical The framing, session and complete-scene contract lives in reference/product-ble.md.
 class BleControlService : public MoonModule {
 public:
@@ -398,6 +399,8 @@ private:
             if (!requested || std::strlen(requested) >= sizeof(group)) { result(id, "group"); return; }
             std::snprintf(group, sizeof(group), "%s", requested); markDirty(); if (scheduler_) scheduler_->noteDirty(); get(id); return;
         }
+        if (std::strcmp(op, "secure") == 0) { secure(id); return; }
+        if (std::strcmp(op, "wifi") == 0 || std::strcmp(op, "wifi-scan") == 0 || std::strcmp(op, "wifi-join") == 0) { wifi(doc, id, op); return; }
         const bool scene = std::strcmp(op, "scene") == 0;
         if (!scene && std::strcmp(op, "patch") != 0) { result(id, "operation"); return; }
         if (job_.phase != Phase::None) { result(id, "busy"); return; }
@@ -445,6 +448,8 @@ private:
             if ((!std::strcmp(op, "scenes") || !std::strcmp(op, "scene-info") || !std::strcmp(op, "pixel-map") || !std::strcmp(op, "outputs") || !std::strcmp(op, "preview-frame")) && !std::strcmp(key, "$offset")) continue;
             if ((!std::strcmp(op, "pixel-map") || !std::strcmp(op, "outputs") || !std::strcmp(op, "preview-frame")) && !std::strcmp(key, "$rev")) continue;
             if (!std::strcmp(op, "scene-info") && !std::strcmp(key, "$scene")) continue;
+            if (!std::strcmp(op, "wifi") && !std::strcmp(key, "$offset")) continue;
+            if (!std::strcmp(op, "wifi-join") && (!std::strcmp(key, "$ssid") || !std::strcmp(key, "$password"))) continue;
             if (!std::strcmp(op, "hello") && (!std::strcmp(key, "$nonce") || !std::strcmp(key, "$resume"))) continue;
             return false;
         }
@@ -551,10 +556,50 @@ private:
         if (comma) sink.append(",");
         uint8_t ambient = 0;
         if (Bh1750Service::automaticBrightness(ambient)) sink.appendf("\"ambientTarget\":%u", ambient); else sink.append("\"ambientTarget\":null");
+        if (MoonModule* sensor = ambientSensor()) {
+            int32_t automatic = 0; scheduler_->getControlWide(sensor->name(), "automatic", automatic);
+            sink.append(",\"ambient\":{\"service\":"); sink.writeJsonString(sensor->name());
+            sink.append(automatic ? ",\"automatic\":true}" : ",\"automatic\":false}");
+        }
         sink.append("},\"queued\":"); sink.append(scheduled() ? "true" : "false");
         sink.append(",\"group\":"); sink.writeJsonString(group);
         sink.append(",\"pending\":"); writeJob(sink, job_);
         sink.append(",\"terminal\":"); writeJob(sink, terminal_); end(sink, id);
+    }
+    /// WiFi setup through the network module's own scan and connect-first join; every reply carries the same status page.
+    void wifi(const json::JsonDoc& doc, uint16_t id, const char* op) {
+        auto* network = networkModule();
+        if (!network) { result(id, "wifi-unavailable"); return; }
+        uint32_t offset = 0;
+        if (json::member(doc, doc.rootNode(), "$offset") && (!number(doc, "$offset", offset) || offset > UINT8_MAX)) { result(id, "offset"); return; }
+        const char* error = nullptr;
+        if (std::strcmp(op, "wifi-scan") == 0) error = network->scanWifi();
+        else if (std::strcmp(op, "wifi-join") == 0) {
+            const char* ssid = text(doc, "$ssid");
+            const auto* password = json::member(doc, doc.rootNode(), "$password");
+            // A name and a WPA2 passphrase as WiFiModule keeps them; an absent password takes the saved one.
+            if (!ssid || !ssid[0] || std::strlen(ssid) > 32) { result(id, "ssid"); return; }
+            if (password && (password->type != json::JsonType::String || std::strlen(password->str) > 63)) { result(id, "password"); return; }
+            if (password && platform::bleControlSecurity(transport_, replyGeneration_, false) != platform::BleLinkSecurity::Encrypted) {
+                result(id, "encryption-required"); return;
+            }
+            error = network->joinWifi(ssid, password ? password->str : nullptr);
+        }
+        if (error) { result(id, error); return; }
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.append(",\"wifi\":"); network->writeWifi(sink, static_cast<uint8_t>(offset)); end(sink, id);
+    }
+    /// Ask this connection's central to pair, so a secret can follow; polling reports how far it came.
+    void secure(uint16_t id) {
+        static constexpr const char* kLinks[] = {"open", "pairing", "encrypted", "failed"};
+        const auto link = platform::bleControlSecurity(transport_, replyGeneration_, true);
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.append(",\"link\":\""); sink.append(kLinks[static_cast<uint8_t>(link)]); sink.append("\""); end(sink, id);
+    }
+    NetworkModule* networkModule() const {
+        if (scheduler_) for (uint8_t i = 0; i < scheduler_->moduleCount(); ++i)
+            if (std::strcmp(scheduler_->module(i)->typeName(), "NetworkModule") == 0) return static_cast<NetworkModule*>(scheduler_->module(i));
+        return nullptr;
     }
     void battery(uint16_t id) {
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr); sink.append(",\"battery\":");
@@ -614,11 +659,22 @@ private:
                 sink.appendf(",\"otaSlotBytes\":%u", static_cast<unsigned>(capacity));
             auto* battery = scheduler_ ? BatteryService::discover(*scheduler_) : nullptr;
             const auto current = battery ? battery->batteryConfig() : platform::BleBatteryConfig{};
-            sink.appendf(",\"basChannels\":%u,\"basRestartRequired\":%s,\"profileOp\":true,\"pixelMapOp\":%s", static_cast<unsigned>(startedBatteries_.count), current == startedBatteries_ ? "false" : "true", pixelMapReader_ ? "true" : "false");
+            sink.appendf(",\"basChannels\":%u,\"basRestartRequired\":%s,\"profileOp\":true,\"pixelMapOp\":%s,\"wifiOp\":%s", static_cast<unsigned>(startedBatteries_.count),
+                         current == startedBatteries_ ? "false" : "true", pixelMapReader_ ? "true" : "false", platform::hasWiFi && networkModule() ? "true" : "false");
             if (outputReader_) sink.append(",\"outputsOp\":true");
             if (previewFrameReader_) sink.append(",\"previewFrameOp\":true");
         }
         end(sink, id);
+    }
+    /// The enabled ambient-light service: `get` names it so a client switches its `automatic` control with `patch`; null without one.
+    MoonModule* ambientSensor() const {
+        MoonModule* services = scheduler_ ? scheduler_->firstByName("Services") : nullptr;
+        if (!services) return nullptr;
+        for (uint8_t i = 0; i < services->childCount(); ++i) {
+            MoonModule* child = services->child(i);
+            if (std::strcmp(child->typeName(), "Bh1750Service") == 0 && child->effectivelyEnabled()) return child;
+        }
+        return nullptr;
     }
     bool serviceControls(const json::JsonDoc& doc, const json::JsonNode* node) const {
         if (!scheduler_ || node->type != json::JsonType::Object) return false;

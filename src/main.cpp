@@ -159,6 +159,7 @@
 #include "helio/BleOutputPage.h"
 #include "helio/BlePreviewFramePage.h"
 #include "helio/ProductPresets.h"
+#include "helio/HelioRemoteService.h"
 #include "core/util/PresetTemplates.h"
 
 #include <cstdio>
@@ -209,10 +210,25 @@ static int savedHelioAudioMode() {
 }
 
 void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
+    // The classic NEBULITE board hangs a buzzer's NPN base on GPIO5 through 100 Ohm, and GPIO5 leaves reset with its weak pull-up on, so the buzzer draws a standing current that warms the board until something claims the pin.
+    if (std::strcmp(mm::kFirmwareName, "nebulite-esp32") == 0) {
+        constexpr uint8_t kNebuliteClassicBuzzerGpio = 5;
+        mm::platform::gpioPreloadLowOutput(kNebuliteClassicBuzzerGpio);
+    }
+    // A Rev4 battery controller holds its own power on, so GPIO10 reading high means driving both enable lines before anything else; a USB controller reads it low and carries a button on that same GPIO21. From the pinned WLED source.
+    if (std::strcmp(mm::kFirmwareName, "nebulite-s3") == 0) {
+        constexpr uint8_t kRev4ProbeGpio = 10, kRev4EnableGpio = 21, kRev4MainEnableGpio = 14;
+        if (mm::platform::gpioInputBegin(kRev4ProbeGpio, mm::platform::GpioPull::None)
+            && mm::platform::gpioRead(kRev4ProbeGpio)) {
+            mm::platform::gpioWrite(kRev4EnableGpio, true);
+            mm::platform::gpioWrite(kRev4MainEnableGpio, true);
+        }
+    }
     mm::registerModuleTypes();
     mm::Scheduler scheduler;
     const bool helioProduct = std::strcmp(mm::kFirmwareName, "helio1") == 0;
     const bool productFirmware = mm::isProductFirmware(mm::kFirmwareName);
+    const bool nebuliteProduct = mm::isNebuliteFirmware(mm::kFirmwareName);
 
     // Every container is created as the device boots it, from the one table the scenario runner builds its trees from too: @xref{how-the-boot-tree-is-created}.
     // Each carries the apparatus wired into it, marked wired so a saved tree that predates a child keeps it: @xref{why-markwiredbycode-matters}.
@@ -281,6 +297,11 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         else if (productFirmware) ble->setAdvertisingProductResolver(&mm::ble_advertisement::productCodeForModel);
         ble->markWiredByCode();
         servicesModule->addChild(ble);
+
+        auto* remote = createOrDie<mm::HelioRemoteService>("HelioRemoteService");
+        remote->setName("Remote");
+        remote->markWiredByCode();
+        servicesModule->addChild(remote);
     }
 
     // ControlModule puts the device into a named state, top-level because a preset reaches ACROSS Layouts, Effects, Drivers and Services: @xref{why-the-device-wide-tools-are-boot-wired}.
@@ -298,6 +319,11 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     auto* networkModule = static_cast<mm::NetworkModule*>(top("NetworkModule"));
     networkModule->setScheduler(&scheduler);
     networkModule->allowWifiToggle(productFirmware);
+    // A garment is worn on a battery and reached by its app over BLE, so it boots with the radio down, and sleeps it between beacons once the owner turns it on for an update or a venue. HELIO stays on the mains and keeps both as they were.
+    if (nebuliteProduct) {
+        networkModule->setWifiDefaultEnabled(false);
+        networkModule->setWifiPowerSaveDefault(true);
+    }
     networkModule->setSystemModule(systemModule);
     networkModule->setEthernet(static_cast<mm::EthernetModule*>(wired(networkModule, "EthernetModule")));
     networkModule->setWiFi(static_cast<mm::WiFiModule*>(wired(networkModule, "WiFiModule")));

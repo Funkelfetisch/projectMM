@@ -7,6 +7,7 @@
 #include "core/system/NetworkModule.h"
 #include "core/system/WiFiModule.h"
 #include "core/util/JsonSink.h"
+#include "core/util/build_info.h"  // the product predicate deciding which firmwares boot with the radio down
 #include "conditional_controls.h"  // shared conditional-control invariant helpers
 
 #include <cstdio>
@@ -176,6 +177,63 @@ TEST_CASE("BLE products can pause WiFi without forgetting networks or starting f
         w.net.tick1s();
         CHECK(std::string(mode) == "WiFi STA");
         CHECK(mm::platform::testMdnsInitCount() >= 2);
+        w.net.release();
+    }
+    mm::platform::setTestWifiStaIPv4(nullptr);
+    mm::platform::setTestWifiStaAvailable(false);
+    mm::platform::setTestMdnsAvailable(false);
+}
+
+// A garment runs off a battery and is reached by its app, so its radio costs nothing until an address is asked for; the owner's saved choice still outranks that, which keeps a unit switched on for a venue switched on.
+TEST_CASE("a garment boots with its radio down, and a saved choice still outranks that default") {
+    // Only the garments: HELIO sits on the mains and a generic build keeps the upstream behaviour.
+    CHECK(mm::isNebuliteFirmware("nebulite-s3"));
+    CHECK(mm::isNebuliteFirmware("nebulite-esp32"));
+    CHECK(mm::isNebuliteFirmware("nebulite-p4"));   // the family by prefix, so a garment added later needs no edit here
+    CHECK_FALSE(mm::isNebuliteFirmware("helio1"));
+    CHECK_FALSE(mm::isNebuliteFirmware("esp32"));
+    CHECK_FALSE(mm::isNebuliteFirmware("nebulit"));
+    CHECK_FALSE(mm::isNebuliteFirmware(nullptr));
+
+    FrozenClock clock;
+    mm::platform::setTestWifiStaAvailable(true);
+    mm::platform::setTestMdnsAvailable(true);
+    {
+        WiFiNetwork w;
+        w.net.allowWifiToggle(true);
+        // What main.cpp does for a NEBULITE firmware, before the load phase.
+        w.net.setWifiDefaultEnabled(false);
+        w.net.setWifiPowerSaveDefault(true);
+        w.net.defineControls();
+        bool* enabled = nullptr;
+        const char* mode = "";
+        for (uint8_t i = 0; i < w.net.controls().count(); ++i) {
+            auto& control = w.net.controls()[i];
+            if (std::strcmp(control.name, "wifiEnabled") == 0) enabled = static_cast<bool*>(control.ptr);
+            if (std::strcmp(control.name, "mode") == 0) mode = static_cast<const char*>(control.ptr);
+        }
+        REQUIRE(enabled != nullptr);
+        CHECK_FALSE(*enabled);   // the switch the app reads already says off
+
+        // A network the owner joined before stays remembered, so turning the radio on later needs no password.
+        w.wifi.remember("home", "saved-secret");
+        w.net.setup();
+        w.net.tick1s();
+        CHECK(std::string(mode) == "WiFi off");
+        // Nothing reached for the radio, so no station and no access point came up with it.
+        CHECK(mm::platform::testMdnsInitCount() == 0);
+        REQUIRE(w.wifi.knownCount() == 1);
+
+        // The load phase writes a saved `wifiEnabled` into the bound member: that choice wins over the default.
+        *enabled = true;
+        w.net.tick1s();
+        CHECK(std::string(mm::platform::testLastStaSsid()) == "home");
+        const uint8_t ip[4] = {192,168,1,31};
+        mm::platform::setTestWifiStaIPv4(ip);
+        w.net.tick1s();
+        CHECK(std::string(mode) == "WiFi STA");
+        // And once the station is up, the radio is asked to sleep between beacons, which is what the battery pays for.
+        CHECK(mm::platform::testLastWifiPowerSave());
         w.net.release();
     }
     mm::platform::setTestWifiStaIPv4(nullptr);

@@ -34,69 +34,85 @@ public:
     /// Whether a stable ID exists, independently of the active module graph.
     static bool exists(const char* id) { return find(id) != nullptr; }
 
-    /// One bounded scene per page; a null cursor marks the end.
+    /// Every page leaves room for the cursor and the caller's closing brace.
+    static constexpr size_t kPageTail = sizeof("],\"next\":65535}") - 1;
+
+    /// As many whole scenes as the page holds, so a round trip is never spent on one small item; the cursor is the first scene's index and null marks the end.
     static const char* writePage(JsonSink& sink, uint16_t offset) {
         if (offset > count()) return "scene-offset";
         sink.append("\"catalog\":"); sink.writeJsonString(revision());
         sink.append(",\"scenes\":[");
-        if (offset < count()) {
-            const auto& entry = product_scenes::kEntries[offset];
-            sink.append("{\"id\":"); sink.writeJsonString(entry.id);
-            sink.append(",\"name\":"); sink.writeJsonString(entry.name);
-            sink.append(entry.audio ? ",\"audio\":true" : ",\"audio\":false");
-            sink.append(std::strstr(entry.controls, "\"white\"") ? ",\"rgbw\":true}" : ",\"rgbw\":false}");
+        uint16_t next = offset;
+        for (; next < count(); ++next) {
+            const auto& entry = product_scenes::kEntries[next];
+            char item[192]; JsonSink row(item, sizeof(item));
+            if (next > offset) row.append(",");
+            row.append("{\"id\":"); row.writeJsonString(entry.id);
+            row.append(",\"name\":"); row.writeJsonString(entry.name);
+            row.append(entry.audio ? ",\"audio\":true" : ",\"audio\":false");
+            row.append(std::strstr(entry.controls, "\"white\"") ? ",\"rgbw\":true}" : ",\"rgbw\":false}");
+            if (row.overflowed()) return "scene-page";
+            // The first item always goes in, so every cursor advances; an oversized one shows as the caller's overflow.
+            if (next > offset && row.size() + kPageTail > sink.room()) break;
+            sink.append(item, row.size());
         }
         sink.append("],\"next\":");
-        if (offset + 1 < count()) sink.appendf("%u", static_cast<unsigned>(offset + 1));
+        if (next < count()) sink.appendf("%u", static_cast<unsigned>(next));
         else sink.append("null");
         return nullptr;
     }
 
-    /// One real control descriptor per page; option lists continue on pages with the same control name.
+    /// As many control descriptors and options as the page holds; the cursor counts parts (a control, or one option of a list) and an option list continues on the next page under the same control name.
     static const char* writeInfo(JsonSink& sink, const char* id, uint16_t offset) {
         const Entry* entry = find(id);
         if (!entry) return "scene-id";
         Probe probe;
         if (const char* error = makeProbe(*entry, probe)) return error;
-        uint16_t pages = 0;
-        const ControlDescriptor* selected = nullptr;
-        uint16_t option = 0;
+        uint16_t parts = 0;
         for (int i = probe.exposed.rootNode()->firstChild; i >= 0; i = probe.exposed.nodes[i].next) {
             const auto* control = descriptor(probe, *entry, probe.exposed.nodes[i].key);
             if (!control) return "scene-schema";
-            const uint16_t parts = optionCount(*control) ? optionCount(*control) : 1;
-            if (offset >= pages && offset - pages < parts) { selected = control; option = offset - pages; }
-            pages = static_cast<uint16_t>(pages + parts);
+            parts = static_cast<uint16_t>(parts + (optionCount(*control) ? optionCount(*control) : 1));
         }
-        if (!selected && offset != pages) return "scene-offset";
+        if (offset > parts) return "scene-offset";
         sink.append("\"catalog\":"); sink.writeJsonString(revision());
         sink.append(",\"scene\":"); sink.writeJsonString(id);
         sink.append(",\"controls\":[");
-        if (selected) {
-            const auto& control = *selected;
-            sink.append("{\"name\":"); sink.writeJsonString(control.name);
-            sink.append(",\"type\":"); sink.writeJsonString(controlTypeName(control.type));
-            sink.append(",\"default\":"); writeValue(sink, control);
+        uint16_t part = 0, next = parts;
+        bool first = true;
+        for (int i = probe.exposed.rootNode()->firstChild; i >= 0 && next == parts; i = probe.exposed.nodes[i].next) {
+            const auto& control = *descriptor(probe, *entry, probe.exposed.nodes[i].key);
+            const uint16_t options = optionCount(control), span = options ? options : 1;
+            if (part + span <= offset) { part = static_cast<uint16_t>(part + span); continue; }
+            const uint16_t from = offset > part ? static_cast<uint16_t>(offset - part) : 0;
+            char head[192]; JsonSink object(head, sizeof(head));
+            if (!first) object.append(",");
+            object.append("{\"name\":"); object.writeJsonString(control.name);
+            object.append(",\"type\":"); object.writeJsonString(controlTypeName(control.type));
+            object.append(",\"default\":"); writeValue(object, control);
             if (control.type != ControlType::Bool)
-                sink.appendf(",\"min\":%d,\"max\":%d", static_cast<int>(control.min),
-                             static_cast<int>(optionCount(control) ? control.max - 1 : control.max));
-            if (const uint16_t options = optionCount(control)) {
-                char label[96] = {};
-                if (control.type == ControlType::Select) {
-                    const auto* labels = reinterpret_cast<const char* const*>(control.aux);
-                    if (labels && labels[option]) std::snprintf(label, sizeof(label), "%s", labels[option]);
-                } else if (control.aux) {
-                    JsonSink name(label, sizeof(label)); name.requestName(option);
-                    reinterpret_cast<PaletteOptionsFn>(control.aux)(name);
-                    if (name.overflowed()) return "scene-option";
-                }
-                sink.appendf(",\"optionCount\":%u,\"optionOffset\":%u,\"options\":[{\"value\":%u,\"label\":", options, option, option);
-                sink.writeJsonString(label); sink.append("}]");
+                object.appendf(",\"min\":%d,\"max\":%d", static_cast<int>(control.min),
+                               static_cast<int>(options ? control.max - 1 : control.max));
+            if (options) object.appendf(",\"optionCount\":%u,\"optionOffset\":%u,\"options\":[", options, from);
+            if (object.overflowed()) return "scene-schema";
+            // A descriptor never travels without its first option, so the head's size counts that option too.
+            char item[128]; JsonSink row(item, sizeof(item));
+            if (options && !writeOption(row, control, from, false)) return "scene-option";
+            const size_t close = options ? 2 : 1;
+            if (!first && object.size() + row.size() + close + kPageTail > sink.room()) { next = static_cast<uint16_t>(part + from); break; }
+            sink.append(head, object.size());
+            sink.append(item, row.size());
+            for (uint16_t option = static_cast<uint16_t>(from + 1); option < options; ++option) {
+                JsonSink more(item, sizeof(item));
+                if (!writeOption(more, control, option, true)) return "scene-option";
+                if (more.size() + close + kPageTail > sink.room()) { next = static_cast<uint16_t>(part + option); break; }
+                sink.append(item, more.size());
             }
-            sink.append("}");
+            sink.append(options ? "]}" : "}");
+            first = false; part = static_cast<uint16_t>(part + span);
         }
         sink.append("],\"next\":");
-        if (selected && offset + 1 < pages) sink.appendf("%u", static_cast<unsigned>(offset + 1));
+        if (next < parts) sink.appendf("%u", static_cast<unsigned>(next));
         else sink.append("null");
         return nullptr;
     }
@@ -318,6 +334,21 @@ private:
     }
     static uint16_t optionCount(const ControlDescriptor& control) {
         return control.type == ControlType::Select || control.type == ControlType::Palette ? static_cast<uint16_t>(control.max) : 0;
+    }
+    /// One `{"value":n,"label":...}` option, comma-led when it follows another; false when the label does not fit.
+    static bool writeOption(JsonSink& sink, const ControlDescriptor& control, uint16_t option, bool comma) {
+        char label[96] = {};
+        if (control.type == ControlType::Select) {
+            const auto* labels = reinterpret_cast<const char* const*>(control.aux);
+            if (labels && labels[option]) std::snprintf(label, sizeof(label), "%s", labels[option]);
+        } else if (control.aux) {
+            JsonSink name(label, sizeof(label)); name.requestName(static_cast<uint8_t>(option));
+            reinterpret_cast<PaletteOptionsFn>(control.aux)(name);
+            if (name.overflowed()) return false;
+        }
+        sink.appendf("%s{\"value\":%u,\"label\":", comma ? "," : "", static_cast<unsigned>(option));
+        sink.writeJsonString(label); sink.append("}");
+        return !sink.overflowed();
     }
     static void writeValue(JsonSink& sink, const ControlDescriptor& control, bool named = false) {
         auto value = control;
