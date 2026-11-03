@@ -230,7 +230,6 @@ public:
                       static_cast<unsigned>(startedBatteries_.count));
         MoonModule::tick1s();
     }
-#ifndef ESP_PLATFORM
     void setEpochForTest(const char* epoch) {
         BleRpcSession probe;
         if (!probe.beginEpoch(epoch)) return;
@@ -249,7 +248,6 @@ public:
     /// The restart a committed update schedules would end the test process.
     void setRestartForTest(void (*restart)()) { restart_ = restart; }
     bool restartScheduledForTest() const { return restartScheduled_; }
-#endif
     /// All reads and writes traverse the same correlation gate before domain dispatch.
     void handle(const char* request, uint32_t now, bool dueAlreadyProcessed = false) {
         const uint64_t requestGeneration = replyGeneration_;

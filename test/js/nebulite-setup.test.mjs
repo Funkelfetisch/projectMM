@@ -183,7 +183,8 @@ test('setup explains that applying it replaces custom outputs and LED positions'
 test('classic crop-top setup is opt-in, chip-specific and uses the archived eight-output map', async () => {
     const classic = profiles.find(p => p.name === 'NEBULITE Croptop ESP32');
     const classicIdentity = { firmware: 'nebulite-esp32', chip: 'ESP32 (rev 3)' };
-    assert.deepEqual(compatibleProductProfiles(profiles, classicIdentity).map(p => p.name), [classic.name]);
+    assert.deepEqual(compatibleProductProfiles(profiles, classicIdentity).map(p => p.name),
+        ['NEBULITE Croptop ESP32', 'NEBULITE Fanny pack ESP32', 'NEBULITE Backpack ESP32', 'NEBULITE Jacket ESP32']);
     assert.equal(compatibleProductProfiles(profiles, { ...classicIdentity, chip: 'ESP32-S3' }).length, 0);
     let written;
     const view = mount({ identity: classicIdentity, apply: async patch => { written = patch; } });
@@ -473,7 +474,8 @@ test('a lost setup response remains verify-only after remount and its readback u
 });
 
 test('an explicit different choice after a settled uncertain attempt allows one deliberate new apply', async () => {
-    assert.ok(profiles.length >= 2, 'two compatible products exercise a deliberate selection change');
+    const other = compatibleProductProfiles(profiles, identity).find(item => item.name !== profile.name);
+    assert.ok(other, 'two compatible products exercise a deliberate selection change');
     const session = {};
     const writes = [], checks = [];
     const options = { session,
@@ -484,16 +486,16 @@ test('an explicit different choice after a settled uncertain attempt allows one 
     await controls(first).button.fire('click');
     const second = mount(options);
     assert.equal(controls(second).button.textContent, 'Check setup');
-    await choose(second, profiles[1].name);
+    await choose(second, other.name);
     assert.equal(controls(second).button.textContent, 'Apply product setup');
     assert.equal(controls(second).button.disabled, false);
     await controls(second).button.fire('click');
     assert.equal(writes.length, 2);
     assert.deepEqual(writes[0], productProfilePatch(profile, identity));
-    assert.deepEqual(writes[1], productProfilePatch(profiles[1], identity));
-    assert.deepEqual(checks, [profiles[1].name]);
-    const current = controls(mount({ ...options, modules: modulesFor(profiles[1]) }));
-    assert.equal(current.select.value, profiles[1].name);
+    assert.deepEqual(writes[1], productProfilePatch(other, identity));
+    assert.deepEqual(checks, [other.name]);
+    const current = controls(mount({ ...options, modules: modulesFor(other) }));
+    assert.equal(current.select.value, other.name);
     assert.equal(current.button.textContent, 'Setup saved');
 });
 

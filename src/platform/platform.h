@@ -8,6 +8,7 @@
 #include "platform_config.h"  // hasOta / hasPsram / …: flags this header's contract refers to
 #include "nonblocking.h"      // MM_NONBLOCKING, which every declaration below carries
 #include "platform/BleBattery.h"
+#include "platform/BleLinkSecurity.h"
 #if defined(ESP_PLATFORM)
 #include "sdkconfig.h"
 #endif
@@ -935,15 +936,6 @@ inline constexpr size_t kBleControlPeerCapacity = 2;
 static_assert(kBleControlPeerCapacity >= 1 && kBleControlPeerCapacity <= 8);
 /// One open GATT control peripheral, independent of Wi-Fi association, which encrypts a link on request.
 struct BleControlHandle { void* impl = nullptr; };
-/// How far one connection's encryption has come: control works on any link, and secrets travel only on Encrypted.
-enum class BleLinkSecurity : uint8_t { Open, Pairing, Encrypted, Failed };
-/// One request for encryption: an open link starts pairing and sets `ask`, and a failure is reported once before the link counts as open again.
-inline BleLinkSecurity requestLinkSecurity(BleLinkSecurity& link, bool& ask) MM_NONBLOCKING {
-    ask = link == BleLinkSecurity::Open;
-    const BleLinkSecurity reported = ask ? BleLinkSecurity::Pairing : link;
-    link = link == BleLinkSecurity::Failed ? BleLinkSecurity::Open : reported;
-    return reported;
-}
 /// Host-lifetime repeat-pairing counters, with no peer addresses or key material.
 struct BlePairingState {
     uint32_t requests = 0; ///< Repeat requests received by the native callback.

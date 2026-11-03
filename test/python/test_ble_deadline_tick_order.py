@@ -15,7 +15,13 @@ pytestmark = pytest.mark.skipif(CXX is None, reason='no C++ compiler')
 def test_deadline_crossing_during_receive_does_not_drop_the_terminal_reply(tmp_path):
     source = (ROOT / 'src/core/services/BleControlService.h').read_text()
     start = source.index('    void tick() MM_NONBLOCKING override {')
-    tick = source[start:source.index('\n    /// Resolve the same explicitly configured product hint', start)]
+    # The method runs to its matching brace, whatever member follows it.
+    depth, end = 0, source.index('{', start)
+    for end in range(end, len(source)):
+        depth += {'{': 1, '}': -1}.get(source[end], 0)
+        if depth == 0:
+            break
+    tick = source[start:end + 1] + '\n'
     seam = r'''
 #include <array>
 #include <cassert>

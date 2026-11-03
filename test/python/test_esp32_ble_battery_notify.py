@@ -31,7 +31,6 @@ def test_notification_failure_retries_latest_valid_levels(tmp_path):
 using namespace mm;
 using namespace mm::platform;
 constexpr size_t kPeerCapacity = 2;
-#define MM_NONBLOCKING
 struct ble_npl_event { void* arg = nullptr; };
 void* ble_npl_event_get_arg(ble_npl_event* e) { return e->arg; }
 struct Peripheral;

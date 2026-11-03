@@ -1,7 +1,7 @@
 #pragma once
 #include "core/util/BleConnectionRegistry.h"
 #include "core/util/BlePeerIo.h"
-#include "platform/platform.h"
+#include "platform/BleLinkSecurity.h"
 #include <array>
 #include <cstdio>
 #include <cstring>
