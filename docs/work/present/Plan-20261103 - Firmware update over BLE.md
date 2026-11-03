@@ -49,7 +49,7 @@ NEBULITE garments run BLE-only by default, so their next firmware must be able t
 
 - Desktop tests cover begin, streaming, end, abort, owner, gaps, duplicates, a full ring, timeout, unauthorized and busy.
 - An App test drives the runner through the adapter.
-- On the S3 bench board, a signed image installs over BLE from the Mi9 in minutes rather than the 19 the request-per-chunk transfer took, and the controller then reports the new build.
+- On the S3 bench board, a signed image installs over BLE from the Mi9 in minutes rather than the 19 the request-per-chunk transfer took, and the controller then reports the new build. Met on 3 November 2026: 5cc7a498 streamed in about 3 minutes 50 seconds (13 KB/s, MTU 517, 15 ms interval).
 - A tampered signature, a wrong target and an older security version are refused before the slot opens.
 
 ## Not in this plan
