@@ -514,7 +514,7 @@ private:
             const auto& node = doc.nodes[c];
             if (!node.key || node.key[0] == '$') return false;
             if (std::strcmp(node.key, "on") == 0) { if (node.type != json::JsonType::Bool) return false; continue; }
-            if (std::strcmp(node.key, "brightness") == 0) { if (node.type != json::JsonType::Number) return false; continue; }
+            if (std::strcmp(node.key, "brightness") == 0) { if (node.type != json::JsonType::Int) return false; continue; }
             const int first = node.firstChild;
             if (node.type != json::JsonType::Object || first < 0 || doc.nodes[first].next >= 0 || !doc.nodes[first].key ||
                 std::strcmp(doc.nodes[first].key, "fixture") || doc.nodes[first].type != json::JsonType::String) return false;
