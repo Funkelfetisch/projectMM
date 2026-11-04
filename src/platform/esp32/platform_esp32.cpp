@@ -137,6 +137,10 @@
 #include <mutex>     // hostname store: writer (config apply) and reader (link-up events) race
 #include <unistd.h>
 
+// libstdc++'s nothrow new calls the throwing one, which ESP-IDF turns into abort() with C++ exceptions off; the standard lets a program replace them, so these return malloc's null instead.
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept { return std::malloc(size ? size : 1); }
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept { return std::malloc(size ? size : 1); }
+
 namespace mm::platform {
 
 // Test-only override for millis(); 0 means "use the real clock". Honored on ESP32 too, so a hardware scenario run freezes time the same way unit tests do.
