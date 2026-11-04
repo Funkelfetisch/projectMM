@@ -4405,7 +4405,7 @@
    "controls": {
     "port": {
      "line": "The port the server listens on.",
-     "more": "8080 on the desktop and 80 on a device. A change applies when the server next opens: why."
+     "more": "8080 on the desktop and 80 on a device. A change applies at once, and a port the system refuses is tried again each second: how."
     }
    },
    "role": "generic",
@@ -4818,7 +4818,7 @@
    "dim": 0,
    "doc": "core/services.md#bh1750",
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/Bh1750Service.h",
-   "tests": "https://github.com/MoonModules/MoonLight/blob/main/test/unit/core/unit_Bh1750Service.cpp"
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#bh1750service"
   },
   "BatteryService": {
    "line": "One background sampler for up to two independent, explicitly configured BatteryChannel children.",

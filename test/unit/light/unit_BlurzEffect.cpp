@@ -5,8 +5,11 @@
 #include "light/layouts/Layouts.h"
 #include "light/effects/BlurzEffect.h"
 #include "light/layouts/GridLayout.h"
+#include "light/layouts/PixelMapLayout.h"
 #include "core/services/AudioService.h"
 #include "platform/platform.h"   // setTestNowMs: the simulated music follows the clock
+
+#include <cstring>
 
 // Blurz places one dot a frame, colored by a band, and blurs the strip; a simulating AudioService feeds the bands, and each case releases it.
 
@@ -161,4 +164,21 @@ TEST_CASE("BlurzEffect survives degenerate grid sizes") {
     CHECK(true);   // no crash at 0×0×0 or 1×1
 
     audio.release();
+}
+
+// On a sparse layout, the HELIO's point map, the run is the nine real lights, not the 17x9 box most of whose cells hold none.
+TEST_CASE("BlurzEffect runs along a sparse layout's lights in wiring order") {
+    mm::Layouts layouts;
+    mm::PixelMapLayout map;
+    std::strcpy(map.points, "1,8;12,8;10,3;16,2;4,0;5,8;13,4;16,8;8,4");
+    layouts.addChild(&map);
+    mm::Layer layer;
+    layer.setLayouts(&layouts);
+    layer.setChannelsPerLight(3);
+    mm::BlurzEffect blurz;
+    layer.addChild(&blurz);
+    layer.applyState();
+    CHECK(layer.width() == 9);
+    CHECK(layer.height() == 1);
+    CHECK(layer.buffer().count() == 9);
 }

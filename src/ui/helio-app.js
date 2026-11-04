@@ -1557,12 +1557,10 @@ function helioSceneReplacementSlot(targetType = "") {
     const effects = helioEffects();
     const active = helioActiveEffect();
     if (active && active.type !== targetType &&
-        (active.type === "PixelblazeCompatEffect" || isHelioPortEffectType(active.type) || isHelioFactoryScene(active))) {
+        (isHelioPortEffectType(active.type) || isHelioFactoryScene(active))) {
         return active;
     }
-    return effects.find(effect =>
-        effect?.type === "PixelblazeCompatEffect" || isHelioPortEffectType(effect?.type)
-    ) || effects.find(effect =>
+    return effects.find(effect => isHelioPortEffectType(effect?.type)) || effects.find(effect =>
         isHelioFactoryScene(effect) && effect?.type !== targetType
     ) || null;
 }
@@ -7559,9 +7557,7 @@ function productLabel(info = deviceFirmwareInfo()) { return isNebuliteFirmware(i
 
 function isHelioFirmware(info) {
     if (!info) return false;
-    return isNebuliteFirmware(info) || String(info.brand || "").toUpperCase() === "HELIO" ||
-           String(info.product || "").toLowerCase() === "helio1" ||
-           String(info.firmware || "").toLowerCase() === "helio1";
+    return isNebuliteFirmware(info) || String(info.firmware || "").toLowerCase() === "helio1";
 }
 
 function applyFavicon(helio) {
@@ -7765,10 +7761,7 @@ function deviceFirmwareInfo() {
     const ctrls = fw.controls || [];
     const version = (ctrls.find(c => c.name === "version") || {}).value;
     const firmware = (ctrls.find(c => c.name === "firmware") || {}).value;
-    const product = (ctrls.find(c => c.name === "product") || {}).value;
-    const brand = (ctrls.find(c => c.name === "brand") || {}).value;
-    const updateManifest = (ctrls.find(c => c.name === "updateManifest") || {}).value;
-    return version ? { version, firmware, product, brand, updateManifest } : null;
+    return version ? { version, firmware } : null;
 }
 
 // Light the badge for an available update. `tag` is the release the picker should pre-select
@@ -8282,13 +8275,8 @@ function presetLayout(doc) {
 }
 
 function presetLooksHelio(doc) {
-    const fw = moduleByType(doc, "FirmwareUpdateModule");
-    const brand = controlValue(fw, "brand", "");
-    const product = controlValue(fw, "product", "");
     const layout = moduleByType(doc, "RingLayout") || moduleByType(doc, "SingleRowLayout");
-    return String(brand).toUpperCase() === "HELIO" ||
-           String(product).toLowerCase() === "helio1" ||
-           String(layout?.name || "").toLowerCase().includes("helio");
+    return String(layout?.name || "").toLowerCase().includes("helio");
 }
 
 function presetLedCount(doc) {

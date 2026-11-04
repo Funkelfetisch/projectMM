@@ -86,12 +86,7 @@ void HttpServerModule::defineControls() {
 
 void HttpServerModule::setup() {
     instance_ = this;
-    if (server_.open(port)) {
-        boundPort_ = port;   // the port actually serving, frozen until release; the `port` control applies at the next open
-    } else {
-        boundPort_ = 0;
-        std::printf("HTTP server failed to open port %u\n", port);
-    }
+    ensureListener();
     // A schema change carries hidden flags and option sets the value-patch cannot, so any module's rebuildControls() flips the WS full-resync flag through this hook.
     MoonModule::setSchemaChangedHook(&HttpServerModule::onSchemaChanged);
     // A module whose values someone watches move, a desk's motors, asks for them ahead of the second.
@@ -115,6 +110,8 @@ void HttpServerModule::release() {
     }
     server_.close();
     boundPort_ = 0;
+    listenRetryAt_ = 0;
+    listenFailed_ = false;
     if (instance_ == this) {
         MoonModule::setSchemaChangedHook(nullptr);
         MoonModule::setValuesChangedHook(nullptr);
@@ -123,7 +120,26 @@ void HttpServerModule::release() {
     MoonModule::release();   // chain: uniform override-and-chain (no buffers or children, but the convention holds)
 }
 
+void HttpServerModule::ensureListener() {
+    if (boundPort_ && boundPort_ == port) return;
+    const uint32_t now = platform::millis();
+    if (boundPort_) { server_.close(); boundPort_ = 0; listenRetryAt_ = 0; }   // the control moved: the new port opens now
+    else if (listenRetryAt_ && static_cast<int32_t>(now - listenRetryAt_) < 0) return;
+    if (port && server_.open(port)) {
+        boundPort_ = port;
+        listenRetryAt_ = 0;
+        if (listenFailed_) std::printf("HTTP server recovered on port %u\n", port);
+        listenFailed_ = false;
+        return;
+    }
+    listenRetryAt_ = now + 1000;
+    if (!listenRetryAt_) listenRetryAt_ = 1;   // 0 means at once
+    if (!listenFailed_) std::printf("HTTP server failed to open port %u; retrying each second\n", port);
+    listenFailed_ = true;
+}
+
 void HttpServerModule::tick20ms() MM_NONBLOCKING {
+    ensureListener();
     // Drain every send on the 20 ms transport cadence, before accept so a connection burst cannot starve it; sockets stay off the render tick (architecture.md § Parallelism).
     drainSends();
     // Inbound WS frames before the push, so the subscription a page sends on open shapes its first document: control writes, subscriptions, and the WLED app's {on,bri}.

@@ -20,6 +20,8 @@ public:
     const char* tags() const override { return "🐙🎶"; }
     /// A flat run of pixels, spanning a panel as readily as a strip.
     Dim dimensions() const override { return Dim::D2; }
+    /// The run is the lights in wiring order, so a sparse layout's dot lands on a light rather than an empty cell of its box.
+    bool usesPhysicalLightOrder() const override { return true; }
 
     /// Background decay per frame.
     uint8_t fadeRate   = 48;

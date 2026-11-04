@@ -62,6 +62,32 @@ TEST_CASE("HttpServer: a request that arrives after the connection was accepted 
     http.release();
 }
 
+// A port the system refuses at boot is tried again each second rather than left dark, and a changed port moves the listener at once.
+TEST_CASE("HttpServer: a refused port is retried each second, and a changed port applies live") {
+    struct Restore { ~Restore() { mm::platform::setTestBindFails(false); mm::platform::setTestNowMs(0); } } restore;
+    mm::platform::setTestNowMs(10000);
+    mm::HttpServerModule http;
+    http.port = kTestPort;
+    mm::platform::setTestBindFails(true);
+    http.setup();
+    CHECK(mm::HttpServerModule::servedPort() == 0);
+    mm::platform::setTestBindFails(false);
+    mm::platform::setTestNowMs(10500); http.tick20ms();
+    CHECK(mm::HttpServerModule::servedPort() == 0);   // the retry waits its second
+    mm::platform::setTestNowMs(11000); http.tick20ms();
+    REQUIRE(mm::HttpServerModule::servedPort() == kTestPort);
+    mm::platform::TcpConnection client;
+    CHECK(connectAndAccept(http, client, kTestPort));
+    client.close();
+    http.port = kTestPort + 1; http.tick20ms();
+    REQUIRE(mm::HttpServerModule::servedPort() == kTestPort + 1);
+    mm::platform::TcpConnection moved;
+    CHECK(connectAndAccept(http, moved, kTestPort + 1));
+    moved.close();
+    http.release();
+    CHECK(mm::HttpServerModule::servedPort() == 0);
+}
+
 // Four parking slots dropped the rest of a burst, and a client fetching eight HLS segments at once saw a third of them reset.
 TEST_CASE("HttpServer: eight connections opened before their requests are each answered") {
     mm::HttpServerModule http;

@@ -73,7 +73,7 @@ uint32_t micros() MM_NONBLOCKING;
 /// Drive `millis()` from a test, on a device too so a scenario run on real hardware can freeze time. Zero restores the real clock, which a test must do in release.
 void setTestNowMs(uint32_t ms);
 
-/// Make the next bind fail, so a test reaches that path; false restores. Hogging the port instead is not portable: Linux permits the overlapping bind under SO_REUSEADDR, and macOS lets a non-root process bind port 80.
+/// Make the next bind fail, a UDP socket's or a TCP listener's, so a test reaches that path; false restores. Hogging the port instead is not portable: Linux permits the overlapping bind under SO_REUSEADDR, and macOS lets a non-root process bind port 80.
 void setTestBindFails(bool fail);
 #ifndef ESP_PLATFORM   // host-test seams, which no ESP32 code calls
 /// Make the next multicast join fail, as on a network without multicast; false restores.

@@ -2243,7 +2243,7 @@ bool UdpSocket::open() {
     return true;
 }
 
-// Test override forcing a bind to fail, since relying on the system to refuse a port is not portable.
+// Test override forcing a bind to fail, a UDP socket's or a TCP listener's, since relying on the system to refuse a port is not portable.
 static std::atomic<bool> testBindFails{false};
 void setTestBindFails(bool fail) { testBindFails.store(fail, std::memory_order_relaxed); }
 
@@ -2468,6 +2468,7 @@ TcpServer::~TcpServer() {
 
 bool TcpServer::open(uint16_t port) {
     if (fd_ >= 0) return true;
+    if (testBindFails.load(std::memory_order_relaxed)) return false;
     fd_ = open_sock(AF_INET, SOCK_STREAM, 0);
     if (fd_ < 0) return false;
 
