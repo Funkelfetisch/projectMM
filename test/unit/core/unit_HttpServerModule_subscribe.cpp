@@ -323,6 +323,29 @@ TEST_CASE("values detail preserves subscription outlines and participates in sub
     CHECK(whole(http, &full).find("\"detail\":\"values\"") == std::string::npos);
 }
 
+// A level marked percent tells the UI so in the state it reads; a value that counts something carries no such flag.
+TEST_CASE("a percent level carries its flag in the state, and a counted value does not") {
+    struct Lamp : mm::MoonModule {
+        uint8_t level = 128, count = 3;
+        void defineControls() override {
+            controls_.addControl("level", level, 0, 255);
+            controls_.setPercent(controls_.count() - 1);
+            controls_.addControl("count", count, 0, 255);
+        }
+    };
+    mm::Scheduler s;
+    auto* lamp = new Lamp(); lamp->setName("Lamp");
+    s.addModule(lamp); s.setup();
+    mm::HttpServerModule http;
+    http.setScheduler(&s);
+    const std::string state = whole(http, nullptr);
+    const auto level = state.find("\"name\":\"level\""), count = state.find("\"name\":\"count\"");
+    REQUIRE(level != std::string::npos); REQUIRE(count != std::string::npos); REQUIRE(level < count);
+    CHECK(state.substr(level, count - level).find("\"percent\":true") != std::string::npos);
+    CHECK(state.find("\"percent\":true", count) == std::string::npos);
+    mm::Scheduler::deleteTree(lamp);
+}
+
 TEST_CASE("one module's JSON is its entry in the full state, children included") {
     Tree t;
     mm::HttpServerModule http;

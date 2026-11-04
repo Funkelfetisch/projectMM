@@ -154,6 +154,27 @@ TEST_CASE("BLE scenes: a control the catalogue names carries its label, so the a
     CHECK(labels.count("palette") == 0);
 }
 
+TEST_CASE("BLE scenes: a brightness descriptor says it is a percent level, a colour channel does not") {
+    SceneTree tree;
+    std::string info;
+    for (uint16_t cursor = 0; cursor < 256;) {
+        char bytes[513]; mm::JsonSink sink(bytes, sizeof(bytes)); envelope(sink);
+        REQUIRE(mm::BleSceneCatalog::writeInfo(sink, "solid", cursor) == nullptr); sink.append("}");
+        REQUIRE_FALSE(sink.overflowed());
+        info += bytes;
+        mm::json::JsonDoc page; REQUIRE(mm::json::parse(bytes, page));
+        const auto* next = mm::json::member(page, page.rootNode(), "next"); REQUIRE(next != nullptr);
+        if (next->type == mm::json::JsonType::Null) break;
+        cursor = static_cast<uint16_t>(next->intValue);
+    }
+    const auto brightness = info.find("\"name\":\"brightness\"");
+    REQUIRE(brightness != std::string::npos);
+    CHECK(info.find("\"percent\":true", brightness) != std::string::npos);
+    const auto red = info.find("\"name\":\"red\"");
+    REQUIRE(red != std::string::npos);
+    CHECK(info.substr(red, info.find('}', red) - red).find("percent") == std::string::npos);
+}
+
 TEST_CASE("BLE scenes: solid replaces competing effects, modifiers and extra layers as one complete scene") {
     SceneTree tree;
     auto* wired = new mm::SolidEffect(); wired->setName("Wired"); wired->setTypeName("SolidEffect"); wired->markWiredByCode(); wired->defineControls(); tree.layer->addChild(wired);

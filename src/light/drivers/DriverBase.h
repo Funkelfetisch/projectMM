@@ -221,6 +221,7 @@ protected:
     /// Add the correction controls: brightness, the fixture selector, the curve and the white mode.
     void defineCorrectionControls() {
         controls_.addControl("localBrightness", localBrightness_, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         // Per driver, not global: a fixture that corrects its own pixels needs Linear here.
         controls_.addSelect("curve", curveSel_, kCurveOptions, kCurveCount);
         buildFixtureOptions();                        // fill fixtureOptions_ from the library, sync id and row

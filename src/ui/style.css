@@ -1618,6 +1618,10 @@ body.help-hidden .control-row.has-help { margin-bottom: 6px; }
 }
 .control-value-input::-webkit-inner-spin-button,
 .control-value-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+/* The "%" after a level's number box, in the box's own type. */
+.control-unit { font-size: 12px; color: var(--fg-muted); margin-left: 1px; }
+.control-encoder .control-unit,
+.control-fader   .control-unit { display: none; }   /* hidden with the box it follows */
 .control-value-input:focus {
     outline: 1px solid var(--accent, #4a9eff);
     border-radius: 2px;

@@ -612,6 +612,7 @@ void HttpServerModule::writeControlTail(JsonSink& sink, const ControlDescriptor&
     }
     if (c.minMode) sink.appendf(",\"minMode\":%u", static_cast<unsigned>(c.minMode));   // the mode the UI needs before it shows this
     if (c.numberField) sink.append(",\"numberField\":true");   // render a plain number input, not a slider
+    if (c.percent) sink.append(",\"percent\":true");   // show the 0-255 level as a percentage
     if (c.hex) sink.append(",\"hex\":true");   // that number input reads and writes hexadecimal
     if (c.hosts) writeKnownHosts(sink, static_cast<const char*>(c.ptr));
     if (c.switchRow) sink.append(",\"switchRow\":true");

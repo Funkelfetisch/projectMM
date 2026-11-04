@@ -105,6 +105,7 @@ public:
             if (control.type != ControlType::Bool)
                 object.appendf(",\"min\":%d,\"max\":%d", static_cast<int>(control.min),
                                static_cast<int>(options ? control.max - 1 : control.max));
+            if (control.percent) object.append(",\"percent\":true");
             if (options) object.appendf(",\"optionCount\":%u,\"optionOffset\":%u,\"options\":[", options, from);
             if (object.overflowed()) return "scene-schema";
             // A descriptor never travels without its first option, so the head's size counts that option too.

@@ -1505,7 +1505,7 @@ function helioAmbientBrightnessOverride() {
 
 function helioBrightnessOverrideText(override) {
     if (!override.active) return "";
-    return `Automatic brightness is active (${override.lux} → ${override.target}).`;
+    return `Automatic brightness is active (${override.lux} → ${override.target}%).`;
 }
 
 function openHelioAutomaticBrightnessSettings() {
@@ -1535,7 +1535,7 @@ function updateHelioBrightnessOverrideNote(override) {
 
 function helioBrightnessLabel(drivers = helioDrivers()) {
     const value = Math.max(0, Math.min(255, Number(controlValue(drivers, "brightness", 0)) || 0));
-    return `${Math.round(value * 100 / 255)}%`;
+    return `${levelShown(value, true)}%`;
 }
 
 function helioConnectionLabel() {
@@ -3411,11 +3411,11 @@ function renderHelioAmbientSettings() {
     const settings = new Map([
         ["automatic", ["Automatic control", "Uses the sensor curve below. Turn it off to keep the manual brightness from the main control."]],
         ["lux", ["Measured light", "Light currently measured at the sensor. Higher lux means a brighter room."]],
-        ["target", ["Current output", "Brightness HELIO currently applies, from 0 (off) to 255 (full)."]],
+        ["target", ["Current output", "Brightness HELIO currently applies, from 0% (off) to 100% (full)."]],
         ["darkLux", ["Dark reference (lux)", "At or below this light level, HELIO uses the brightness-in-darkness value."]],
-        ["darkBrightness", ["Brightness in darkness", "LED output at the dark reference, from 0 (off) to 255 (full)."]],
+        ["darkBrightness", ["Brightness in darkness", "LED output at the dark reference, from 0% (off) to 100% (full)."]],
         ["brightLux", ["Bright reference (lux)", "At or above this light level, HELIO uses the brightness-in-bright-room value."]],
-        ["brightBrightness", ["Brightness in bright room", "LED output at the bright reference, from 0 (off) to 255 (full)."]],
+        ["brightBrightness", ["Brightness in bright room", "LED output at the bright reference, from 0% (off) to 100% (full)."]],
         ["hysteresisLux", ["Minimum change (lux)", "A reading must differ by at least this much before the output changes. Raise it if brightness visibly jitters."]],
     ]);
     for (const [name, [labelText, description]] of settings) {
@@ -5073,6 +5073,11 @@ function controlRendersGenerically(mod, ctrl) {
     return true;
 }
 
+// A 0-255 level that counts nothing, which the server marks `percent`, shows as a percentage; the slider and the wire keep the native value.
+function levelShown(native, percent) { return percent ? Math.round(Number(native) * 100 / 255) : Number(native); }
+// The native 0-255 value behind a percentage typed into a level's box.
+function levelNative(shown, percent) { return percent ? Math.round(Number(shown) * 255 / 100) : Number(shown); }
+
 function createControl(moduleName, moduleType, ctrl) {
     const row = document.createElement("div");
     row.className = "control-row";
@@ -5166,25 +5171,33 @@ function createControl(moduleName, moduleType, ctrl) {
             const numInput = document.createElement("input");
             numInput.type = "number";
             numInput.className = "control-value-input";
-            numInput.min = input.min;
-            numInput.max = input.max;
-            numInput.value = input.value;
+            const percent = !!ctrl.percent;
+            if (percent) numInput.dataset.percent = "1";
+            numInput.min = levelShown(input.min, percent);
+            numInput.max = levelShown(input.max, percent);
+            numInput.value = levelShown(input.value, percent);
             input.addEventListener("input", () => {
                 dragTs[key] = Date.now();
-                numInput.value = input.value;
+                numInput.value = levelShown(input.value, percent);
                 debounceSend(key, 150, () => sendControl(moduleName, ctrl.name, parseInt(input.value)));
             });
             numInput.addEventListener("input", () => {
                 dragTs[key] = Date.now();   // stamp so a WS push can't revert what's being typed
-                const v = Math.max(Number(input.min), Math.min(Number(input.max), parseInt(numInput.value) || 0));
+                const v = Math.max(Number(input.min), Math.min(Number(input.max), levelNative(parseInt(numInput.value) || 0, percent)));
                 input.value = v;
                 debounceSend(key, 500, () => sendControl(moduleName, ctrl.name, v));
             });
             row.appendChild(input);
             row.appendChild(numInput);
+            if (percent) {
+                const unit = document.createElement("span");
+                unit.className = "control-unit";
+                unit.textContent = "%";
+                row.appendChild(unit);
+            }
             appendResetButton(row, moduleName, ctrl, def, () => {
                 input.value = def;
-                numInput.value = def;
+                numInput.value = levelShown(def, percent);
             });
             break;
         }
@@ -6928,7 +6941,7 @@ function updateModuleControls(mod) {
                 if (input && Number(input.value) !== Number(ctrl.value)) {
                     input.value = ctrl.value ?? 0;
                     const val = input.nextElementSibling;
-                    if (val && val.classList.contains("control-value-input")) val.value = ctrl.value ?? 0;
+                    if (val && val.classList.contains("control-value-input")) val.value = levelShown(ctrl.value ?? 0, val.dataset.percent === "1");
                     redrawRangeDecorations(input);
                 }
                 break;

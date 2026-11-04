@@ -35,6 +35,7 @@ public:
         controls_.addControl("speed", speed, 0, 255);
         controls_.addControl("effect intensity", intensity, 0, 255);
         controls_.addControl("source brightness", sourceBrightness, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         controls_.addControl("follow master", followMaster);
         controls_.addControl("frame ms", frameMs, 1, 1000);
         controls_.addControl("segment start", segmentStart);

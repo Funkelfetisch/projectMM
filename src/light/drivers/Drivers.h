@@ -305,6 +305,7 @@ public:
         controls_.addText("relayPins", relayPins, sizeof(relayPins));
         controls_.setAdvanced(controls_.count() - 1);   // wiring an installer sets once
         controls_.addControl("brightness", brightness, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         // ONE picker for both kinds, so a `.mlp` is chosen exactly like a built-in; setup scans the folders and a file change rescans, never a brightness change.
         if (!live_.scanned) refreshLivePalettes();
         // Published here too, so a saved palette name resolves when the file is applied, before setup.

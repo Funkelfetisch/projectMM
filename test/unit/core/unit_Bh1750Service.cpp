@@ -4,6 +4,9 @@
 #include "core/services/Bh1750Service.h"
 #include "light/drivers/Drivers.h"
 
+#include <cstring>
+#include <string>
+
 using namespace mm;
 
 TEST_CASE("BH1750 raw counts and calibration map to brightness") {
@@ -45,4 +48,16 @@ TEST_CASE("a Drivers built and dropped beside the live one, as a scene's metadat
     sensor.injectLuxForTest(250);   // 136 on the default curve, which the hook bakes into every driver's table
     CHECK(light->correction().briLut[255] < 255);
     drivers.release();
+}
+
+TEST_CASE("the automatic target and the status read as a percentage, the level people see") {
+    Bh1750Service sensor;
+    sensor.defineControls();
+    sensor.injectLuxForTest(250);   // 136 of 255 on the default curve
+    const char* target = nullptr;
+    for (uint8_t i = 0; i < sensor.controls().count(); ++i)
+        if (std::strcmp(sensor.controls()[i].name, "target") == 0) target = static_cast<const char*>(sensor.controls()[i].ptr);
+    REQUIRE(target != nullptr);
+    CHECK(std::string(target) == "53%");
+    CHECK(std::string(sensor.status()).find("brightness 53%") != std::string::npos);
 }

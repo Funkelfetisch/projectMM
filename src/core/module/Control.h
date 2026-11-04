@@ -171,6 +171,8 @@ struct ControlDescriptor {
     uint8_t minMode = 0;
     /// Whether a numeric renders as a number input, for an integer that is an address not a magnitude.
     bool numberField = false;
+    /// Whether a 0–255 level shows as a percentage of its range, for a magnitude that counts nothing; the value stays native.
+    bool percent = false;
     // These sit after the other flags, since the text initializers below are positional.
 
     bool fader = false;        ///< render as a vertical fader
@@ -389,6 +391,11 @@ public:
     /// Render a numeric as a number input, for an integer that is an identity not a magnitude.
     void setNumberField(uint8_t i, bool numberField = true) {
         if (i < count_) controls_[i].numberField = numberField;
+    }
+
+    /// Show a 0–255 level as a percentage, for a magnitude such as a brightness that counts nothing.
+    void setPercent(uint8_t i) {
+        if (i < count_) controls_[i].percent = true;
     }
 
     /// Mark a text as holding hosts, an address or a list of addresses and names, so the UI shows each known board's name beside its address.

@@ -51,8 +51,10 @@ public:
         controls_.addReadOnly("target", targetText_, sizeof(targetText_));
         controls_.addControl("darkLux", darkLux, 0, 65535);
         controls_.addControl("darkBrightness", darkBrightness, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         controls_.addControl("brightLux", brightLux, 0, 65535);
         controls_.addControl("brightBrightness", brightBrightness, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         controls_.addControl("hysteresisLux", hysteresisLux, 0, 65535);
         controls_.addControl("bus", bus, 0, 1);
         controls_.setAdvanced(controls_.count() - 1);
@@ -255,9 +257,10 @@ private:
         if (!valid_) return;
         std::snprintf(luxText_, sizeof(luxText_), "%u lx", static_cast<unsigned>(measuredLux_));
         if (automatic) {
-            std::snprintf(targetText_, sizeof(targetText_), "%u", static_cast<unsigned>(target_));
-            std::snprintf(statusText_, sizeof(statusText_), "%u lx -> brightness %u",
-                          static_cast<unsigned>(measuredLux_), static_cast<unsigned>(target_));
+            const unsigned percent = (static_cast<unsigned>(target_) * 100u + 127u) / 255u;   // a level, shown as people read it
+            std::snprintf(targetText_, sizeof(targetText_), "%u%%", percent);
+            std::snprintf(statusText_, sizeof(statusText_), "%u lx -> brightness %u%%",
+                          static_cast<unsigned>(measuredLux_), percent);
         } else {
             std::snprintf(targetText_, sizeof(targetText_), "manual");
             std::snprintf(statusText_, sizeof(statusText_), "%u lx, manual brightness",

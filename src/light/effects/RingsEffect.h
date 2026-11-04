@@ -50,6 +50,7 @@ public:
         controls_.addControl("thickness", thickness, 1, 255);
         controls_.addControl("hue_shift", hue_shift, 0, 255);
         controls_.addControl("background brightness", backgroundBrightness, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         controls_.addControl("max pause ms", maxPauseMs, 0, 2000);
     }
 

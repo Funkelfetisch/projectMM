@@ -54,6 +54,7 @@ public:
         controls_.addControl("blue", blue, 0, 255);
         controls_.addControl("white", white, 0, 255);
         controls_.addControl("brightness", brightness, 0, 255);
+        controls_.setPercent(controls_.count() - 1);
         controls_.addSelect("colorMode", colorMode, kColorModeOptions, kColorModeCount);
         controls_.addControl("minRGB", minRGB, 0, 255);
         controls_.addControl("randomColors", randomColors);
