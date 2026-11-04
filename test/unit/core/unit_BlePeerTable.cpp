@@ -13,16 +13,16 @@ struct PeerAllocatorProbe {
 };
 }
 
-TEST_CASE("BLE peer table: interleaved requests and long reads stay with their peers") {
+TEST_CASE("BLE peer table: interleaved requests and notified replies stay with their peers") {
     mm::BlePeerTable<2> peers;
     using Result = mm::BleMessage::Result;
     using Publish = mm::BlePeerTable<2>::Publish;
-    REQUIRE(peers.publish("initial", 0) == Publish::Stored);
+    CHECK(peers.publish("nobody", 0) == Publish::Stale);
     REQUIRE(peers.connect(1)); REQUIRE(peers.connect(2));
+    REQUIRE(peers.subscribe(1, 0, true)); REQUIRE(peers.subscribe(2, 0, true));
     char empty[8] = {}; uint64_t unchanged = 123;
     CHECK(peers.take(empty, sizeof(empty), unchanged) == 0);
     CHECK(unchanged == 123);
-    CHECK(std::strcmp(peers.read(1, 0), "initial") == 0);
     CHECK_FALSE(peers.connect(3)); CHECK_FALSE(peers.connect(1));
     const uint8_t a[] = {'a'}, b[] = {'b', '\n'}, end[] = {'\n'};
     CHECK(peers.feed(1, a, sizeof(a)) == Result::Partial);
@@ -34,19 +34,39 @@ TEST_CASE("BLE peer table: interleaved requests and long reads stay with their p
     CHECK(first != second);
     REQUIRE(peers.publish("alpha", first) == Publish::Stored);
     REQUIRE(peers.publish("bravo", second) == Publish::Stored);
-    CHECK(std::strcmp(peers.read(1, 0), "alpha") == 0);
+    // A reply still going out holds the next one for that peer alone.
+    CHECK(peers.publish("updated", first) == Publish::Busy);
+    uint8_t chunk[16] = {};
+    REQUIRE(peers.pending(1, chunk, sizeof(chunk)) == 6); CHECK(std::memcmp(chunk, "alpha\n", 6) == 0);
+    peers.sent(1, 6);
+    CHECK(peers.pending(1, chunk, sizeof(chunk)) == 0);
     REQUIRE(peers.publish("updated", first) == Publish::Stored);
-    CHECK(std::strcmp(peers.read(1, 1), "alpha") == 0);
-    CHECK(std::strcmp(peers.read(2, 0), "bravo") == 0);
-    CHECK(std::strcmp(peers.read(1, 0), "updated") == 0);
+    CHECK(std::strcmp(peers.reply(1), "updated") == 0);
+    REQUIRE(peers.pending(2, chunk, sizeof(chunk)) == 6); CHECK(std::memcmp(chunk, "bravo\n", 6) == 0);
     CHECK(peers.feed(1, a, sizeof(a)) == Result::Partial);
     REQUIRE(peers.disconnect(1)); REQUIRE(peers.connect(1));
     CHECK(peers.publish("delayed", first) == Publish::Stale);
-    CHECK(std::strcmp(peers.read(2, 0), "bravo") == 0);
-    CHECK(std::strcmp(peers.read(1, 0), "delayed") != 0);
-    CHECK(std::strcmp(peers.read(1, 1), "initial") == 0);
+    CHECK(std::strcmp(peers.reply(2), "bravo") == 0);
+    CHECK(std::strcmp(peers.reply(1), "") == 0);
     CHECK(peers.feed(1, b, sizeof(b)) == Result::Ready);
     REQUIRE(peers.take(out, sizeof(out), first) == 1); CHECK(std::strcmp(out, "b") == 0);
+    // Without notifications the reply is kept but nothing waits to be sent, so it never holds the next.
+    REQUIRE(peers.publish("quiet", first) == Publish::Stored);
+    CHECK(peers.pending(1, chunk, sizeof(chunk)) == 0);
+    CHECK(peers.publish("again", first) == Publish::Stored);
+}
+
+TEST_CASE("BLE peer table: notifications switched off mid-reply drop the rest, so the next reply is not held") {
+    mm::BlePeerTable<2> peers;
+    using Publish = mm::BlePeerTable<2>::Publish;
+    REQUIRE(peers.connect(1)); REQUIRE(peers.subscribe(1, 0, true));
+    const uint64_t generation = peers.generation(1);
+    REQUIRE(peers.publish("first", generation) == Publish::Stored);
+    uint8_t chunk[4] = {};
+    REQUIRE(peers.pending(1, chunk, 2) == 2); peers.sent(1, 2);
+    REQUIRE(peers.subscribe(1, 0, false));
+    CHECK(peers.pending(1, chunk, sizeof(chunk)) == 0);
+    CHECK(peers.publish("second", generation) == Publish::Stored);
 }
 
 TEST_CASE("BLE peer table: subscriptions belong to the connection and physical battery slot") {
@@ -78,7 +98,7 @@ TEST_CASE("BLE peer table: malformed partial input cannot interrupt another clie
     REQUIRE(peers.take(out, sizeof(out), generation) == 2);
     CHECK(std::strcmp(out, "{}") == 0);
     CHECK(peers.publish("ok", generation) == mm::BlePeerTable<2>::Publish::Stored);
-    CHECK(std::strcmp(peers.read(2, 0), "ok") == 0);
+    CHECK(std::strcmp(peers.reply(2), "ok") == 0);
     // A rejected incomplete line is discarded through its delimiter.
     const uint8_t end[] = {'\n'};
     CHECK(peers.feed(1, end, sizeof(end)) == Result::Invalid);
@@ -130,13 +150,13 @@ TEST_CASE("BLE peer table: eight clients keep requests and responses separate ac
         REQUIRE(peers.publish(reply, generations[i]) == Publish::Stored);
     }
     for (unsigned i = 0; i < 8; ++i)
-        CHECK(peers.read(static_cast<uint16_t>(i + 1), 0)[0] == static_cast<char>('a' + i));
+        CHECK(peers.reply(static_cast<uint16_t>(i + 1))[0] == static_cast<char>('a' + i));
     REQUIRE(peers.disconnect(4));
     REQUIRE(peers.connect(9));
     CHECK(peers.publish("late", generations[3]) == Publish::Stale);
     CHECK(peers.subscribers(1, subscribers, 8) == 7);
     for (unsigned i = 0; i < 8; ++i) if (i != 3)
-        CHECK(peers.read(static_cast<uint16_t>(i + 1), 0)[0] == static_cast<char>('a' + i));
+        CHECK(peers.reply(static_cast<uint16_t>(i + 1))[0] == static_cast<char>('a' + i));
 }
 
 TEST_CASE("BLE peer table: extra peers allocate on demand and a failed allocation preserves existing clients") {
@@ -147,7 +167,7 @@ TEST_CASE("BLE peer table: extra peers allocate on demand and a failed allocatio
         CHECK(PeerAllocatorProbe::allocated == 0);
         PeerAllocatorProbe::fail = true;
         CHECK_FALSE(peers.connect(3)); CHECK(peers.size() == 2);
-        CHECK(peers.read(1, 0) != nullptr); CHECK(peers.read(2, 0) != nullptr);
+        CHECK(peers.reply(1) != nullptr); CHECK(peers.reply(2) != nullptr);
         PeerAllocatorProbe::fail = false;
         REQUIRE(peers.connect(3)); CHECK(PeerAllocatorProbe::allocated == 1);
         REQUIRE(peers.disconnect(3)); CHECK(PeerAllocatorProbe::freed == 1);
@@ -175,7 +195,7 @@ TEST_CASE("BLE peer table: repeated extra-peer reconnects free each buffer and c
             CHECK(peers.subscribers(1, subscribers, 8) == 0);
         }
         REQUIRE(peers.connect(3));
-        CHECK(std::strcmp(peers.read(3, 0), "secret") != 0);
+        CHECK(std::strcmp(peers.reply(3), "secret") != 0);
     }
     CHECK(PeerAllocatorProbe::allocated == 1001);
     CHECK(PeerAllocatorProbe::freed == PeerAllocatorProbe::allocated);

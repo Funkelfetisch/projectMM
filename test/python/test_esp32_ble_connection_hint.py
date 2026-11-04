@@ -12,7 +12,7 @@ CXX = shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
 pytestmark = pytest.mark.skipif(CXX is None, reason='no C++ compiler')
 
 
-def test_hint_requests_only_for_short_known_connection(tmp_path):
+def test_hint_asks_a_slow_or_latent_link_for_15_to_30_ms_and_a_short_one_for_4_s(tmp_path):
     source = (ROOT / 'src/platform/esp32/platform_esp32_ble.cpp').read_text()
     start = source.index('void requestConnectionHint(uint16_t handle) {')
     fn = source[start:source.index('\nint gapEvent(', start)]
@@ -21,7 +21,7 @@ def test_hint_requests_only_for_short_known_connection(tmp_path):
 #include <cassert>
 #include <cstdint>
 using namespace mm::platform;
-void fakeLog(unsigned, int) {}
+template <typename... Args> void fakeLog(Args...) {}
 #define ESP_LOGI(tag, fmt, ...) fakeLog(__VA_ARGS__)
 struct ble_gap_conn_desc { uint16_t conn_itvl, conn_latency, supervision_timeout; };
 struct ble_gap_upd_params { uint16_t itvl_min=0, itvl_max=0, latency=0, supervision_timeout=0, min_ce_len=0, max_ce_len=0; };
@@ -33,13 +33,15 @@ int ble_gap_update_params(uint16_t handle, const ble_gap_upd_params* p) { gotHan
     main = r'''
 int main() {
     requestConnectionHint(7);
-    assert(callCount==1 && gotHandle==7 && requested.itvl_min==39 && requested.itvl_max==39);
+    assert(callCount==1 && gotHandle==7 && requested.itvl_min==12 && requested.itvl_max==24);
     assert(requested.latency==0 && requested.supervision_timeout==400);
     lookup=1; requestConnectionHint(8); assert(callCount==1); lookup=0;
-    current.supervision_timeout=800; requestConnectionHint(8); assert(callCount==1);
+    current={9,0,800}; requestConnectionHint(8); assert(callCount==1);
     current={40,3,40}; requestConnectionHint(8); assert(callCount==1);
+    current={9,0,42}; requestConnectionHint(8);
+    assert(callCount==2 && requested.itvl_min==9 && requested.itvl_max==9 && requested.supervision_timeout==400);
     current={24,3,100}; updateStatus=1; requestConnectionHint(9);
-    assert(callCount==2 && gotHandle==9 && requested.itvl_min==24 && requested.latency==3 && requested.supervision_timeout==400);
+    assert(callCount==3 && gotHandle==9 && requested.itvl_min==12 && requested.itvl_max==24 && requested.latency==0 && requested.supervision_timeout==400);
 }
 '''
     cpp, binary = tmp_path / 'hint.cpp', tmp_path / 'hint'

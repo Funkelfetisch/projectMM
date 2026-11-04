@@ -740,22 +740,22 @@ TEST_CASE("BLE RPC2 peer transport keeps two clients correlated across disconnec
         return std::string("{\"$v\":1,\"$id\":") + std::to_string(id) +
             ",\"$op\":\"get\",\"$e\":\"" + kBleTestEpoch + "\",\"$s\":" + std::to_string(session) + "}";
     };
-    send(10, get(first, 2), 102); const std::string aReply = peers.read(10, 0);
-    send(20, get(second, 2), 103); const std::string bReply = peers.read(20, 0);
+    send(10, get(first, 2), 102); const std::string aReply = peers.reply(10);
+    send(20, get(second, 2), 103); const std::string bReply = peers.reply(20);
     checkEnvelope(aReply, 2, first, "get"); checkEnvelope(bReply, 2, second, "get");
     REQUIRE(peers.disconnect(10)); REQUIRE(peers.connect(10));
     CHECK(peers.publish("late reply", genA) == Publish::Stale);
-    CHECK(std::string(peers.read(20, 0)) == bReply);
+    CHECK(std::string(peers.reply(20)) == bReply);
     // Mirror the service tick's active-owner reconciliation before the next request.
     uint64_t live[2] = {}; REQUIRE(peers.generations(live, 2) == 2);
     tree.service.reconcileOwnersForTest(live, 2);
     // The still-connected second client continues with its original namespace.
     send(20, get(second, 3), 104); checkEnvelope(tree.reply(), 3, second, "get");
     send(10, helloA, 105); CHECK(replyNumber(tree.reply(), "s") == first);
-    send(10, get(first, 2), 106); CHECK(std::string(peers.read(10, 0)) == aReply);
+    send(10, get(first, 2), 106); CHECK(std::string(peers.reply(10)) == aReply);
 }
 
-TEST_CASE("BLE RPC2 publishes a due group result separately from another peer's read") {
+TEST_CASE("BLE RPC2 publishes a due group result separately from another peer's reply") {
     BleTree tree; tree.service.setEpochForTest(kBleTestEpoch);
     mm::BlePeerTable<2> peers; REQUIRE(peers.connect(10)); REQUIRE(peers.connect(20));
     using Result = mm::BleMessage::Result; using Publish = mm::BlePeerTable<2>::Publish;
@@ -788,8 +788,8 @@ TEST_CASE("BLE RPC2 publishes a due group result separately from another peer's 
     tree.session = secondSession;
     CHECK(send(20, tree.scoped(R"({"$v":1,"$id":2,"$op":"get"})"), 1000, true) == secondGeneration);
     checkEnvelope(tree.reply(), 2, secondSession, "get");
-    CHECK(std::string(peers.read(10, 0)) == terminal);
-    CHECK(std::string(peers.read(20, 0)) == tree.reply());
+    CHECK(std::string(peers.reply(10)) == terminal);
+    CHECK(std::string(peers.reply(20)) == tree.reply());
 }
 
 TEST_CASE("BLE RPC2 request ID exhaustion requires a fresh session rather than reusing numeric IDs") {
@@ -1188,7 +1188,6 @@ TEST_CASE("BLE link diagnostics are read-only and unavailable without a radio") 
     CHECK_FALSE(mm::platform::bleControlLinkState(absent, status));
     CHECK(status.lastDisconnectReason == -1);
     CHECK(status.lastUpdateStatus == -1);
-    CHECK(status.missingPeerReads == 0);
     CHECK(status.unsupportedAccess == 0);
     CHECK(status.activeConnections == 0);
     mm::BleControlService service;
@@ -1231,6 +1230,27 @@ TEST_CASE("BLE pixel-map RPC reads bounded current coordinates and rejects stale
     map->setEnabled(false);
     tree.send(R"({"$v":1,"$id":7,"$op":"pixel-map"})",106);
     CHECK(tree.reply().find("\"map\":null") != std::string::npos);
+}
+
+TEST_CASE("BLE pixel-map RPC streams every page from one request, each continuation naming the first page's revision") {
+    BleTree tree;
+    auto* layouts = new mm::Layouts(); layouts->setName("Layouts"); layouts->setTypeName("Layouts");
+    auto* map = new mm::PixelMapLayout(); map->setName("ProductStrip"); map->setTypeName("PixelMapLayout");
+    std::strcpy(map->points, "5,14;7,14;9,14;11,14;13,14;15,14;5,6;7,6;9,6;11,6;13,6;15,6;7,2;8,1;9,1;11,1;12,1;13,2;0,5;1,6;2,7;1,9;2,10;3,11;20,5;19,6;18,7;19,9;18,10;17,11;10,10");
+    layouts->addChild(map); tree.scheduler.addModule(layouts);
+    tree.service.setPixelMapReader(&mm::BlePixelMapPage::writeCurrent);
+    struct Recording { Recording() { mm::platform::setTestBlePublishRecorded(true); } ~Recording() { mm::platform::setTestBlePublishRecorded(false); } } recording;
+    tree.send(R"({"$v":1,"$id":3,"$op":"pixel-map"})", 102);
+    for (int tick = 0; tick < 4; ++tick) tree.service.tick();
+    const auto replies = mm::platform::takeTestBlePublished();
+    REQUIRE(replies.size() == 2);
+    char rev[33]; mm::sha256Hex(map->points, std::strlen(map->points), rev);
+    checkEnvelope(replies[0].reply, 3, tree.session, "pixel-map");
+    CHECK(replies[0].reply.find("\"next\":16") != std::string::npos);
+    checkEnvelope(replies[1].reply, 3, tree.session, "pixel-map");
+    CHECK(replies[1].reply.find(std::string("\"revision\":\"") + rev + "\"") != std::string::npos);
+    CHECK(replies[1].reply.find("[10,10]") != std::string::npos);
+    CHECK(replies[1].reply.find("\"next\":null") != std::string::npos);
 }
 
 namespace {

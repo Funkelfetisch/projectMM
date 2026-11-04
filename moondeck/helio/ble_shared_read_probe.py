@@ -2,7 +2,7 @@
 # /// script
 # dependencies = ["bleak"]
 # ///
-"""One bounded unpaired Linux RPC2 read probe during an explicit shared lease.
+"""One bounded unpaired Linux RPC3 read probe during an explicit shared lease.
 
 Only hello/get requests are sent. No light, configuration, pairing, reset,
 retry of an unknown write, or firmware operation is issued.
@@ -54,8 +54,18 @@ async def run(lease_id, duration):
         connected_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         require_lease(lease_id)
         ident = json.loads(bytes(await client.read_gatt_char(IDENTITY)))
-        if ident.get("id") != mac or ident.get("rpc") != 2 or ident.get("security") != "open":
-            raise RuntimeError("BLE identity or open RPC2 capability differs")
+        if ident.get("id") != mac or ident.get("rpc") != 3 or ident.get("security") != "open":
+            raise RuntimeError("BLE identity or open RPC3 capability differs")
+        # Replies arrive as notifications, one LF-terminated line split across payloads.
+        lines, partial = asyncio.Queue(), bytearray()
+
+        def notified(_, data):
+            partial.extend(data)
+            while b"\n" in partial:
+                end = partial.index(b"\n")
+                lines.put_nowait(bytes(partial[:end]))
+                del partial[:end + 1]
+        await client.start_notify(STATE, notified)
 
         async def rpc(request):
             require_lease(lease_id)
@@ -66,15 +76,17 @@ async def run(lease_id, duration):
                 require_lease(lease_id)
                 await client.write_gatt_char(COMMAND, wire[offset:offset + 20], response=True)
             deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
+            while (left := deadline - time.monotonic()) > 0:
                 require_lease(lease_id)
-                raw = bytes(await client.read_gatt_char(STATE))
+                try:
+                    raw = await asyncio.wait_for(lines.get(), left)
+                except asyncio.TimeoutError:
+                    break
                 if len(raw) > 512:
                     raise RuntimeError("RPC reply exceeds limit")
                 reply = json.loads(raw)
                 if reply.get("id") == request["$id"] and reply.get("op") == request["$op"]:
                     return reply
-                await asyncio.sleep(0.1)
             raise RuntimeError("RPC reply was not correlated; request is not replayed")
 
         nonce = secrets.token_hex(16)
@@ -90,7 +102,7 @@ async def run(lease_id, duration):
             if not reply.get("ok") or reply.get("e") != epoch or reply.get("s") != session:
                 raise RuntimeError("Get response belongs to a different session")
             await asyncio.sleep(1)
-        return {"rpc2Gets": count, "identityMatched": True, "open": True,
+        return {"rpcGets": count, "identityMatched": True, "open": True,
                 "pairingRequestedByProbe": False, "lightingOrConfigurationMutations": False,
                 "epoch": epoch, "session": session, "connectedAtUtc": connected_at,
                 "finishedAtUtc": datetime.datetime.now(datetime.timezone.utc).isoformat(),

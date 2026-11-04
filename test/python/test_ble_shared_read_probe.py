@@ -48,7 +48,7 @@ class RpcProbeTests(unittest.IsolatedAsyncioTestCase):
             def read(self): return json.dumps({'controls':[{'name':'mac','value':lease['systemMac']}]}).encode()
         class Client:
             def __init__(self, address, **kwargs):
-                calls.append(('connect',address,kwargs)); self.partial = b''; self.reply = None
+                calls.append(('connect',address,kwargs)); self.partial = b''; self.notify = None
             async def __aenter__(self): return self
             async def __aexit__(self, *_): calls.append(('disconnect',))
             async def write_gatt_char(self, characteristic, fragment, response):
@@ -58,19 +58,24 @@ class RpcProbeTests(unittest.IsolatedAsyncioTestCase):
                     request = json.loads(self.partial); self.partial = b''
                     calls.append(('request',request['$op']))
                     if request['$op'] == 'hello':
-                        self.reply = {'id':request['$id'],'op':'hello','ok':True,'nonce':request['$nonce'],
-                                      'e':'a'*32,'s':17}
+                        reply = {'id':request['$id'],'op':'hello','ok':True,'nonce':request['$nonce'],
+                                 'e':'a'*32,'s':17}
                     else:
-                        self.reply = {'id':request['$id'],'op':'get','ok':True,'e':'a'*32,'s':17}
+                        reply = {'id':request['$id'],'op':'get','ok':True,'e':'a'*32,'s':17}
+                    line = json.dumps(reply).encode() + b'\n'
+                    for offset in range(0, len(line), 20):   # notifications at the minimum ATT MTU
+                        self.notify(probe.STATE, line[offset:offset + 20])
+            async def start_notify(self, characteristic, callback):
+                calls.append(('notify', characteristic)); self.notify = callback
             async def read_gatt_char(self, characteristic):
-                if characteristic == probe.IDENTITY:
-                    return json.dumps({'id':lease['systemMac'],'rpc':2,'security':'open'}).encode()
-                return json.dumps(self.reply).encode()
+                assert characteristic == probe.IDENTITY, 'replies arrive in notifications, never by reading State'
+                return json.dumps({'id':lease['systemMac'],'rpc':3,'security':'open'}).encode()
         with mock.patch.object(probe, 'require_lease', return_value=lease), \
              mock.patch.object(probe.urllib.request, 'urlopen', return_value=Response()), \
              mock.patch.dict(sys.modules, {'bleak':types.SimpleNamespace(BleakClient=Client)}):
             result = await probe.run('approved', 0.01)
-        self.assertEqual(result['rpc2Gets'], 1)
+        self.assertEqual(result['rpcGets'], 1)
+        self.assertIn(('notify', probe.STATE), calls)
         self.assertEqual([c[1] for c in calls if c[0] == 'request'], ['hello','get'])
         self.assertFalse(calls[0][2]['pair'])
         self.assertTrue(all(c[2] <= 20 and c[3] for c in calls if c[0] == 'fragment'))

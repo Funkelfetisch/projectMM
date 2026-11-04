@@ -56,30 +56,3 @@ TEST_CASE("BLE disconnect reset drops partial JSON and a batched write is refuse
     CHECK(message.feed(reinterpret_cast<const uint8_t*>(batch.data()), batch.size()) == mm::BleMessage::Result::Invalid);
     char out[513]; CHECK(message.take(out, sizeof(out)) == 0);
 }
-
-TEST_CASE("BLE long reads retain one value across publishes at minimum ATT MTU") {
-    char current[513] = {}, snapshot[513] = {};
-    std::memset(current, 'a', 512);
-    std::string joined(mm::BleMessage::valueForRead(0, current, snapshot), 22);
-    std::memset(current, 'b', 512);   // a newly published response between Read Blob requests
-    for (size_t offset = 22; offset < 512; offset += 22) {
-        const char* value = mm::BleMessage::valueForRead(static_cast<uint16_t>(offset), current, snapshot);
-        joined.append(value + offset, std::min(size_t{22}, 512 - offset));
-    }
-    CHECK(joined == std::string(512, 'a'));
-    CHECK(std::string(mm::BleMessage::valueForRead(22, current, snapshot)) == std::string(512, 'a'));
-    CHECK(std::string(mm::BleMessage::valueForRead(0, current, snapshot)) == std::string(512, 'b'));
-    snapshot[0] = '\0';
-    CHECK(std::string(mm::BleMessage::valueForRead(22, current, snapshot)) == std::string(512, 'b'));
-}
-
-TEST_CASE("BLE long reads keep their final empty blob and always terminate a maximum-length value") {
-    char current[513] = {}, snapshot[513] = {};
-    std::memset(current, 'a', 44);
-    const std::string captured = mm::BleMessage::valueForRead(0, current, snapshot);
-    std::memset(current, 'b', 44);
-    CHECK(std::string(mm::BleMessage::valueForRead(44, current, snapshot)) == captured);
-    CHECK(std::string(snapshot + 44).empty());
-    std::memset(current, 'c', sizeof(current));
-    CHECK(std::strlen(mm::BleMessage::valueForRead(0, current, snapshot)) == 512);
-}

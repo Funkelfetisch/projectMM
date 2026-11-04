@@ -25,6 +25,7 @@
 #include "light/layers/Effects.h"
 #include "light/layers/Layer.h"
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -421,6 +422,68 @@ TEST_CASE("BLE scenes: through the real RPC2 dispatcher, every scene's controls 
     }
 }
 
+
+TEST_CASE("BLE scenes: one scene-info request streams every page in order under its id, a retry streams them again, and a session gone ends it") {
+    SceneTree tree;
+    mm::BleControlService service;
+    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+        &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState};
+    service.setScheduler(&tree.scheduler); service.setScenes(&api);
+    service.setEpochForTest("00000000000000000000000000000001");
+    struct Recording { Recording() { mm::platform::setTestBlePublishRecorded(true); } ~Recording() { mm::platform::setTestBlePublishRecorded(false); } } recording;
+    service.handle(R"({"$v":1,"$id":1,"$op":"hello","$nonce":"00000000000000000000000000000002"})", 100);
+    service.tick(); mm::platform::takeTestBlePublished();
+    const char* request = R"({"$v":1,"$e":"00000000000000000000000000000001","$s":1,"$id":2,"$op":"scene-info","$scene":"ripple"})";
+    const auto stream = [&] {
+        service.handle(request, 100);
+        for (int tick = 0; tick < 40; ++tick) service.tick();
+        return mm::platform::takeTestBlePublished();
+    };
+    const auto replies = stream();
+    REQUIRE(replies.size() >= 2);
+    CHECK(replies.size() <= 14);
+    long cursor = 0;
+    for (size_t i = 0; i < replies.size(); ++i) {
+        CAPTURE(replies[i].reply);
+        CHECK(replies[i].reply.size() <= 512);
+        mm::json::JsonDoc page; REQUIRE(mm::json::parse(replies[i].reply.c_str(), page));
+        CHECK(mm::json::member(page, page.rootNode(), "id")->intValue == 2);
+        CHECK(std::strcmp(mm::json::member(page, page.rootNode(), "op")->str, "scene-info") == 0);
+        const auto* controls = mm::json::member(page, page.rootNode(), "controls"); REQUIRE(controls != nullptr);
+        CHECK(page.node(controls->firstChild) != nullptr);
+        const auto* next = mm::json::member(page, page.rootNode(), "next"); REQUIRE(next != nullptr);
+        if (i + 1 < replies.size()) { REQUIRE(next->type == mm::json::JsonType::Int); CHECK(next->intValue > cursor); cursor = next->intValue; }
+        else CHECK(next->type == mm::json::JsonType::Null);
+    }
+    const auto again = stream();
+    REQUIRE(again.size() == replies.size());
+    CHECK(again.back().reply.find("\"next\":null") != std::string::npos);
+    service.handle(request, 100);
+    service.reconcileOwnersForTest(nullptr, 0);
+    for (int tick = 0; tick < 40; ++tick) service.tick();
+    CHECK(mm::platform::takeTestBlePublished().size() == 1);
+}
+
+TEST_CASE("BLE scenes: info reports the descriptors tag, FNV-1a 64 over the catalog revision and every palette name, each ended by a NUL") {
+    SceneTree tree;
+    uint64_t expected = 14695981039346656037ull;
+    const auto fold = [&](const char* text) { for (const char* c = text;; ++c) { expected = (expected ^ static_cast<uint8_t>(*c)) * 1099511628211ull; if (!*c) break; } };
+    fold(mm::BleSceneCatalog::revision());
+    REQUIRE(mm::paletteCount() > mm::palettes::kCount);   // the catalog's palette scripts follow the built-ins
+    for (uint8_t i = 0; i < mm::paletteCount(); ++i)
+        fold(mm::LivePalettes::isLive(i) ? mm::LivePalettes::nameAt(mm::LivePalettes::sourceIndex(i)) : mm::palettes::kBuiltins[i].name);
+    CHECK(mm::BleSceneCatalog::descriptors() == expected);
+    mm::BleControlService service;
+    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+        &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState, &mm::BleSceneCatalog::descriptors};
+    service.setScheduler(&tree.scheduler); service.setScenes(&api);
+    service.setEpochForTest("00000000000000000000000000000001");
+    service.handle(R"({"$v":1,"$id":1,"$op":"hello","$nonce":"00000000000000000000000000000002"})", 100);
+    service.handle(R"({"$v":1,"$e":"00000000000000000000000000000001","$s":1,"$id":2,"$op":"info"})", 100);
+    char tag[32]; std::snprintf(tag, sizeof(tag), "\"descriptors\":\"%016llx\"", static_cast<unsigned long long>(expected));
+    CHECK(std::strstr(service.response(), tag) != nullptr);
+    CHECK(std::strlen(service.response()) <= 512);
+}
 
 TEST_CASE("BLE scan scenes: actual native control changes drive hints, not a previous scene request") {
     SceneTree tree;

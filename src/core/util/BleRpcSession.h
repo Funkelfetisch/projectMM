@@ -75,6 +75,8 @@ public:
         std::memmove(reply_, reply, length + 1);
         return true;
     }
+    /// The exact bytes of the last accepted request, which a streaming list repeats at its next cursor.
+    const char* request() const { return request_; }
     /// The retained result, or an empty string while its accepted request awaits dispatch.
     const char* cachedReply() const { return reply_; }
 

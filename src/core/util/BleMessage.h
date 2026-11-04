@@ -6,18 +6,12 @@
 
 namespace mm {
 
-/// Bounded control messages: newline-delimited requests across ATT writes and coherent values across long reads.
+/// Bounded control messages: newline-delimited requests across ATT writes.
 class BleMessage {
 public:
     /// Maximum request length before its line delimiter.
     static constexpr size_t kCapacity = 512;
     enum class Result : uint8_t { Partial, Ready, Busy, Invalid };
-
-    /// Read Blob calls revisit the callback: keep one whole value until a new offset-zero read or a cleared peer snapshot.
-    static const char* valueForRead(uint16_t offset, const char (&current)[kCapacity + 1], char (&snapshot)[kCapacity + 1]) {
-        if (offset == 0 || !snapshot[0]) { std::memcpy(snapshot, current, sizeof(snapshot)); snapshot[kCapacity] = '\0'; }
-        return snapshot;
-    }
 
     /// Append an ATT fragment, retaining a complete request until taken.
     Result feed(const uint8_t* bytes, size_t count) {

@@ -4,6 +4,7 @@
 #include "core/module/StateDocument.h"
 #include "core/util/JsonSink.h"
 #include "core/util/JsonUtil.h"
+#include "core/util/fnv.h"
 #include "core/util/ModuleFactory.h"
 #include "helio/BleSceneData.h"
 #include "helio/BleAdvertisementRegistry.h"
@@ -33,6 +34,16 @@ public:
     static uint16_t count() { return sizeof(product_scenes::kEntries) / sizeof(Entry); }
     /// Whether a stable ID exists, independently of the active module graph.
     static bool exists(const char* id) { return find(id) != nullptr; }
+    /// FNV-1a 64 over the revision and every palette name in picker order, each ended by a NUL: what a scene's descriptors depend on beyond the code the revision covers.
+    static uint64_t descriptors() {
+        Fnv1a64 tag;
+        tag.add(revision(), std::strlen(revision()) + 1);
+        for (uint8_t i = 0; i < paletteCount(); ++i) {
+            const char* name = LivePalettes::isLive(i) ? LivePalettes::nameAt(LivePalettes::sourceIndex(i)) : palettes::kBuiltins[i].name;
+            tag.add(name, std::strlen(name) + 1);
+        }
+        return tag.h;
+    }
 
     /// Every page leaves room for the cursor and the caller's closing brace.
     static constexpr size_t kPageTail = sizeof("],\"next\":65535}") - 1;

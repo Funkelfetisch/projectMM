@@ -21,8 +21,9 @@ using namespace mm::platform;
 struct Peripheral {
     std::atomic<uint32_t> linkAccepted{7}, linkFailed{2}, linkDisconnected{5};
     std::atomic<int32_t> lastDisconnectReason{8}, lastUpdateStatus{0};
-    std::atomic<uint32_t> missingPeerReads{3}, unsupportedAccess{4};
+    std::atomic<uint32_t> unsupportedAccess{4};
     std::atomic<uint8_t> connectionCount{2};
+    std::atomic<uint16_t> linkInterval{12}, linkLatency{0}, linkTimeout{400};
 };
 '''
     main = r'''
@@ -31,10 +32,12 @@ int main() {
     assert(bleControlLinkState(handle, state));
     assert(state.activeConnections == 2 && state.accepted == 7 && state.failed == 2);
     assert(state.disconnected == 5 && state.lastDisconnectReason == 8 && state.lastUpdateStatus == 0);
-    assert(state.missingPeerReads == 3 && state.unsupportedAccess == 4);
+    assert(state.unsupportedAccess == 4);
+    assert(state.interval == 12 && state.latency == 0 && state.timeout == 400);
     radio.connectionCount.store(1); assert(bleControlLinkState(handle, state) && state.activeConnections == 1);
     handle.impl = nullptr; assert(!bleControlLinkState(handle, state));
     assert(state.activeConnections == 0 && state.lastDisconnectReason == -1 && state.lastUpdateStatus == -1);
+    assert(state.interval == 0 && state.latency == 0 && state.timeout == 0);
 }
 '''
     cpp, binary = tmp_path / 'link-state.cpp', tmp_path / 'link-state'

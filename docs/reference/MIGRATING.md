@@ -32,6 +32,12 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ## v7.0.0
 
+### NEBULITE and HELIO firmware answer BLE requests in notifications (RPC3)
+
+**Action: *nothing* on the device. The NEBULITE app must be a build that reads `rpc:3`; an older app cannot talk to this firmware.**
+
+Identity reports `rpc:3`. A reply arrives as notifications on State/result, which has no readable value anymore, and a list request (`scenes`, `scene-info`, `wifi`, `pixel-map`, `outputs`, `preview-frame`) streams every page without a request per page. A client enables notifications before `hello`. The firmware asks a slow central for a 15 to 30 ms connection interval. [Product BLE control](product-ble.md#framing-and-replies) describes the wire.
+
 ### NEBULITE and HELIO firmware report `bleOta:true` and take a signed update over BLE
 
 **Action: *nothing* on the device. The NEBULITE app must be a build that accepts both values of `bleOta`.**

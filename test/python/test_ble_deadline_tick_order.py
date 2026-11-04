@@ -44,7 +44,7 @@ bool bleControlReceive(int, char*, size_t, uint64_t& generation) {
     if (!incoming) return false;
     incoming = false; prepareReady = true; generation = 2; return true;
 }
-bool bleControlPublish(int, const char* text, uint32_t, uint64_t) { published.emplace_back(text); return true; }
+bool bleControlPublish(int, const char* text, uint64_t) { published.emplace_back(text); return true; }
 }
 struct FakePeers { void releaseInactive(uint64_t*, size_t) {} };
 struct Service : MoonModule {
@@ -55,7 +55,7 @@ struct Service : MoonModule {
     char response_[40] = {};
     bool flushReply() {
         if (!dirty) return true;
-        if (!platform::bleControlPublish(transport_, response_, 0, replyGeneration_)) return false;
+        if (!platform::bleControlPublish(transport_, response_, replyGeneration_)) return false;
         dirty = false; return true;
     }
     void applyDue(uint32_t now) {
@@ -65,6 +65,9 @@ struct Service : MoonModule {
         if (!dueAlreadyProcessed) applyDue(now);
         std::strcpy(response_, "other-peer"); dirty = true;
     }
+    struct { bool active = false; } stream_;
+    int continued = 0;
+    void continueStream(uint32_t) { ++continued; stream_.active = false; std::strcpy(response_, "page"); dirty = true; }
 '''
     main = r'''
 };
@@ -74,6 +77,12 @@ int main() {
     assert(published.size() == 1 && published[0] == "other-peer");
     service.tick();
     assert(published.size() == 2 && published[1] == "terminal");
+    // A streaming list's next page goes before a waiting request, which the following tick takes.
+    service.stream_.active = true; incoming = true;
+    service.tick();
+    assert(service.continued == 1 && published.back() == "page" && incoming);
+    service.tick();
+    assert(!incoming && published.back() == "other-peer");
 }
 '''
     cpp, binary = tmp_path / 'tick.cpp', tmp_path / 'tick'

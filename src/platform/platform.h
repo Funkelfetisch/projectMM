@@ -13,7 +13,8 @@
 #include "sdkconfig.h"
 #endif
 #ifndef ESP_PLATFORM
-#include <vector>   // the host-test seams' recorded acknowledgements
+#include <string>   // the host-test seams' recorded replies
+#include <vector>   // the host-test seams' recorded acknowledgements and replies
 #endif
 
 /// The one interface every module reaches hardware through, so the same source drives an ESP32, a Teensy, a Raspberry Pi and a desktop.
@@ -962,9 +963,11 @@ struct BleLinkState {
     uint32_t disconnected = 0;
     int32_t lastDisconnectReason = -1; ///< Native stack reason; -1 means no disconnect observed.
     int32_t lastUpdateStatus = -1; ///< Native connection-update status; -1 means no update observed.
-    uint32_t missingPeerReads = 0; ///< State read reached the callback with no matching live peer.
     uint32_t unsupportedAccess = 0; ///< Unexpected operation reached the control-characteristic callback.
     uint8_t activeConnections = 0; ///< Current link count, without peer identities.
+    uint16_t interval = 0; ///< The latest link's connection interval in 1.25 ms units; 0 until one connects.
+    uint16_t latency = 0; ///< The latest link's peripheral latency in connection events.
+    uint16_t timeout = 0; ///< The latest link's supervision timeout in 10 ms units.
 };
 /// Whether this target has a compiled BLE peripheral.
 bool bleControlAvailable() MM_NONBLOCKING;
@@ -984,8 +987,8 @@ void bleControlAbandon(BleControlHandle& handle);
 size_t bleControlReceive(BleControlHandle& handle, char* out, size_t capacity, uint64_t& generation) MM_NONBLOCKING;
 /// Snapshot active connection generations; false means unavailable or contended, not an empty set.
 bool bleControlOwners(BleControlHandle& handle, uint64_t* out, size_t capacity, size_t& count) MM_NONBLOCKING;
-/// Replace the readable response; an eight-byte notification carries revision and uptime.
-bool bleControlPublish(BleControlHandle& handle, const char* response, uint32_t revision, uint64_t generation) MM_NONBLOCKING;
+/// Queue the reply to the connection behind `generation`, which receives it with an LF in notifications; false while its previous reply is still going out or the transport is contended.
+bool bleControlPublish(BleControlHandle& handle, const char* response, uint64_t generation) MM_NONBLOCKING;
 /// Coalesced public hints; only the host task updates the scan-response payload.
 bool bleControlPublishAdvertisement(BleControlHandle& handle, const std::array<uint8_t, 13>& bytes) MM_NONBLOCKING;
 /// Whether the peripheral has an active central connection.
@@ -1013,6 +1016,12 @@ uint32_t testBleSecurityRequests();
 struct BleUpdateAck { uint64_t generation = 0; uint32_t stored = 0; uint32_t asked = 0; bool failed = false; };
 /// The acknowledgements sent since the last call, oldest first, which the call clears.
 std::vector<BleUpdateAck> takeTestBleUpdateAcks();
+/// One reply the stub recorded instead of notifying.
+struct BlePublished { uint64_t generation = 0; std::string reply; };
+/// Make publish record each reply and succeed, as a radio with a subscribed central does; off, publish refuses as a host without a radio.
+void setTestBlePublishRecorded(bool recorded);
+/// The replies published since the last call, oldest first, which the call clears.
+std::vector<BlePublished> takeTestBlePublished();
 #endif
 
 /// One UDP socket: the wire every light protocol sends and receives on.

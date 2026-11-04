@@ -305,7 +305,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         static constexpr mm::BleSceneApi sceneApi{
             &mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
             &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply,
-            &mm::BleSceneCatalog::writeState};
+            &mm::BleSceneCatalog::writeState, &mm::BleSceneCatalog::descriptors};
         ble->setScenes(&sceneApi);
         ble->setPixelMapReader(&mm::BlePixelMapPage::writeCurrent);
         ble->setOutputReader(&mm::BleOutputPage::writeCurrent);

@@ -126,7 +126,7 @@ public:
             setStatus("BLE unavailable for pairing repair", Severity::Warning);
         MoonModule::onControlChanged(name);
     }
-    /// Release links that went away, flush a pending reply, apply due work, then handle at most one request.
+    /// Release links that went away, flush a pending reply, apply due work, then send a streaming list's next page or handle at most one request.
     void tick() MM_NONBLOCKING override {
         std::array<uint64_t, platform::kBleControlPeerCapacity> owners{}; size_t ownerCount = 0;
         if (rpc_ && platform::bleControlOwners(transport_, owners.data(), owners.size(), ownerCount))
@@ -137,16 +137,17 @@ public:
         const uint32_t now = platform::millis();
         applyDue(now);
         if (!flushReply()) { MoonModule::tick(); return; }
-        char request[BleMessage::kCapacity + 1];
-        if (platform::bleControlReceive(transport_, request, sizeof(request), replyGeneration_)) {
-            handle(request, now, true);
+        if (stream_.active) continueStream(now);
+        else {
+            char request[BleMessage::kCapacity + 1];
+            if (platform::bleControlReceive(transport_, request, sizeof(request), replyGeneration_)) handle(request, now, true);
         }
         flushReply();
         MoonModule::tick();
     }
     /// The identity characteristic a phone reads before any session exists.
     void writeIdentity(JsonSink& sink, const platform::BleBatteryConfig& batteries) const {
-        sink.append("{\"v\":1,\"rpc\":2,\"firmware\":"); sink.writeJsonString(firmware_);
+        sink.append("{\"v\":1,\"rpc\":3,\"firmware\":"); sink.writeJsonString(firmware_);
         sink.append(",\"build\":"); sink.writeJsonString(build_);
         sink.append(",\"id\":"); sink.writeJsonString(platform::macString());
         sink.appendf(",\"maxRequest\":512,\"wifiRequired\":false,\"wifiToggle\":true,\"bleOta\":%s,\"groups\":\"scheduled-patch\",\"ota\":\"http-app\",\"batteryOp\":true,\"security\":\"open\"",
@@ -215,12 +216,12 @@ public:
         else std::snprintf(pairing_, sizeof(pairing_), "%s", "unavailable");
         platform::BleLinkState link;
         if (platform::bleControlLinkState(transport_, link))
-            std::snprintf(linkDiagnostics_, sizeof(linkDiagnostics_), "active %u/%u; accepted %lu; failed %lu; disconnected %lu; reason %ld; update %ld; no peer %lu; bad op %lu",
+            std::snprintf(linkDiagnostics_, sizeof(linkDiagnostics_), "active %u/%u; accepted %lu; failed %lu; disconnected %lu; reason %ld; update %ld; bad op %lu; interval %u.%02u ms; latency %u; timeout %u ms",
                           static_cast<unsigned>(link.activeConnections), static_cast<unsigned>(platform::kBleControlPeerCapacity),
                           static_cast<unsigned long>(link.accepted), static_cast<unsigned long>(link.failed),
                           static_cast<unsigned long>(link.disconnected), static_cast<long>(link.lastDisconnectReason),
-                          static_cast<long>(link.lastUpdateStatus), static_cast<unsigned long>(link.missingPeerReads),
-                          static_cast<unsigned long>(link.unsupportedAccess));
+                          static_cast<long>(link.lastUpdateStatus), static_cast<unsigned long>(link.unsupportedAccess), static_cast<unsigned>(link.interval * 125u / 100u),
+                          static_cast<unsigned>(link.interval * 125u % 100u), static_cast<unsigned>(link.latency), static_cast<unsigned>(link.timeout) * 10u);
         else std::snprintf(linkDiagnostics_, sizeof(linkDiagnostics_), "%s", "unavailable");
         std::snprintf(connection_, sizeof(connection_), "%s", !transport_.impl ? "unavailable" :
                       platform::bleControlConnected(transport_) ? "connected" : "advertising");
@@ -276,11 +277,12 @@ public:
         auto* session = rpc_ ? rpc_[0].find(activeOwner_) : nullptr;
         if (!session || !text(doc, "$e") || !replySession_) { result(id, "session-required"); return; }
         const auto decision = session->accept(text(doc, "$e"), replySession_, static_cast<uint16_t>(id), request);
-        if (decision == BleRpcSession::Decision::Retry) {
+        // A list is a read, so its retry streams every page again rather than replaying the first.
+        if (decision == BleRpcSession::Decision::Retry && !paged(op)) {
             if (!session->cachedReply()[0]) { result(id, "receipt-unavailable"); return; }
             std::snprintf(response_, sizeof(response_), "%s", session->cachedReply()); replyDirty_ = true; return;
         }
-        if (decision != BleRpcSession::Decision::Accept) {
+        if (decision != BleRpcSession::Decision::Accept && decision != BleRpcSession::Decision::Retry) {
             const char* error = decision == BleRpcSession::Decision::SessionExpired ? "session-expired" :
                 decision == BleRpcSession::Decision::IdReused ? "id-reused" :
                 decision == BleRpcSession::Decision::IdExpired ? "id-expired" : "correlation";
@@ -288,6 +290,7 @@ public:
         }
         dispatch(doc, request, static_cast<uint16_t>(id), now);
         session->cacheReply(response_);
+        if (paged(op)) beginStream();
     }
     /// Apply a due operation before dispatching a cancel at the same instant, observe completed frame preparation, and keep the firmware update's deadlines.
     void applyDue(uint32_t now) {
@@ -308,7 +311,7 @@ public:
 private:
     bool flushReply() {
         if (!replyDirty_) return true;
-        if (!platform::bleControlPublish(transport_, response_, revision_, replyGeneration_)) return false;
+        if (!platform::bleControlPublish(transport_, response_, replyGeneration_)) return false;
         replyDirty_ = false;
         return true;
     }
@@ -355,6 +358,7 @@ private:
     }
     void clearRpc() {
         using Peers = BleRpcPeers<platform::kBleControlPeerCapacity>;
+        stream_ = {};
         clearUpdate();
         if (rpc_) rpc_[0].~Peers();
         rpc_.resize(0);
@@ -482,6 +486,63 @@ private:
         if (node->type != json::JsonType::Object) return false;
         JsonSink sink(out, sizeof(out)); json::write(sink, doc, node); return !sink.overflowed();
     }
+    /// The operations that page with `$offset`, each streaming every page from it to the end.
+    static bool paged(const char* op) {
+        for (const char* name : {"scenes", "scene-info", "wifi", "pixel-map", "outputs", "preview-frame"})
+            if (!std::strcmp(op, name)) return true;
+        return false;
+    }
+    /// Where the page just written continues: its `next` cursor and `revision`, at the top or in its one object; false once it ends or failed.
+    static bool cursor(const char* reply, uint32_t& next, char (&revision)[33]) {
+        json::JsonDoc doc;
+        if (!json::parse(reply, doc) || !doc.rootNode() || doc.rootNode()->type != json::JsonType::Object) return false;
+        const auto* ok = json::member(doc, doc.rootNode(), "ok");
+        if (!ok || ok->type != json::JsonType::Bool || !ok->intValue) return false;
+        const json::JsonNode* holder = doc.rootNode();
+        if (!json::member(doc, holder, "next"))
+            for (int i = holder->firstChild; i >= 0; i = doc.nodes[i].next)
+                if (doc.nodes[i].type == json::JsonType::Object && json::member(doc, &doc.nodes[i], "next")) { holder = &doc.nodes[i]; break; }
+        const auto* cursorNode = json::member(doc, holder, "next");
+        if (!cursorNode || !parseNumber(*cursorNode, next)) return false;
+        const auto* token = json::member(doc, holder, "revision");
+        if (token && token->type == json::JsonType::String && std::strlen(token->str) < sizeof(revision)) std::snprintf(revision, sizeof(revision), "%s", token->str);
+        else revision[0] = '\0';
+        return true;
+    }
+    /// Keep a list request streaming when the page just written has a next one; anything else ends it.
+    void beginStream() {
+        stream_ = {};
+        if (!cursor(response_, stream_.next, stream_.revision)) return;
+        stream_.generation = replyGeneration_;
+        stream_.active = true;
+    }
+    /// Write the streaming list's next page: the request its session last accepted, again, at the cursor and with the revision the previous page named; a peer or session gone ends it.
+    void continueStream(uint32_t now) {
+        const uint64_t generation = stream_.generation;
+        activeOwner_ = ownerOf(generation);
+        const auto* session = activeOwner_ && rpc_ ? rpc_[0].find(activeOwner_) : nullptr;
+        json::JsonDoc original;
+        if (!session || !json::parse(session->request(), original)) { stream_ = {}; return; }
+        char request[BleMessage::kCapacity + 1];
+        JsonSink sink(request, sizeof(request)); sink.append("{");
+        for (int i = original.rootNode()->firstChild; i >= 0; i = original.nodes[i].next) {
+            const auto& node = original.nodes[i];
+            if (!std::strcmp(node.key, "$offset") || !std::strcmp(node.key, "$rev")) continue;
+            sink.writeJsonString(node.key); sink.append(":"); json::write(sink, original, &node); sink.append(",");
+        }
+        sink.appendf("\"$offset\":%u", static_cast<unsigned>(stream_.next));
+        if (stream_.revision[0]) { sink.append(",\"$rev\":"); sink.writeJsonString(stream_.revision); }
+        sink.append("}");
+        json::JsonDoc doc;
+        uint32_t id = 0;
+        const char* op = nullptr;
+        if (sink.overflowed() || !json::parse(request, doc) || !number(doc, "$id", id) || !(op = text(doc, "$op"))) { stream_ = {}; return; }
+        replyGeneration_ = generation;
+        replySession_ = 0; number(doc, "$s", replySession_);
+        std::snprintf(replyOperation_, sizeof(replyOperation_), "%s", op);
+        dispatch(doc, request, static_cast<uint16_t>(id), now);
+        beginStream();
+    }
     static bool fields(const json::JsonDoc& doc, const char* op) {
         for (int i = doc.rootNode()->firstChild; i >= 0; i = doc.nodes[i].next) {
             const char* key = doc.nodes[i].key;
@@ -495,10 +556,9 @@ private:
             if (patch && key[0] != '$') continue;
             if (!std::strcmp(op, "group") && !std::strcmp(key, "$group")) continue;
             if ((!std::strcmp(op, "cancel") || !std::strcmp(op, "status")) && !std::strcmp(key, "$target")) continue;
-            if ((!std::strcmp(op, "scenes") || !std::strcmp(op, "scene-info") || !std::strcmp(op, "pixel-map") || !std::strcmp(op, "outputs") || !std::strcmp(op, "preview-frame")) && !std::strcmp(key, "$offset")) continue;
+            if (paged(op) && !std::strcmp(key, "$offset")) continue;
             if ((!std::strcmp(op, "pixel-map") || !std::strcmp(op, "outputs") || !std::strcmp(op, "preview-frame")) && !std::strcmp(key, "$rev")) continue;
             if (!std::strcmp(op, "scene-info") && !std::strcmp(key, "$scene")) continue;
-            if (!std::strcmp(op, "wifi") && !std::strcmp(key, "$offset")) continue;
             if (!std::strcmp(op, "wifi-join") && (!std::strcmp(key, "$ssid") || !std::strcmp(key, "$password"))) continue;
             if (!std::strcmp(op, "ota-begin") && (!std::strcmp(key, "$claims") || !std::strcmp(key, "$sig"))) continue;
             if (!std::strcmp(op, "hello") && (!std::strcmp(key, "$nonce") || !std::strcmp(key, "$resume"))) continue;
@@ -848,6 +908,7 @@ private:
             if (outputReader_) sink.append(",\"outputsOp\":true");
             if (previewFrameReader_) sink.append(",\"previewFrameOp\":true");
             if (profileState_ && profileNames_) sink.append(",\"setupOp\":true");
+            if (scenes_ && scenes_->descriptors) sink.appendf(",\"descriptors\":\"%016llx\"", static_cast<unsigned long long>(scenes_->descriptors()));
         }
         end(sink, id);
     }
@@ -944,6 +1005,14 @@ private:
     char epoch_[33] = "00000000000000000000000000000000";
     bool epochReady_ = false;
     char response_[513] = {};
+    /// Where a list request still streaming its pages continues; the request itself is its session's.
+    struct Stream {
+        uint64_t generation = 0;   ///< the connection the pages go to
+        uint32_t next = 0;         ///< the cursor the next page starts at
+        char revision[33] = {};    ///< the revision every continuation names, empty for a list without one
+        bool active = false;       ///< whether a page is still to come
+    };
+    Stream stream_;
     char replyOperation_[16] = {};
     uint32_t replySession_ = 0, revision_ = 0;
     uint64_t replyGeneration_ = 0;
@@ -956,7 +1025,7 @@ private:
     char batteryServices_[48] = "not started";
     /// Repeat-pairing counters and the remaining explicit repair window.
     char pairing_[160] = "not started";
-    char linkDiagnostics_[192] = "not started";
+    char linkDiagnostics_[240] = "not started";
     char profileText_[192] = "null";
 };
 } // namespace mm

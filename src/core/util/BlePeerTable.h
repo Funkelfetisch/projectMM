@@ -3,7 +3,6 @@
 #include "core/util/BlePeerIo.h"
 #include "platform/BleLinkSecurity.h"
 #include <array>
-#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -15,7 +14,7 @@ struct BlePeerAllocator {
     /// Free a peer made by `create`.
     static void destroy(BlePeerIo* io) { delete io; }
 };
-/// Independently framed requests and long-read replies; caller owns synchronization.
+/// Independently framed requests and notified replies per connection; caller owns synchronization.
 template <size_t Capacity, typename Allocator = BlePeerAllocator>
 class BlePeerTable {
     static_assert(Capacity > 0);
@@ -31,7 +30,7 @@ public:
     BlePeerTable& operator=(const BlePeerTable&) = delete;
     /// Free the heap-held peers past the inline pair.
     ~BlePeerTable() { for (size_t i = kInlinePeers; i < Capacity; ++i) Allocator::destroy(entries_[i].io); }
-    enum class Publish : uint8_t { Stored, Stale, Invalid };
+    enum class Publish : uint8_t { Stored, Stale, Busy, Invalid };
     /// Register a connection and give it a peer; false for an invalid or duplicate handle, or when the table or heap is full.
     bool connect(uint16_t handle) {
         const Token token = identities_.connect(handle);
@@ -43,7 +42,6 @@ public:
             entry.io->reset();
             entry.subscriptions = 0;
             entry.security = platform::BleLinkSecurity::Open;
-            entry.io->publish(initial_);
             entry.token = token;
             return true;
         }
@@ -87,10 +85,19 @@ public:
         auto* entry = findHandle(handle);
         return entry ? entry->io->feed(bytes, length) : BleMessage::Result::Invalid;
     }
-    /// The connection's reply from `offset` for a long read; null for an unknown handle.
-    const char* read(uint16_t handle, uint16_t offset) {
+    /// Copy the next at most `capacity` reply bytes waiting for `handle` into `out` and return how many; 0 when none wait or the handle is unknown.
+    size_t pending(uint16_t handle, uint8_t* out, size_t capacity) {
         auto* entry = findHandle(handle);
-        return entry ? entry->io->read(offset) : nullptr;
+        return entry ? entry->io->pending(out, capacity) : 0;
+    }
+    /// Mark `count` bytes of what `pending` returned for `handle` as sent.
+    void sent(uint16_t handle, size_t count) {
+        if (auto* entry = findHandle(handle)) entry->io->sent(count);
+    }
+    /// The connection's latest reply, without its LF; null for an unknown handle.
+    const char* reply(uint16_t handle) {
+        auto* entry = findHandle(handle);
+        return entry ? entry->io->current() : nullptr;
     }
     /// Move the next complete request, taking peers in turn, into `out` and name its connection by generation; 0 when none waits.
     size_t take(char* out, size_t capacity, uint64_t& generation) {
@@ -106,16 +113,12 @@ public:
         }
         return 0;
     }
-    /// Set one connection's reply by generation, or the reply new connections start with when `generation` is 0; Stale once the connection is gone.
+    /// Queue a reply for the connection behind `generation`, sent only once it enabled notifications; Stale without one, Busy while its previous reply is still going out.
     Publish publish(const char* value, uint64_t generation) {
-        if (!generation) {
-            if (!value || std::strlen(value) > BleMessage::kCapacity) return Publish::Invalid;
-            std::snprintf(initial_, sizeof(initial_), "%s", value);
-            for (auto& entry : entries_) if (entry.token) entry.io->publish(initial_);
-            return Publish::Stored;
+        for (auto& entry : entries_) if (generation && entry.token && entry.token.generation == generation) {
+            if (entry.io->publish(value, entry.subscriptions & 1u)) return Publish::Stored;
+            return entry.io->sending() ? Publish::Busy : Publish::Invalid;
         }
-        for (auto& entry : entries_) if (entry.token && entry.token.generation == generation)
-            return entry.io->publish(value) ? Publish::Stored : Publish::Invalid;
         return Publish::Stale;
     }
     /// How many connections are held.
@@ -125,8 +128,6 @@ public:
         for (const auto& entry : entries_) if (entry.token) return entry.token.handle;
         return UINT16_MAX;
     }
-    /// The reply a new connection starts with.
-    const char* initial() const { return initial_; }
     /// Copy up to `capacity` live connection generations into `out` and return how many.
     size_t generations(uint64_t* out, size_t capacity) const {
         if (!out) return 0;
@@ -142,6 +143,8 @@ public:
         const uint8_t bit = static_cast<uint8_t>(1u << topic);
         if (enabled) entry->subscriptions |= bit;
         else entry->subscriptions &= static_cast<uint8_t>(~bit);
+        // Replies travel on topic 0, so one switched off mid-reply must not hold the next.
+        if (!enabled && topic == 0) entry->io->discard();
         return true;
     }
     /// Copy up to `capacity` handles subscribed to `topic` into `out` and return how many.
@@ -162,6 +165,5 @@ private:
     std::array<BlePeerIo, kInlinePeers> inlinePeers_{};
     std::array<Entry, Capacity> entries_{};
     size_t next_ = 0;
-    char initial_[BleMessage::kCapacity + 1] = "{\"v\":1,\"ok\":true}";
 };
 } // namespace mm

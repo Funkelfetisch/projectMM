@@ -8,7 +8,6 @@ bool bleControlStop(BleControlHandle& handle) { handle.impl = nullptr; return tr
 void bleControlAbandon(BleControlHandle& handle) { handle.impl = nullptr; }
 size_t bleControlReceive(BleControlHandle&, char*, size_t, uint64_t&) MM_NONBLOCKING { return 0; }
 bool bleControlOwners(BleControlHandle&, uint64_t*, size_t, size_t&) MM_NONBLOCKING { return false; }
-bool bleControlPublish(BleControlHandle&, const char*, uint32_t, uint64_t) MM_NONBLOCKING { return false; }
 bool bleControlPublishAdvertisement(BleControlHandle&, const std::array<uint8_t, 13>&) MM_NONBLOCKING { return false; }
 bool bleControlConnected(const BleControlHandle&) MM_NONBLOCKING { return false; }
 bool bleControlPairingState(const BleControlHandle&, BlePairingState& state) MM_NONBLOCKING { state = {}; return false; }
@@ -23,6 +22,14 @@ bool bleControlUpdateAck(BleControlHandle&, uint64_t generation, uint32_t stored
     return true;
 }
 std::vector<BleUpdateAck> takeTestBleUpdateAcks() { std::vector<BleUpdateAck> acks; acks.swap(testUpdateAcks); return acks; }
+namespace { bool testPublishRecorded = false; std::vector<BlePublished> testPublished; }
+void setTestBlePublishRecorded(bool recorded) { testPublishRecorded = recorded; testPublished.clear(); }
+std::vector<BlePublished> takeTestBlePublished() { std::vector<BlePublished> replies; replies.swap(testPublished); return replies; }
+bool bleControlPublish(BleControlHandle&, const char* response, uint64_t generation) MM_NONBLOCKING {
+    if (!testPublishRecorded || !response) return false;
+    testPublished.push_back({generation, response});
+    return true;
+}
 namespace { BleLinkSecurity testLink = BleLinkSecurity::Open; uint32_t testSecurityRequests = 0; }
 void setTestBleLinkSecurity(BleLinkSecurity link) { testLink = link; testSecurityRequests = 0; }
 uint32_t testBleSecurityRequests() { return testSecurityRequests; }
@@ -33,6 +40,7 @@ BleLinkSecurity bleControlSecurity(BleControlHandle&, uint64_t, bool request) MM
     return reported;
 }
 #else
+bool bleControlPublish(BleControlHandle&, const char*, uint64_t) MM_NONBLOCKING { return false; }
 BleLinkSecurity bleControlSecurity(BleControlHandle&, uint64_t, bool) MM_NONBLOCKING { return BleLinkSecurity::Open; }
 bool bleControlUpdateAck(BleControlHandle&, uint64_t, uint32_t, uint32_t, bool) MM_NONBLOCKING { return false; }
 #endif

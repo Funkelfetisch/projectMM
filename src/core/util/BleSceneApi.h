@@ -14,5 +14,7 @@ struct BleSceneApi {
     StateDocumentResult (*validate)(Scheduler&, const char*, const char*, const char*);
     StateDocumentResult (*apply)(Scheduler&, const char*, const char*, const char*, bool);
     void (*state)(JsonSink&, Scheduler&);
+    /// The tag of every scene's descriptors, which `info` reports so a client with a matching export reads none; null reports none.
+    uint64_t (*descriptors)() = nullptr;
 };
 } // namespace mm

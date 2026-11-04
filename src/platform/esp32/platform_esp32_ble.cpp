@@ -29,6 +29,7 @@ extern "C" void ble_store_config_init(void);
 
 static_assert(!MYNEWT_VAL(BLE_HANDLE_REPEAT_PAIRING_DELETION), "The application owns scoped repeat-pairing authorization");
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -75,14 +76,14 @@ struct Peripheral {
     std::array<uint8_t, 16> epoch{};
     BlePeerTable<kPeerCapacity> peers;
     char identity[256] = {};
-    uint32_t revision = 0;
     uint8_t addressType = 0;
     uint16_t valueHandle = 0;
     std::atomic<uint16_t> connection{BLE_HS_CONN_HANDLE_NONE};
     std::atomic<uint8_t> connectionCount{0};
     std::atomic<uint32_t> linkAccepted{0}, linkFailed{0}, linkDisconnected{0};
     std::atomic<int32_t> lastDisconnectReason{-1}, lastUpdateStatus{-1};
-    std::atomic<uint32_t> missingPeerReads{0}, unsupportedAccess{0};
+    std::atomic<uint16_t> linkInterval{0}, linkLatency{0}, linkTimeout{0};
+    std::atomic<uint32_t> unsupportedAccess{0};
     bool abandoned = false; // scheduler task only: service destroyed after a failed stop
     ble_gatt_chr_def characteristics[5] = {};
     BleRepeatPairing repeatPairing;
@@ -228,18 +229,29 @@ void advertise() {
     else ESP_LOGI(kBleTag, "advertising, address type %u", static_cast<unsigned>(active->addressType));
 }
 
-/// Request a longer supervision timeout only when the central's current parameters are valid and short; rejection leaves the link untouched.
+/// Keep the parameters a link runs at, the latest connect or update winning, for the link diagnostics.
+void recordLinkParameters(Peripheral& peripheral, uint16_t handle) {
+    ble_gap_conn_desc desc{};
+    if (ble_gap_conn_find(handle, &desc) != 0) return;
+    peripheral.linkInterval.store(desc.conn_itvl, std::memory_order_relaxed);
+    peripheral.linkLatency.store(desc.conn_latency, std::memory_order_relaxed);
+    peripheral.linkTimeout.store(desc.supervision_timeout, std::memory_order_relaxed);
+}
+
+/// Ask a valid link for the parameters `bleConnectionHint` names; rejection leaves the link untouched.
 void requestConnectionHint(uint16_t handle) {
     ble_gap_conn_desc desc{};
     if (ble_gap_conn_find(handle, &desc) != 0) return;
     BleConnectionHint hint{};
     if (!bleConnectionHint(desc.conn_itvl, desc.conn_latency, desc.supervision_timeout, hint)) return;
     ble_gap_upd_params params{};
-    params.itvl_min = params.itvl_max = hint.interval;
+    params.itvl_min = hint.minInterval;
+    params.itvl_max = hint.maxInterval;
     params.latency = hint.latency;
     params.supervision_timeout = hint.timeout;
     const int status = ble_gap_update_params(handle, &params);
-    ESP_LOGI(kBleTag, "connection timeout request=%u status=%d", static_cast<unsigned>(hint.timeout), status);
+    ESP_LOGI(kBleTag, "connection request interval=%u-%u latency=%u timeout=%u status=%d", static_cast<unsigned>(hint.minInterval),
+             static_cast<unsigned>(hint.maxInterval), static_cast<unsigned>(hint.latency), static_cast<unsigned>(hint.timeout), status);
 }
 
 int gapEvent(ble_gap_event* event, void* arg) {
@@ -272,6 +284,7 @@ int gapEvent(ble_gap_event* event, void* arg) {
                     peripheral->connectionCount.store(static_cast<uint8_t>(peripheral->peers.size()));
                     peripheral->linkAccepted.fetch_add(1, std::memory_order_relaxed);
                 }
+                recordLinkParameters(*peripheral, event->connect.conn_handle);
                 requestConnectionHint(event->connect.conn_handle);
                 advertise();
             }
@@ -284,7 +297,12 @@ int gapEvent(ble_gap_event* event, void* arg) {
         case BLE_GAP_EVENT_ADV_COMPLETE: advertise(); break;
         case BLE_GAP_EVENT_CONN_UPDATE:
             peripheral->lastUpdateStatus.store(event->conn_update.status, std::memory_order_relaxed);
+            if (event->conn_update.status == 0) recordLinkParameters(*peripheral, event->conn_update.conn_handle);
             ESP_LOGI(kBleTag, "connection parameter update status=%d", event->conn_update.status);
+            break;
+        case BLE_GAP_EVENT_NOTIFY_TX:
+            if (event->notify_tx.attr_handle == peripheral->valueHandle)
+                ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->changed);
             break;
         case BLE_GAP_EVENT_SUBSCRIBE: {
             std::lock_guard<std::mutex> lock(peripheral->mutex);
@@ -338,21 +356,15 @@ int accessValue(uint16_t connection, uint16_t, ble_gatt_access_ctxt* context, vo
         if (result == BleMessage::Result::Busy) return BLE_ATT_ERR_INSUFFICIENT_RES;
         return result == BleMessage::Result::Invalid ? BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN : 0;
     }
-    if (context->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+    // Identity is the one readable value: replies arrive in notifications.
+    if (context->op != BLE_GATT_ACCESS_OP_READ_CHR || ble_uuid_cmp(context->chr->uuid, &identityUuid.u) != 0) {
         peripheral->unsupportedAccess.fetch_add(1, std::memory_order_relaxed);
         return BLE_ATT_ERR_UNLIKELY;
     }
-    char bytes[513];
+    char bytes[sizeof(peripheral->identity)];
     {
         std::lock_guard<std::mutex> lock(peripheral->mutex);
-        const bool identity = ble_uuid_cmp(context->chr->uuid, &identityUuid.u) == 0;
-        const char* value = identity ? peripheral->identity : connection == BLE_HS_CONN_HANDLE_NONE ? peripheral->peers.initial() :
-            peripheral->peers.read(connection, context->offset);
-        if (!value) {
-            peripheral->missingPeerReads.fetch_add(1, std::memory_order_relaxed);
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        std::snprintf(bytes, sizeof(bytes), "%s", value);
+        std::snprintf(bytes, sizeof(bytes), "%s", peripheral->identity);
     }
     return os_mbuf_append(context->om, bytes, static_cast<uint16_t>(std::strlen(bytes))) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
@@ -438,18 +450,27 @@ bool configureBatteries(Peripheral& peripheral, const BleBatteryConfig& config) 
     return true;
 }
 
-void notifyChanged(ble_npl_event* event) {
+/// Send each subscribed peer's waiting reply in notifications of at most its ATT MTU less three; out of buffers, a transmit completion runs this again.
+void sendReplies(ble_npl_event* event) {
     auto* peripheral = static_cast<Peripheral*>(ble_npl_event_get_arg(event));
-    uint32_t revision = 0;
     std::array<uint16_t, kPeerCapacity> targets{}; size_t count = 0;
-    { std::lock_guard<std::mutex> lock(peripheral->mutex);
-      revision = peripheral->revision; count = peripheral->peers.subscribers(0, targets.data(), targets.size()); }
-    const uint32_t now = millis();
-    uint8_t bytes[8];
-    for (uint8_t i = 0; i < 4; ++i) { bytes[i] = static_cast<uint8_t>(revision >> (i * 8)); bytes[i + 4] = static_cast<uint8_t>(now >> (i * 8)); }
-    for (size_t n = 0; n < count; ++n)
-        if (os_mbuf* buffer = ble_hs_mbuf_from_flat(bytes, sizeof(bytes)))
-            ble_gatts_notify_custom(targets[n], peripheral->valueHandle, buffer);
+    { std::lock_guard<std::mutex> lock(peripheral->mutex); count = peripheral->peers.subscribers(0, targets.data(), targets.size()); }
+    uint8_t bytes[BleMessage::kCapacity + 1];
+    for (size_t n = 0; n < count; ++n) {
+        const uint16_t mtu = ble_att_mtu(targets[n]);
+        const size_t room = mtu > 23 ? std::min<size_t>(mtu - 3u, sizeof(bytes)) : 20;
+        for (;;) {
+            size_t length = 0;
+            { std::lock_guard<std::mutex> lock(peripheral->mutex); length = peripheral->peers.pending(targets[n], bytes, room); }
+            if (!length) break;
+            os_mbuf* buffer = ble_hs_mbuf_from_flat(bytes, static_cast<uint16_t>(length));
+            if (!buffer) return;
+            // The stack consumes the buffer either way; a link that refuses waits for its next completion or its disconnect.
+            if (ble_gatts_notify_custom(targets[n], peripheral->valueHandle, buffer) != 0) break;
+            std::lock_guard<std::mutex> lock(peripheral->mutex);
+            peripheral->peers.sent(targets[n], length);
+        }
+    }
 }
 
 void notifyUpdateAck(ble_npl_event* event) {
@@ -564,7 +585,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_svc_gatt_init();
     auto& state = peripheral->characteristics[0];
     state.uuid = &stateUuid.u; state.access_cb = accessValue; state.arg = peripheral;
-    state.flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY;
+    state.flags = BLE_GATT_CHR_F_NOTIFY;
     state.val_handle = &peripheral->valueHandle;
     auto& command = peripheral->characteristics[1];
     command.uuid = &commandUuid.u; command.access_cb = accessValue; command.arg = peripheral;
@@ -590,7 +611,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_store_config_init();
     ble_hs_cfg.store_status_cb = storeStatus;
     ble_hs_cfg.store_status_arg = peripheral;
-    ble_npl_event_init(&peripheral->changed, notifyChanged, peripheral);
+    ble_npl_event_init(&peripheral->changed, sendReplies, peripheral);
     ble_npl_event_init(&peripheral->advertisementChanged, advertisementChanged, peripheral);
     ble_npl_event_init(&peripheral->secure, requestSecurity, peripheral);
     ble_npl_event_init(&peripheral->updateAcked, notifyUpdateAck, peripheral);
@@ -648,18 +669,18 @@ bool bleControlOwners(BleControlHandle& handle, uint64_t* out, size_t capacity, 
     return true;
 }
 
-bool bleControlPublish(BleControlHandle& handle, const char* response, uint32_t revision, uint64_t generation) MM_NONBLOCKING {
+bool bleControlPublish(BleControlHandle& handle, const char* response, uint64_t generation) MM_NONBLOCKING {
     auto* peripheral = static_cast<Peripheral*>(handle.impl);
     if (!peripheral || !response || std::strlen(response) > 512) return false;
     std::unique_lock<std::mutex> lock(peripheral->mutex, std::try_to_lock);
     if (!lock.owns_lock()) return false;
-    // A stale result is consumed, not retried against a later connection.
+    using Publish = BlePeerTable<kPeerCapacity>::Publish;
     const auto result = peripheral->peers.publish(response, generation);
-    if (result == BlePeerTable<kPeerCapacity>::Publish::Stale) return true;
-    if (result != BlePeerTable<kPeerCapacity>::Publish::Stored) return false;
-    peripheral->revision = revision;
+    // Consumed, not retried: a stale result against a later connection, or one no peer could take.
+    if (result == Publish::Stale || result == Publish::Invalid) return true;
+    // Send it, or resume the reply still going out should a completion have been missed.
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->changed);
-    return true;
+    return result == Publish::Stored;
 }
 
 bool bleControlPublishAdvertisement(BleControlHandle& handle, const std::array<uint8_t, 13>& bytes) MM_NONBLOCKING {
@@ -695,9 +716,11 @@ bool bleControlLinkState(const BleControlHandle& handle, BleLinkState& state) MM
              peripheral->linkDisconnected.load(std::memory_order_relaxed),
              peripheral->lastDisconnectReason.load(std::memory_order_relaxed),
              peripheral->lastUpdateStatus.load(std::memory_order_relaxed),
-             peripheral->missingPeerReads.load(std::memory_order_relaxed),
              peripheral->unsupportedAccess.load(std::memory_order_relaxed),
-             peripheral->connectionCount.load(std::memory_order_relaxed)};
+             peripheral->connectionCount.load(std::memory_order_relaxed),
+             peripheral->linkInterval.load(std::memory_order_relaxed),
+             peripheral->linkLatency.load(std::memory_order_relaxed),
+             peripheral->linkTimeout.load(std::memory_order_relaxed)};
     return true;
 }
 

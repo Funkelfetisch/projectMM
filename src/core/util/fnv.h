@@ -25,6 +25,16 @@ struct Fnv1a {
     }
 };
 
+/// The 64-bit FNV-1a, for a fingerprint a client compares across devices, where 32 bits would collide sooner.
+struct Fnv1a64 {
+    uint64_t h = 14695981039346656037ull;   ///< the running hash, starting at the standard offset basis
+    /// Fold `len` bytes in.
+    void add(const void* data, size_t len) MM_NONBLOCKING {
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < len; i++) h = (h ^ p[i]) * 1099511628211ull;
+    }
+};
+
 /// FNV-1a over `len` bytes.
 inline uint32_t fnv1a(const void* data, size_t len) {
     Fnv1a f;
