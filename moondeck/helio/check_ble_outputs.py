@@ -22,8 +22,8 @@ int main() {
     mm::FixtureProfilesModule fixtures; fixtures.setup();
     mm::Scheduler scheduler;
     auto* root = new mm::MoonModule(); root->setName("Drivers"); root->setTypeName("Drivers");
-    auto* rgb = new mm::RmtLedDriver(); rgb->setTypeName("RmtLedDriver"); rgb->setDefaultCorrection("RGB", mm::WhiteMode::None); rgb->rebuildControls(); rgb->rebuildCorrection(255); rgb->setWindow(0, 0); root->addChild(rgb);
-    auto* white = new mm::PwmLightDriver(); white->setTypeName("PwmLightDriver"); white->setDefaultCorrection("White", mm::WhiteMode::None); white->rebuildControls(); white->rebuildCorrection(255); white->setWindow(30, 1); root->addChild(white);
+    auto* rgb = new mm::RmtLedDriver(); rgb->setTypeName("RmtLedDriver"); rgb->setName("RGB1"); rgb->setDefaultCorrection("RGB", mm::WhiteMode::None); rgb->rebuildControls(); rgb->rebuildCorrection(255); rgb->setWindow(0, 0); root->addChild(rgb);
+    auto* white = new mm::PwmLightDriver(); white->setTypeName("PwmLightDriver"); white->setName("Accent"); white->setDefaultCorrection("White", mm::WhiteMode::None); white->rebuildControls(); white->rebuildCorrection(255); white->setWindow(30, 1); root->addChild(white);
     auto* preview = new Driver(); preview->setTypeName("PreviewDriver"); root->addChild(preview);
     auto* other = new mm::MoonModule(); other->setTypeName("UnknownDriver"); root->addChild(other);
     scheduler.addModule(root);
@@ -62,8 +62,8 @@ def main():
     info, first, second, third, stale, overlap, moved_white, moved_unknown, single, empty, missing_rev, malformed_rev = pages
     assert info['outputsOp'] is True
     assert first['outputs']['total'] == 3 and first['outputs']['next'] == 1
-    assert first['outputs']['drivers'] == [{'type':'RmtLedDriver','start':0,'count':0,'rgb':True,'white':False}]
-    assert second['outputs']['drivers'] == [{'type':'PwmLightDriver','start':30,'count':1,'rgb':False,'white':True}]
+    assert first['outputs']['drivers'] == [{'type':'RmtLedDriver','start':0,'count':0,'rgb':True,'white':False,'name':'RGB1','fixture':'RGB'}]
+    assert second['outputs']['drivers'] == [{'type':'PwmLightDriver','start':30,'count':1,'rgb':False,'white':True,'name':'Accent','fixture':'White'}]
     assert third['outputs']['drivers'] == [{'type':'UnknownDriver'}] and third['outputs']['next'] is None
     assert stale['error'] == 'outputs-changed'
     assert overlap['outputs']['revision'] != first['outputs']['revision']

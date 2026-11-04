@@ -8,7 +8,7 @@
 #include <cstring>
 
 namespace mm {
-/// Reports configured driver windows and resolved fixture channels, not wiring, actual light count, pin qualification, or an exclusive role for any pixel.
+/// Reports configured driver windows, names and fixture profiles with their resolved channels, not wiring, actual light count, pin qualification, or an exclusive role for any pixel.
 class BleOutputPage {
     static void describe(JsonSink& sink, const MoonModule& child) {
         sink.append("{\"type\":"); sink.writeJsonString(child.typeName());
@@ -21,6 +21,9 @@ class BleOutputPage {
                 static_cast<long>(driver.windowStart()), static_cast<long>(driver.windowCount()),
                 c.offRed != Correction::kAbsent && c.offGreen != Correction::kAbsent && c.offBlue != Correction::kAbsent ? "true" : "false",
                 c.offWhite != Correction::kAbsent || c.offWarmWhite != Correction::kAbsent ? "true" : "false");
+            // The module name addresses the driver in a patch; the fixture is its channel order.
+            sink.append(",\"name\":"); sink.writeJsonString(child.name());
+            sink.append(",\"fixture\":"); sink.writeJsonString(driver.fixtureName());
         }
         sink.append("}");
     }

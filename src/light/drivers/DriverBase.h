@@ -158,6 +158,8 @@ public:
 
     /// The resolved correction, read-only, since the driver owns and rebuilds it.
     const Correction& correction() const { return correction_; }
+    /// The selected fixture profile's name (RGB, GRB, … or a library profile), the channel order a light is wired in.
+    const char* fixtureName() const { return fixtureSel_ < fixtureOptionCount_ && fixtureOptions_[fixtureSel_] ? fixtureOptions_[fixtureSel_] : ""; }
 
     /// Park or release this driver's motion; the one correction field a container sets, as everything else is derived and would be overwritten.
     void setMotionHeld(bool held) { correction_.motionHeld = held; }
