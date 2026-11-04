@@ -506,6 +506,21 @@ private:
         }
         return true;
     }
+    /// Under Drivers a peer may switch the light (`on`), dim it (`brightness`) and choose a driver's
+    /// `fixture` (its channel order), nothing else: no type, pins, windows or subtree replacement.
+    static bool driverControls(const json::JsonDoc& doc, const json::JsonNode* drivers) {
+        if (drivers->type != json::JsonType::Object || drivers->firstChild < 0) return false;
+        for (int c = drivers->firstChild; c >= 0; c = doc.nodes[c].next) {
+            const auto& node = doc.nodes[c];
+            if (!node.key || node.key[0] == '$') return false;
+            if (std::strcmp(node.key, "on") == 0) { if (node.type != json::JsonType::Bool) return false; continue; }
+            if (std::strcmp(node.key, "brightness") == 0) { if (node.type != json::JsonType::Number) return false; continue; }
+            const int first = node.firstChild;
+            if (node.type != json::JsonType::Object || first < 0 || doc.nodes[first].next >= 0 || !doc.nodes[first].key ||
+                std::strcmp(doc.nodes[first].key, "fixture") || doc.nodes[first].type != json::JsonType::String) return false;
+        }
+        return true;
+    }
     bool scope(const json::JsonDoc& doc) const {
         for (int child = doc.rootNode()->firstChild; child >= 0; child = doc.nodes[child].next) {
             const char* key = doc.nodes[child].key;
@@ -517,7 +532,8 @@ private:
                     std::strcmp(doc.nodes[first].key, "wifiEnabled") || doc.nodes[first].type != json::JsonType::Bool) return false;
                 continue;
             }
-            if (std::strcmp(key, "Drivers") && std::strcmp(key, "Effects")) return false;
+            if (std::strcmp(key, "Drivers") == 0) { if (!driverControls(doc, &doc.nodes[child])) return false; continue; }
+            if (std::strcmp(key, "Effects")) return false;
         }
         return true;
     }

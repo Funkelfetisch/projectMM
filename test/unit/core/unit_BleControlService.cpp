@@ -2152,3 +2152,24 @@ TEST_CASE("BLE firmware update: releasing the service while a transfer is open a
     CHECK_FALSE(slot.open);
     CHECK(slot.aborts == 1);
 }
+
+TEST_CASE("BLE patches under Drivers reach only power, brightness and a driver's fixture") {
+    BleTree tree;
+    for (const char* request : {
+        R"({"$v":1,"$id":21,"$op":"patch","Drivers":{"RGB1":{"type":"PwmLightDriver"}}})",
+        R"({"$v":1,"$id":22,"$op":"patch","Drivers":{"RGB1":{"pin":4}}})",
+        R"({"$v":1,"$id":23,"$op":"patch","Drivers":{"$patch":"replace"}})",
+        R"({"$v":1,"$id":24,"$op":"patch","Drivers":{"RGB1":{"fixture":"GRB","pin":4}}})",
+        R"({"$v":1,"$id":25,"$op":"patch","Drivers":{"RGB1":{"fixture":3}}})",
+        R"({"$v":1,"$id":26,"$op":"patch","Drivers":{"on":"yes"}})",
+        R"({"$v":1,"$id":27,"$op":"patch","Drivers":{}})"}) {
+        tree.send(request, 100);
+        CHECK(tree.reply().find("scope") != std::string::npos);
+    }
+    for (const char* request : {
+        R"({"$v":1,"$id":28,"$op":"patch","Drivers":{"RGB1":{"fixture":"GRB"},"RGB2":{"fixture":"GRB"}}})",
+        R"({"$v":1,"$id":29,"$op":"patch","Drivers":{"on":true,"brightness":80}})"}) {
+        tree.send(request, 100);
+        CHECK(tree.reply().find("scope") == std::string::npos);
+    }
+}
