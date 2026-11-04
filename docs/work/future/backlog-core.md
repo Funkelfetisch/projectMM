@@ -2,6 +2,10 @@
 
 Forward-looking to-build items for the **core / infrastructure** domain (`src/core/`, `src/platform/`, build, CI, network, persistence, UI). The light-domain counterpart is [backlog-light.md](backlog-light.md); items that genuinely span both are in [backlog-mixed.md](backlog-mixed.md). Index + overview: [README.md](index.md). Completed items are removed.
 
+### A frame-rate cap and worst-frame telemetry in the Scheduler (branched, not merged)
+
+`origin/codex/performance-frame-pacing` holds `a024a74d` (2026-07-10, "Improve frame pacing and RMT LED throughput") and its review follow-up `a8b98de0`. The Scheduler waits out each frame to a target rate, which a System `fpsCap` control sets (10 to 120, default 60), and reports `workTimeUs`, the mean time a frame works, and `maxFrameTimeUs`, the slowest frame of the window. This tree has neither: it measures `tickTimeUs` and the `fps` derived from it, and runs as fast as the frame allows. The same commit also changes RMT LED output and the File Manager, which this entry does not cover. The branch predates the move of the Scheduler to `src/core/module/`, so a port is a rewrite against the current loop: verify against those commits, then delete this entry.
+
 ### The `.deb` ships the systemd unit, raw Ethernet included (2026-10-22, from robwomp on Discord)
 
 The package holds only the binary, so a Pi or NanoPi user writes `/etc/systemd/system/moonlight.service` by hand from MoonWalk's "Run at boot" step. That unit grants no `CAP_NET_RAW`, so the panel card driver's `AF_PACKET` socket fails unless MoonLight runs as root, and the `setcap` alternative is lost whenever apt replaces `/usr/bin/MoonLight`. `CAP_NET_RAW` is all MoonLight needs, since it sets no interface flags. The fix: `package_desktop.py` installs the unit with `AmbientCapabilities=CAP_NET_RAW` and a dedicated `moonlight` user, so installing is `apt install` plus `systemctl enable --now moonlight`. MoonWalk's unit step shrinks to that enable, and the `setcap` step stays for a binary run by hand.

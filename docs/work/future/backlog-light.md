@@ -20,6 +20,10 @@ Forward-looking to-build items for the **light domain** (`src/light/`: drivers, 
 
 ## Effects
 
+### A Pixelblaze-compatible effect and an Electromage pattern importer (branched, not merged)
+
+`src/light/effects/PixelblazeCompatEffect.h` (1,303 lines), its test `test/unit/light/unit_PixelblazeCompatEffect.cpp` (82 lines) and `moondeck/patterns/import_electromage_patterns.py` exist only on `codex/helio-private-wip`, added in `a649bd47` (2026-08-20, "Stabilize HELIO scenes, previews, output, and onboarding") on top of `e3aba94e`; nebulite-helio-7's history has never held them. The effect runs Pixelblaze sources from the Electromage PatternDB: top-level globals, `beforeRender` and the render functions. On `helio1`, whose application slot is 89% full, carrying it is a flash-budget decision for the product owner before any port. If it ports, verify against that commit, then delete this entry.
+
 ### Network Receive on a P4 past 3,000 packets a second (2026-10-26)
 
 Below about 3,000 packets a second a P4 receives every frame; past it packets go, more for Art-Net than for DDP, as [the table](../../reference/performance.md#network-receive) shows.
