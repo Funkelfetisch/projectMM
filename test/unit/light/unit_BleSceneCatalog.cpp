@@ -389,6 +389,38 @@ TEST_CASE("BLE scenes: the real RPC2 dispatcher applies full scenes and reads ac
     CHECK(std::strstr(service.response(), "\"state\":\"applied\"") != nullptr);
 }
 
+TEST_CASE("BLE scenes: through the real RPC2 dispatcher, every scene's controls arrive in a handful of packed 512-byte replies whose cursor ends") {
+    SceneTree tree;
+    mm::BleControlService service;
+    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+        &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState};
+    service.setScheduler(&tree.scheduler); service.setScenes(&api);
+    service.setEpochForTest("00000000000000000000000000000001");
+    service.handle(R"({"$v":1,"$id":1,"$op":"hello","$nonce":"00000000000000000000000000000002"})", 100);
+    REQUIRE(std::strstr(service.response(), "\"s\":1") != nullptr);
+    uint16_t sequence = 1;
+    for (uint16_t i = 0; i < mm::BleSceneCatalog::count(); ++i) {
+        const char* scene = mm::product_scenes::kEntries[i].id;
+        CAPTURE(scene);
+        uint16_t cursor = 0, pages = 0;
+        while (pages < 32) {
+            ++pages;
+            const std::string request = "{\"$v\":1,\"$e\":\"00000000000000000000000000000001\",\"$s\":1,\"$id\":" + std::to_string(++sequence) +
+                ",\"$op\":\"scene-info\",\"$scene\":\"" + scene + "\",\"$offset\":" + std::to_string(cursor) + "}";
+            service.handle(request.c_str(), 100);
+            CAPTURE(service.response());
+            REQUIRE(std::strlen(service.response()) <= 512);
+            REQUIRE(std::strstr(service.response(), (",\"id\":" + std::to_string(sequence) + ",").c_str()) != nullptr);
+            REQUIRE(std::strstr(service.response(), "\"ok\":true") != nullptr);
+            mm::json::JsonDoc reply; REQUIRE(mm::json::parse(service.response(), reply));
+            const auto* next = mm::json::member(reply, reply.rootNode(), "next"); REQUIRE(next != nullptr);
+            if (next->type == mm::json::JsonType::Null) break;
+            REQUIRE(next->intValue > cursor); cursor = static_cast<uint16_t>(next->intValue);
+        }
+        CHECK(pages <= 14);   // a palette scene took 74 one-part pages, past the phone's patience at a second per round trip
+    }
+}
+
 
 TEST_CASE("BLE scan scenes: actual native control changes drive hints, not a previous scene request") {
     SceneTree tree;

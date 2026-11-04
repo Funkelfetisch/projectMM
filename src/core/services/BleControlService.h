@@ -506,8 +506,7 @@ private:
         }
         return true;
     }
-    /// Under Drivers a peer may switch the light (`on`), dim it (`brightness`) and choose a driver's
-    /// `fixture` (its channel order), nothing else: no type, pins, windows or subtree replacement.
+    /// Under Drivers a peer reaches only `on`, `brightness` and a named driver's `fixture`, its channel order.
     static bool driverControls(const json::JsonDoc& doc, const json::JsonNode* drivers) {
         if (drivers->type != json::JsonType::Object || drivers->firstChild < 0) return false;
         for (int c = drivers->firstChild; c >= 0; c = doc.nodes[c].next) {

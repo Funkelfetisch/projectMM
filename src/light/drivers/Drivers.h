@@ -59,7 +59,6 @@ public:
 
     /// Release the children, then vacate every static seat this container published, since each seat references this object's members.
     void release() override {
-        Bh1750Service::setTargetChangedHook(nullptr);
         // BEFORE the children release: the worker ticks them, so it must stop before they free.
         stopEncodeTask();
         renderSplitActive_ = false;
@@ -73,7 +72,6 @@ public:
 
     /// Stop the worker and free the palette script, for a tree torn down without release(); a destructor runs where release() may not.
     ~Drivers() override {
-        Bh1750Service::setTargetChangedHook(nullptr);
         stopEncodeTask();
         MoonLivePalette::clearActiveInstance(&paletteScriptModule_);
         // Free the script rather than detach: release() may never run, and the engine holds a block.
@@ -531,6 +529,7 @@ public:
         softStarting_ = platform::bootRecord().booted && !dark_;
         softStartBegun_ = false;
         MoonModule::setup();
+        // Never cleared: the hook reaches only the seated Drivers, so a probe's teardown cannot unhook the live one.
         Bh1750Service::setTargetChangedHook(&Drivers::refreshAmbientBrightness);
         passBufferToDrivers();           // seeds each driver's correction via rebuildCorrection()
         // HERE rather than in prepare: every setup runs first, and a Layer sizes its buffer there.

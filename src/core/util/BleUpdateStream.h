@@ -73,7 +73,7 @@ public:
         return count;
     }
 
-    /// Whether to answer the phone now, `stored` being the bytes durably written: what it asked for is stored, or a dropped packet left the rest to resend. `asked` is the end the answered request named, so a phone tells an answer to its window from a late one.
+    /// Whether to answer the phone now, `stored` being the bytes durably written: what it asked for is stored, or a dropped packet left the rest to resend. `asked` is the end its request named, so the phone tells its window's answer from a late one.
     bool acknowledge(uint32_t stored, uint32_t& asked) MM_NONBLOCKING {
         asked = ackAt_.load(std::memory_order_acquire);
         if (!asked) return false;

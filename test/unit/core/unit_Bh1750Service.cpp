@@ -1,3 +1,5 @@
+/// @module Bh1750Service
+/// @also Drivers
 #include "doctest.h"
 #include "core/services/Bh1750Service.h"
 #include "light/drivers/Drivers.h"
@@ -27,4 +29,20 @@ TEST_CASE("ambient brightness falls back to the stored manual value") {
         CHECK(drivers.effectiveBrightness() == 77);
     }
     CHECK(drivers.effectiveBrightness() == 77);
+}
+
+TEST_CASE("a Drivers built and dropped beside the live one, as a scene's metadata read does, leaves the lights following the ambient sensor") {
+    struct Light : DriverBase { void setSourceBuffer(Buffer*) override {} };
+    Drivers drivers;
+    auto* light = new Light();
+    drivers.addChild(light);
+    drivers.brightness = 255;
+    drivers.defineControls(); drivers.setup(); drivers.prepare();
+    REQUIRE(Drivers::active() == &drivers);
+    CHECK(light->correction().briLut[255] == 255);
+    { Drivers probe; probe.defineControls(); }
+    Bh1750Service sensor;
+    sensor.injectLuxForTest(250);   // 136 on the default curve, which the hook bakes into every driver's table
+    CHECK(light->correction().briLut[255] < 255);
+    drivers.release();
 }
