@@ -2008,7 +2008,10 @@ static bool testMdns_ = false;      // the host has no mDNS responder of ours, s
 static uint32_t testMdnsInits_ = 0;
 void setTestMdnsAvailable(bool available) { testMdns_ = available; testMdnsInits_ = 0; testMdnsStackLive_ = false; testWifiStopHadLiveMdns_ = false; }
 uint32_t testMdnsInitCount() { return testMdnsInits_; }
-bool mdnsInit(const char* /*deviceName*/) { if (!testMdns_) return false; testMdnsStackLive_ = true; return ++testMdnsInits_; }
+static const char* testMdnsFailure_ = nullptr;   // a reason a test makes mdnsInit fail with
+void setTestMdnsFailure(const char* why) { testMdnsFailure_ = why; }
+bool mdnsInit(const char* /*deviceName*/) { if (!testMdns_ || testMdnsFailure_) return false; testMdnsStackLive_ = true; return ++testMdnsInits_; }
+const char* mdnsError() { return testMdnsFailure_ ? testMdnsFailure_ : ""; }
 void mdnsStop() {}
 // The host announces nothing over mDNS, so the services are only remembered, which is what a test reads back.
 static std::map<std::string, uint16_t> mdnsServices_;

@@ -712,6 +712,8 @@ void setTestClockStep(uint32_t ms);
 void setTestMdnsAvailable(bool available);
 /// How many times mdnsInit has started advertising since the seam was set.
 uint32_t testMdnsInitCount();
+/// Make mdnsInit fail with this reason, as a board out of memory does; null succeeds again.
+void setTestMdnsFailure(const char* why);
 /// Whether a simulated Wi-Fi stop occurred before the mDNS stack was released.
 bool testWifiStopHadLiveMdns();
 #endif
@@ -809,6 +811,8 @@ bool testLastWifiPowerSave();
 
 /// Advertise this device over mDNS as `_http._tcp` and `_wled._tcp`, which is how the WLED app and Home Assistant find it.
 bool mdnsInit(const char* deviceName);
+/// Why the last mdnsInit failed, its step and error such as `init ESP_ERR_NO_MEM`; empty after it succeeded.
+const char* mdnsError();
 /// Announce one more service on this board's name, such as `_apple-midi`/`_udp`, now and after every mdnsInit; a second call moves its port.
 void mdnsAdvertise(const char* type, const char* proto, uint16_t port);
 /// Stop announcing a service mdnsAdvertise added.

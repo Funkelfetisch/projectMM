@@ -135,6 +135,34 @@ struct FrozenClock {
 };
 }  // namespace
 
+// The card names the local name that answers, and a failure says why, rather than leaving a device nothing finds looking healthy.
+TEST_CASE("The Network card names the local name it advertises, and why it advertises none") {
+    FrozenClock clock;
+    mm::platform::setTestWifiStaAvailable(true);
+    mm::platform::setTestMdnsAvailable(true);
+    mm::platform::setTestMdnsFailure("init ESP_ERR_NO_MEM");
+    {
+        WiFiNetwork w;
+        w.net.defineControls();
+        w.wifi.remember("home", "secret");
+        w.net.setup();
+        const uint8_t ip[4] = {192,168,1,30};
+        mm::platform::setTestWifiStaIPv4(ip);
+        w.net.tick1s();
+        CHECK(std::string(w.net.status()).find("WiFi: 192.168.1.30, mDNS failed (init ESP_ERR_NO_MEM)") != std::string::npos);
+        CHECK(w.net.severity() == mm::MoonModule::Severity::Warning);
+        mm::platform::setTestMdnsFailure(nullptr);   // the retry the next second succeeds
+        w.net.tick1s();
+        CHECK(std::string(w.net.status()).find(".local") != std::string::npos);
+        CHECK(std::string(w.net.status()).find("mDNS failed") == std::string::npos);
+        CHECK(w.net.severity() == mm::MoonModule::Severity::Status);
+        w.net.release();
+    }
+    mm::platform::setTestWifiStaIPv4(nullptr);
+    mm::platform::setTestWifiStaAvailable(false);
+    mm::platform::setTestMdnsAvailable(false);
+}
+
 // A known network that does not join in time gives way to the next in priority order, and only after the last does the device open its access point.
 TEST_CASE("BLE products can pause WiFi without forgetting networks or starting fallback retries") {
     FrozenClock clock;

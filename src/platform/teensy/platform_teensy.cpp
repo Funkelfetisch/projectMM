@@ -589,6 +589,7 @@ uint16_t mdnsAdvertisedPort(const char* type, const char* proto) {
 }
 
 // The responder restarts cheaply here, so stopping and shutting down are one call.
+const char* mdnsError() { return ""; }
 void mdnsStop() { MDNS.end(); }
 void mdnsShutdown() { MDNS.end(); }
 
