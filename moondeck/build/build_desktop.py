@@ -121,7 +121,7 @@ def main():
         print("Forcing MM_MOONLIVE_HAS_HOST_JIT=0 — the x86-64 desktop's view.")
     if args.product:
         bdir += "-" + args.product
-        extra += [f'-DMM_FIRMWARE_NAME="{args.product}"']
+        extra += [f'-DMM_FIRMWARE_NAME="{args.product}"', "-DMM_PRODUCT_FIRMWARE=ON"]
     what = "test binaries" if args.tests else "desktop target"
     print(f"Configuring {bdir}/ and generating build_id.h ..." if args.configure else f"Building {what} into {bdir}/ ...")
     # CMAKE_BUILD_TYPE is honoured by single-config generators (Ninja, Make).

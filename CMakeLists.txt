@@ -179,6 +179,10 @@ if(MM_FIRMWARE_NAME)
         add_compile_definitions(MM_UI_NO_WEARABLE_ASSETS=1)
     endif()
 endif()
+# The product firmwares' module set, as build_esp32.py's `product` variants build it on the device.
+if(MM_PRODUCT_FIRMWARE)
+    add_compile_definitions(MM_PRODUCT_FIRMWARE=1)
+endif()
 
 # Platform library (desktop). moonlive_emit.cpp is the desktop MoonLive backend (host-ISA
 # codegen) — it lives here because emitted machine code is platform/ISA-specific.

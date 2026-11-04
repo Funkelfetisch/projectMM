@@ -562,6 +562,6 @@ TEST_CASE("System metadata identifies the product dashboard runtime for browser 
     const auto* ui = mm::json::member(doc, doc.rootNode(), "ui");
     REQUIRE(ui != nullptr);
     REQUIRE(ui->type == mm::json::JsonType::String);
-    const bool product = mm::isProductFirmware(mm::kFirmwareName);
+    const bool product = mm::kProductFirmware;
     CHECK(std::strcmp(ui->str, product ? mm::ui::kProductRuntimeVersion : "") == 0);
 }

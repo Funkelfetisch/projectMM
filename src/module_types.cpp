@@ -167,17 +167,17 @@
 #include "light/drivers/RmtLedDriver.h"
 #include "light/drivers/PwmLightDriver.h"
 #endif
-// The parallel-WS2812 driver + its peripheral backends: @xref{why-led-drivers-are-gated-by-the-preprocessor}.
-#if defined(CONFIG_SOC_LCD_I80_SUPPORTED) || MM_LINKS_ALL_LED_DRIVERS
+// The parallel-WS2812 driver + its peripheral backends, which product firmware leaves out with the panels: @xref{why-led-drivers-are-gated-by-the-preprocessor}.
+#if (defined(CONFIG_SOC_LCD_I80_SUPPORTED) || MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
 #include "light/drivers/I80Peripheral.h"      // esp_lcd i80 backend (I80Peripheral)
 #endif
-#if defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || MM_LINKS_ALL_LED_DRIVERS
+#if (defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
 #include "light/drivers/MoonI80Peripheral.h"          // MoonI80 own-GDMA backend (MoonI80Peripheral)
 #endif
-#if defined(CONFIG_SOC_PARLIO_SUPPORTED) || MM_LINKS_ALL_LED_DRIVERS
+#if (defined(CONFIG_SOC_PARLIO_SUPPORTED) || MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
 #include "light/drivers/ParlioPeripheral.h"        // Parlio backend (ParlioPeripheral)
 #endif
-#if defined(MM_GPIO_DMA_LEDS) || MM_LINKS_ALL_LED_DRIVERS
+#if (defined(MM_GPIO_DMA_LEDS) || MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
 #include "light/drivers/GpioDmaPeripheral.h"       // timer-paced GPIO DMA backend (GpioDmaPeripheral)
 #endif
 // Panel receiver cards are opt-in per firmware rather than per chip: @xref{why-panel-cards-are-per-firmware-and-hub75-is-per-chip}.
@@ -185,8 +185,8 @@
 #include "light/drivers/PanelCardDriver.h"
 #endif
 // HUB75 is a GPIO panel, not a receiver card, so it gates on the chip: @xref{why-panel-cards-are-per-firmware-and-hub75-is-per-chip}.
-#if defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || defined(CONFIG_SOC_PARLIO_SUPPORTED) || \
-    MM_LINKS_ALL_LED_DRIVERS
+#if (defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || defined(CONFIG_SOC_PARLIO_SUPPORTED) || \
+     MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
 #include "light/drivers/Hub75Driver.h"
 #endif
 #include "core/system/HttpServerModule.h"
@@ -306,7 +306,7 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::NebuliteNoisefireEffect>("NebuliteNoisefireEffect");
     mm::ModuleFactory::registerType<mm::RandomEffect>("RandomEffect", "light/effects.md#random");
     mm::ModuleFactory::registerType<mm::RingsEffect>("RingsEffect", "light/effects.md#rings");
-    if (mm::isProductFirmware(mm::kFirmwareName)) {
+    if constexpr (mm::kProductFirmware) {
         constexpr const char* doc = "light/effects.md#heliowledpresets";
         mm::ModuleFactory::registerType<mm::HelioFactoryTestEffect>("HelioFactoryTestEffect", doc);
         mm::ModuleFactory::registerType<mm::HelioWledPresetsEffect>("HelioWledPresetsEffect", doc);
@@ -384,7 +384,8 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::RippleXZModifier>("RippleXZModifier", "light/modifiers.md#ripplexz");
     mm::ModuleFactory::registerType<mm::RotateModifier>("RotateModifier", "light/modifiers.md#rotate");
     mm::ModuleFactory::registerType<mm::TransposeModifier>("TransposeModifier", "light/modifiers.md#transpose");
-    mm::ModuleFactory::registerType<mm::HueDriver>("HueDriver", "light/drivers.md#hue");
+    // Product firmware leaves out what no product uses: Hue bulbs, an SD card, MoonCloud and the LAN device list.
+    if constexpr (!mm::kProductFirmware) mm::ModuleFactory::registerType<mm::HueDriver>("HueDriver", "light/drivers.md#hue");
     mm::ModuleFactory::registerType<mm::NetworkSendDriver>("NetworkSendDriver", "light/drivers.md#networksend");
     mm::ModuleFactory::registerType<mm::PreviewDriver>("PreviewDriver", "light/drivers.md#preview");
     // NDI is gated by CAPABILITY, not by firmware, and `hasNdi` decides whether the picker offers it: @xref{why-led-drivers-are-gated-by-the-preprocessor}.
@@ -399,8 +400,8 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::PanelCardDriver>("PanelCardDriver", "light/drivers.md#panelcard");
 #endif
     // Same silicon gate as the include above.
-#if defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || defined(CONFIG_SOC_PARLIO_SUPPORTED) || \
-    MM_LINKS_ALL_LED_DRIVERS
+#if (defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || defined(CONFIG_SOC_PARLIO_SUPPORTED) || \
+     MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
     mm::ModuleFactory::registerType<mm::Hub75Driver>("Hub75Driver", "light/drivers.md#hub75");
 #endif
     // Register only the LED drivers this chip's silicon can run, see the gated includes above: @xref{why-led-drivers-are-gated-by-the-preprocessor}.
@@ -409,8 +410,8 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::PwmLightDriver>("PwmLightDriver", "light/drivers.md#pwm-light");
 #endif
     // One driver for the parallel output whatever the DMA peripheral: each backend self-registers when its header is included, so the control offers exactly the ones this chip links.
-#if defined(CONFIG_SOC_LCD_I80_SUPPORTED) || defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || defined(CONFIG_SOC_PARLIO_SUPPORTED) || \
-    defined(MM_GPIO_DMA_LEDS) || MM_LINKS_ALL_LED_DRIVERS
+#if (defined(CONFIG_SOC_LCD_I80_SUPPORTED) || defined(CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED) || defined(CONFIG_SOC_PARLIO_SUPPORTED) || \
+     defined(MM_GPIO_DMA_LEDS) || MM_LINKS_ALL_LED_DRIVERS) && !MM_PRODUCT_FIRMWARE
     mm::ModuleFactory::registerType<mm::ParallelLedDriver>("ParallelLedDriver", "light/drivers.md#parallelled");
 #endif
     mm::ModuleFactory::registerType<mm::HttpServerModule>("HttpServerModule", "core/system.md#httpserver");
@@ -437,14 +438,16 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::MoonLiveService>("MoonLiveService", "core/services.md#moonliveservice");
     mm::ModuleFactory::registerType<mm::FileManagerModule>("FileManagerModule", "core/system.md#file-manager");
     // Unlike WiFi/Ethernet, a board without hasSdCard can never gain the capability without a rebuild, so the type is not left addable for nothing.
-    if constexpr (mm::platform::hasSdCard) mm::ModuleFactory::registerType<mm::SdCardService>("SdCardService", "core/services.md#sd-card");
+    if constexpr (mm::platform::hasSdCard && !mm::kProductFirmware) mm::ModuleFactory::registerType<mm::SdCardService>("SdCardService", "core/services.md#sd-card");
     mm::ModuleFactory::registerType<mm::FirmwareUpdateModule>("FirmwareUpdateModule", "core/system.md#firmware-update");
-    mm::ModuleFactory::registerType<mm::MoonCloudModule>("MoonCloudModule", "core/system.md#mooncloud");
-    mm::ModuleFactory::registerType<mm::MoonStatsModule>("MoonStatsModule", "core/system.md#stats");
-    mm::ModuleFactory::registerType<mm::MoonTalkModule>("MoonTalkModule", "core/system.md#talk");
+    if constexpr (!mm::kProductFirmware) {
+        mm::ModuleFactory::registerType<mm::MoonCloudModule>("MoonCloudModule", "core/system.md#mooncloud");
+        mm::ModuleFactory::registerType<mm::MoonStatsModule>("MoonStatsModule", "core/system.md#stats");
+        mm::ModuleFactory::registerType<mm::MoonTalkModule>("MoonTalkModule", "core/system.md#talk");
+    }
     mm::ModuleFactory::registerType<mm::ImprovProvisioningModule>("ImprovProvisioningModule", "core/system.md#improv-provisioning");
     mm::ModuleFactory::registerType<mm::MqttModule>("MqttModule", "core/system.md#mqtt");
-    mm::ModuleFactory::registerType<mm::DevicesModule>("DevicesModule", "core/system.md#devices");
+    if constexpr (!mm::kProductFirmware) mm::ModuleFactory::registerType<mm::DevicesModule>("DevicesModule", "core/system.md#devices");
     mm::ModuleFactory::registerType<mm::NetworkModule>("NetworkModule", "core/system.md#network");
     mm::ModuleFactory::registerType<mm::EthernetModule>("EthernetModule", "core/system.md#ethernet");
     mm::ModuleFactory::registerType<mm::WiFiModule>("WiFiModule", "core/system.md#wifi");
@@ -472,17 +475,17 @@ constexpr BootModule kBootModules[] = {
     {"SystemModule", "I2cBusModule", nullptr, true},
     {"SystemModule", "PinsModule", nullptr, true},
     {"Services", "AudioService", nullptr, true},
-    {"Services", "SdCardService", nullptr, mm::platform::hasSdCard},
+    {"Services", "SdCardService", nullptr, mm::platform::hasSdCard && !mm::kProductFirmware},
     {"NetworkModule", "EthernetModule", nullptr, kEthernetCard},
     {"NetworkModule", "WiFiModule", nullptr, mm::platform::hasWiFi},
     {"NetworkModule", "AccessPointModule", nullptr, mm::platform::hasWiFi},
     {"NetworkModule", "ImprovProvisioningModule", nullptr, mm::platform::hasImprov},
     {"NetworkModule", "MqttModule", nullptr, mm::platform::hasNetwork},
-    {"NetworkModule", "DevicesModule", nullptr, true},
+    {"NetworkModule", "DevicesModule", nullptr, !mm::kProductFirmware},
     {"Drivers", "FixtureProfilesModule", nullptr, true},
     {"Drivers", "PreviewDriver", nullptr, true},
-    {"MoonCloudModule", "MoonStatsModule", "Stats", true},
-    {"MoonCloudModule", "MoonTalkModule", "Talk", true},
+    {"MoonCloudModule", "MoonStatsModule", "Stats", !mm::kProductFirmware},
+    {"MoonCloudModule", "MoonTalkModule", "Talk", !mm::kProductFirmware},
 };
 
 }  // namespace

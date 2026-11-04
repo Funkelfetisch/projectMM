@@ -246,7 +246,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     mm::registerModuleTypes();
     mm::Scheduler scheduler;
     const bool helioProduct = std::strcmp(mm::kFirmwareName, "helio1") == 0;
-    const bool productFirmware = mm::isProductFirmware(mm::kFirmwareName);
+    const bool productFirmware = mm::kProductFirmware;
     const bool nebuliteProduct = mm::isNebuliteFirmware(mm::kFirmwareName);
 
     // Every container is created as the device boots it, from the one table the scenario runner builds its trees from too: @xref{how-the-boot-tree-is-created}.
@@ -335,8 +335,8 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     // Surfaces the install's status as read-only controls, polling the shared globals so the push picks up progress while HTTP drives the flash itself. Named Firmware because the card hosts the install picker.
     auto* firmwareUpdateModule = top("FirmwareUpdateModule");
 
-    // The container for everything talking to a server we run, Stats and Talk wired in, each with its own consent: @xref{why-mooncloud-is-not-a-firmware-child}.
-    auto* moonCloudModule = top("MoonCloudModule");
+    // The container for everything talking to a server we run, Stats and Talk wired in, each with its own consent: @xref{why-mooncloud-is-not-a-firmware-child}. Product firmware has none.
+    mm::MoonModule* moonCloudModule = mm::kProductFirmware ? nullptr : top("MoonCloudModule");
 
     // Network, its interfaces first in the order the cascade tries them, then Improv (compile-time gated: @xref{why-improv-is-compile-time-gated}), MQTT (@xref{why-mqtt-is-built-on-every-networked-target}) and device discovery.
     auto* networkModule = static_cast<mm::NetworkModule*>(top("NetworkModule"));
@@ -430,7 +430,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     scheduler.addModule(systemModule);
     scheduler.addModule(fileManagerModule);
     scheduler.addModule(firmwareUpdateModule);
-    scheduler.addModule(moonCloudModule);
+    if (moonCloudModule) scheduler.addModule(moonCloudModule);
     scheduler.addModule(networkModule);
     scheduler.addModule(servicesModule);
     scheduler.addModule(controlModule);

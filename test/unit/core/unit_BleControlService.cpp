@@ -303,7 +303,7 @@ TEST_CASE("BLE info exposes descriptive build metadata without changing identity
 }
 
 TEST_CASE("Product firmware registers the animations used by its catalogue") {
-    if (!mm::isProductFirmware(mm::kFirmwareName)) return;
+    if (!mm::kProductFirmware) return;
     mm::registerModuleTypes();
     auto* effect = mm::ModuleFactory::create("HelioColorTwinklesEffect");
     REQUIRE(effect != nullptr);

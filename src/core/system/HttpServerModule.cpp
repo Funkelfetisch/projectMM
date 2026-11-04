@@ -1662,7 +1662,7 @@ void HttpServerModule::serveSystem(platform::TcpConnection& conn) {
     }
 
     sink.append("],\"ui\":");
-    const bool product = isProductFirmware(kFirmwareName);
+    const bool product = kProductFirmware;
     sink.writeJsonString(product ? ui::kProductRuntimeVersion : "");
     sink.append("}");
     sink.flush();

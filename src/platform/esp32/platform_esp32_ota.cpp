@@ -280,7 +280,7 @@ void otaTask(void* arg) {
     }
 
     // ESP-IDF's HTTPS helper exposes only the standard app descriptor. Read our optional extension from the inactive slot before finish() can select it for boot. Untagged historical images remain compatible.
-    if (isProductFirmware(kFirmwareName)) {
+    if (kProductFirmware) {
         const auto* running = esp_ota_get_running_partition();
         const auto* target = esp_ota_get_next_update_partition(nullptr);
         const int written = esp_https_ota_get_image_len_read(handle);
@@ -458,7 +458,7 @@ bool flushImage(Image* img) {
             if (info.described && firmware::isMoonBaseImage(info.project)) { imageStatus(img, "error: that is a MoonBase image, not an app"); return false; }
             if (!info.described || !firmware::isAppImage(info.project)) { imageStatus(img, "error: that image is not this project"); return false; }
             const auto variant = firmware::identifyVariant(img->buf, n);
-            if (const char* error = firmware::variantRejection(variant, isProductFirmware(kFirmwareName) ? kFirmwareName : nullptr)) {
+            if (const char* error = firmware::variantRejection(variant, kProductFirmware ? kFirmwareName : nullptr)) {
                 imageStatus(img, "error: %s", error); return false;
             }
         }

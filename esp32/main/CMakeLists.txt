@@ -141,6 +141,10 @@ endif()
 if(MM_NO_ETH)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_NO_ETH)
 endif()
+if(MM_PRODUCT_FIRMWARE)
+    # The product firmwares (build_esp32.py `product`): the product's own modules in, unused ones out.
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MM_PRODUCT_FIRMWARE=1)
+endif()
 # MM_TASK_CPU_STATS — opt-in per-task CPU% in TasksModule. Off by default because the FreeRTOS
 # run-time-stats counter it needs (CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS, added by the
 # sdkconfig.defaults.task-cpu-stats fragment build_esp32.py appends when this is set) reads a timer

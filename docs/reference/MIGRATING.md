@@ -32,6 +32,12 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ## v7.0.0
 
+### NEBULITE and HELIO firmware leave out MoonCloud, Devices, Hue, the SD card and the parallel outputs
+
+**Action: *nothing*.** A saved configuration that names one of these loads without it.
+
+`helio1`, `nebulite-s3` and `nebulite-esp32` are built with `MM_PRODUCT_FIRMWARE` and no longer carry MoonCloud (Stats, Talk), the LAN device list (Devices), the Hue driver, the SD card service, HUB75 panels or the parallel LED outputs (I80, Parlio). MQTT, MIDI, Art-Net, E1.31, DDP, Improv, the WLED API and mDNS stay, so Home Assistant still finds and drives a HELIO.
+
 ### NEBULITE and HELIO firmware answer BLE requests in notifications (RPC3)
 
 **Action: *nothing* on the device. The NEBULITE app must be a build that reads `rpc:3`; an older app cannot talk to this firmware.**

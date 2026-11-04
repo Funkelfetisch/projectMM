@@ -16,11 +16,11 @@ extern const char* const kBuildDate;
 extern const char* const kBuildId;
 /// The compiled-binary variant (`MM_FIRMWARE_NAME`), such as `esp32-eth`, or `unknown` for a local desktop build.
 extern const char* const kFirmwareName;
-/// Product variants share the dashboard, scene catalogue and BLE bootstrap.
-inline bool isProductFirmware(const char* name) {
-    return name && (std::strcmp(name, "helio1") == 0 || std::strcmp(name, "nebulite-s3") == 0 ||
-                    std::strcmp(name, "nebulite-esp32") == 0);
-}
+/// Product firmware (helio1, nebulite-s3, nebulite-esp32): the build's product variants set `MM_PRODUCT_FIRMWARE`, which brings the dashboard, scene catalogue and BLE bootstrap and leaves out what products do not use.
+#ifndef MM_PRODUCT_FIRMWARE
+#define MM_PRODUCT_FIRMWARE 0
+#endif
+inline constexpr bool kProductFirmware = MM_PRODUCT_FIRMWARE != 0;
 
 /// The NEBULITE garments, worn on a battery and driven by their own app: the radio they boot with is BLE alone. The family by its name prefix, the same rule `isNebuliteFirmware` in the dashboard applies, so a garment added later needs neither edited.
 inline bool isNebuliteFirmware(const char* name) {

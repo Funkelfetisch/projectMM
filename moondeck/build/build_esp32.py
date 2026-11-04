@@ -129,6 +129,10 @@ ETH_ONLY_EXCLUDE = ["esp_wifi", "wpa_supplicant", "esp_coex"]
 # because the cards need a gigabit link: the S31 has one, and the P4 is included to measure what
 # 100 Mbit actually does. Absent = the driver is not compiled in.
 #
+# `product`: True for the NEBULITE and HELIO product firmwares. It sets MM_PRODUCT_FIRMWARE, which
+# brings the product dashboard, scene catalogue and BLE bootstrap, and leaves out what no product
+# uses: MoonCloud, the LAN device list, Hue, the SD card, HUB75 and the parallel LED outputs.
+#
 # `ships`: True for variants the release matrix builds + publishes. A variant can
 # exist here (buildable from the CLI) yet be held out of CI with ships=False.
 # This dict is the SINGLE source of truth; generate_firmwares.py projects it to
@@ -262,6 +266,7 @@ FIRMWARES: dict[str, dict] = {
         "description": "NEBULITE classic ESP32 experimental build, 4 MB flash, WiFi and BLE; no verified board profile.",
         "ships": False,
         "installable": False,
+        "product": True,
     },
     "nebulite-s3": {
         "chip": "esp32s3",
@@ -270,6 +275,7 @@ FIRMWARES: dict[str, dict] = {
         "description": "NEBULITE S3 bench candidate, 8 MB flash, no PSRAM, BLE and WiFi.",
         "ships": False,
         "installable": False,
+        "product": True,
     },
     "helio1": {
         "chip": "esp32s3",
@@ -278,6 +284,7 @@ FIRMWARES: dict[str, dict] = {
         "description": "HELIO 1 — ESP32-S3, 8 MB flash, no PSRAM, WiFi and RGBW RMT output.",
         "ships": False,
         "installable": False,
+        "product": True,
     },
     "esp32s3-zero": {
         "chip": "esp32s3",
@@ -648,6 +655,8 @@ def firmware_cmake_args(firmware: str, release: str = "", version: str = "",
     # only the S31 is gigabit. Firmwares that don't set it save ~2.8 KB of flash.
     if spec.get("panel_cards"):
         args.append("-DMM_PANEL_CARDS=1")
+    if spec.get("product"):
+        args.append("-DMM_PRODUCT_FIRMWARE=1")
     return args
 
 
@@ -750,7 +759,7 @@ def stale_feature_cache(build_dir: Path, extra: list[str], chip: str) -> str | N
     # MM_TASK_CPU_STATS is here too: toggling --task-cpu-stats on an existing dir must wipe, or the
     # sdkconfig fragment (GENERATE_RUN_TIME_STATS) never re-seeds; CPU% would read all-0 with the flag
     # on, or leave a hidden ~5% tick tax with it off. Same stale-cache trap as MM_NO_ETH.
-    for flag in ("MM_NO_ETH", "MM_ETH_ONLY", "MM_NO_WIFI", "MM_TASK_CPU_STATS", "MM_PANEL_CARDS"):
+    for flag in ("MM_NO_ETH", "MM_ETH_ONLY", "MM_NO_WIFI", "MM_TASK_CPU_STATS", "MM_PANEL_CARDS", "MM_PRODUCT_FIRMWARE"):
         wanted = any(a.startswith(f"-D{flag}") for a in extra)
         cached = f"{flag}:" in text  # CMake writes `MM_NO_ETH:UNINITIALIZED=1`
         if wanted != cached:

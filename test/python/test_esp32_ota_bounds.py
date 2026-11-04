@@ -344,6 +344,7 @@ def test_esp32_first_flush_checks_chip_before_writing(tmp_path):
     source = (ROOT / 'src/platform/esp32/platform_esp32_ota.cpp').read_text()
     flush = source[source.index('bool flushImage(Image* img)'):source.index('\n}  // namespace', source.index('bool flushImage(Image* img)'))]
     seam = r'''
+#define MM_PRODUCT_FIRMWARE 1   // as a helio1 build sets it
 #include "core/util/FirmwareImage.h"
 #include "core/util/build_info.h"
 #include <algorithm>
@@ -440,10 +441,9 @@ def test_https_variant_is_checked_before_selecting_boot_partition(tmp_path):
 using namespace mm;
 struct Part { int value; }; Part active{1}, inactive{2};
 struct Params {}; int handle=1, written=328, errors=0, aborts=0, finishes=0;
-bool readFail=false, same=false, product=true;
+bool readFail=false, same=false, kProductFirmware=true;   // the build constant, made switchable here
 uint8_t flash[400]={};
 const char* kFirmwareName="helio1";
-bool isProductFirmware(const char*) { return product; }
 const Part* esp_ota_get_running_partition() { return &active; }
 const Part* esp_ota_get_next_update_partition(void*) { return same ? &active : &inactive; }
 int esp_https_ota_get_image_len_read(int) { return written; }
@@ -472,7 +472,7 @@ int main() {
   check(); assert(finishes==2 && aborts==2); // historical untagged
   readFail=true; check(); assert(aborts==3 && finishes==2);
   readFail=false; same=true; check(); assert(aborts==4 && finishes==2);
-  same=false; product=false; check(); assert(finishes==3); // generic behavior unchanged
+  same=false; kProductFirmware=false; check(); assert(finishes==3); // generic behavior unchanged
 }
 '''
     cpp, binary = tmp_path / 'https_guard.cpp', tmp_path / 'https_guard'
