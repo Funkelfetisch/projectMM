@@ -105,7 +105,7 @@ public:
         epoch_[32] = '\0'; epochReady_ = true;
         clearRpc(); pendingText_.resize(0); job_ = {}; terminal_ = {}; activeOwner_ = 0;
         startedBatteries_ = batteries; revision_ = 0;
-        setStatus("BLE RPC2 ready");
+        setStatus("BLE RPC3 ready");
         replySession_ = 0; replyGeneration_ = 0; std::snprintf(replyOperation_, sizeof(replyOperation_), "%s", "ready");
         result(0, "session-required");
     }
