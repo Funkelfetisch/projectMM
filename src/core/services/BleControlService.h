@@ -407,6 +407,7 @@ private:
         if (std::strcmp(op, "get") == 0 || std::strcmp(op, "clock") == 0) { get(id); return; }
         if (std::strcmp(op, "battery") == 0) { battery(id); return; }
         if (std::strcmp(op, "profile") == 0) { profile(id); return; }
+        if (std::strcmp(op, "ambient") == 0) { ambient(id); return; }
         if (std::strcmp(op, "info") == 0 || std::strcmp(op, "effect") == 0) { info(id, std::strcmp(op, "effect") == 0); return; }
         if (std::strcmp(op, "preview-frame") == 0) {
             if (!previewFrameReader_ || !scheduler_) { result(id, "frame-unavailable"); return; }
@@ -693,15 +694,7 @@ private:
             if (std::strcmp(name, "on") == 0) sink.append(value ? ":true" : ":false"); else sink.appendf(":%d", static_cast<int>(value)); comma = true;
         }
         int32_t wifi = 0;
-        if (scheduler_ && scheduler_->getControlWide("Network", "wifiEnabled", wifi)) { if (comma) sink.append(","); sink.append(wifi ? "\"wifiEnabled\":true" : "\"wifiEnabled\":false"); comma = true; }
-        if (comma) sink.append(",");
-        uint8_t ambient = 0;
-        if (Bh1750Service::automaticBrightness(ambient)) sink.appendf("\"ambientTarget\":%u", ambient); else sink.append("\"ambientTarget\":null");
-        if (MoonModule* sensor = ambientSensor()) {
-            int32_t automatic = 0; scheduler_->getControlWide(sensor->name(), "automatic", automatic);
-            sink.append(",\"ambient\":{\"service\":"); sink.writeJsonString(sensor->name());
-            sink.append(automatic ? ",\"automatic\":true}" : ",\"automatic\":false}");
-        }
+        if (scheduler_ && scheduler_->getControlWide("Network", "wifiEnabled", wifi)) { if (comma) sink.append(","); sink.append(wifi ? "\"wifiEnabled\":true" : "\"wifiEnabled\":false"); }
         sink.append("},\"queued\":"); sink.append(scheduled() ? "true" : "false");
         sink.append(",\"group\":"); sink.writeJsonString(group);
         sink.append(",\"pending\":"); writeJob(sink, job_);
@@ -916,15 +909,25 @@ private:
         }
         end(sink, id);
     }
-    /// The enabled ambient-light service: `get` names it so a client switches its `automatic` control with `patch`; null without one.
-    MoonModule* ambientSensor() const {
+    /// The ambient-light sensor Drivers follows: its switch, reading, target and response curve, which a `patch` of `Services.<service>` changes. Null unless that sensor is a direct child of Services, the one place a patch can name it.
+    void ambient(uint16_t id) {
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.append(",\"ambient\":");
+        Bh1750Service* sensor = Bh1750Service::seated();
         MoonModule* services = scheduler_ ? scheduler_->firstByName("Services") : nullptr;
-        if (!services) return nullptr;
-        for (uint8_t i = 0; i < services->childCount(); ++i) {
-            MoonModule* child = services->child(i);
-            if (std::strcmp(child->typeName(), "Bh1750Service") == 0 && child->effectivelyEnabled()) return child;
-        }
-        return nullptr;
+        bool named = false;
+        for (uint8_t i = 0; sensor && services && i < services->childCount(); ++i) named |= services->child(i) == sensor;
+        if (!named) { sink.append("null"); end(sink, id); return; }
+        sink.append("{\"service\":"); sink.writeJsonString(sensor->name());
+        sink.append(sensor->automatic ? ",\"automatic\":true" : ",\"automatic\":false");
+        uint16_t lux = 0;
+        if (sensor->reading(lux)) sink.appendf(",\"lux\":%u", static_cast<unsigned>(lux)); else sink.append(",\"lux\":null");
+        uint8_t target = 0;
+        if (Bh1750Service::automaticBrightness(target)) sink.appendf(",\"target\":%u", static_cast<unsigned>(target)); else sink.append(",\"target\":null");
+        sink.appendf(",\"darkLux\":%u,\"darkBrightness\":%u,\"brightLux\":%u,\"brightBrightness\":%u,\"hysteresisLux\":%u}",
+                     static_cast<unsigned>(sensor->darkLux), static_cast<unsigned>(sensor->darkBrightness), static_cast<unsigned>(sensor->brightLux),
+                     static_cast<unsigned>(sensor->brightBrightness), static_cast<unsigned>(sensor->hysteresisLux));
+        end(sink, id);
     }
     bool serviceControls(const json::JsonDoc& doc, const json::JsonNode* node) const {
         if (!scheduler_ || node->type != json::JsonType::Object) return false;

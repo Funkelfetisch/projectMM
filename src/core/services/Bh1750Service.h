@@ -71,12 +71,9 @@ public:
     void prepare() override {
         stop();
         seat_.claim();
-        valid_ = false;
         opened_ = false;
         failures_ = 0;
-        std::snprintf(luxText_, sizeof(luxText_), "--");
-        std::snprintf(targetText_, sizeof(targetText_), "manual");
-        notifyTargetChanged();
+        forget();
         if (sda < 0 || scl < 0) {
             setStatus("set sda + scl pins", Severity::Warning);
             return;
@@ -96,9 +93,8 @@ public:
     /// Stop the worker, drop the reading and tell the brightness consumer the target is gone.
     void release() override {
         stop();
-        valid_ = false;
         seat_.vacate();
-        notifyTargetChanged();
+        forget();
         MoonModule::release();
     }
 
@@ -121,8 +117,7 @@ public:
                 if (failures_ < UINT8_MAX) ++failures_;
                 if (done == Io::OpenFailed || failures_ >= 3) {
                     opened_ = false;
-                    valid_ = false;
-                    notifyTargetChanged();
+                    forget();
                     nextActionMs_ = now + 5000;
                 }
                 setStatus("BH1750 unavailable", Severity::Warning);
@@ -157,9 +152,22 @@ public:
 
     /// The brightness target of the active sensor; false unless it is enabled, automatic and holds a valid reading.
     static bool automaticBrightness(uint8_t& out) {
-        auto* sensor = ActiveInstance<Bh1750Service>::active();
-        if (!sensor || !sensor->effectivelyEnabled() || !sensor->automatic || !sensor->valid_) return false;
+        auto* sensor = seated();
+        if (!sensor || !sensor->automatic || !sensor->valid_) return false;
         out = sensor->target_;
+        return true;
+    }
+
+    /// The sensor Drivers follows: the seated one while it is enabled, otherwise null.
+    static Bh1750Service* seated() {
+        auto* sensor = ActiveInstance<Bh1750Service>::active();
+        return sensor && sensor->effectivelyEnabled() ? sensor : nullptr;
+    }
+
+    /// The latest measured illuminance, the value the lux control shows; false without a valid reading.
+    bool reading(uint16_t& lux) const {
+        if (!valid_) return false;
+        lux = measuredLux_;
         return true;
     }
 
@@ -189,10 +197,6 @@ public:
     }
 
     void injectLuxForTest(uint16_t lux) { seat_.claim(); accept(lux); }
-    /// The illuminance the target brightness was last computed from.
-    uint16_t acceptedLux() const { return acceptedLux_; }
-    /// Whether a valid reading has arrived.
-    bool hasReading() const { return valid_; }
 
 private:
     enum class Io : uint8_t { Idle, Open, Read, Opened, Sampled, OpenFailed, ReadFailed };
@@ -267,6 +271,14 @@ private:
                           static_cast<unsigned>(measuredLux_));
         }
         setStatus(statusText_);
+    }
+
+    /// Drop the reading, so neither the controls nor the API keep a stale lux or target, and tell the brightness consumer the target is gone.
+    void forget() {
+        valid_ = false;
+        std::snprintf(luxText_, sizeof(luxText_), "--");
+        std::snprintf(targetText_, sizeof(targetText_), "manual");
+        notifyTargetChanged();
     }
 
     static void notifyTargetChanged() { if (targetChanged_) targetChanged_(); }

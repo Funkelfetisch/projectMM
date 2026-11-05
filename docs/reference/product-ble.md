@@ -98,10 +98,10 @@ Every other request requires `$e`, nonzero uint32 `$s`, `$v:1`, `$id:1..65535` a
 ```
 
 ```json
-{"v":1,"id":2,"ok":true,"now":1100,"e":"00112233445566778899aabbccddeeff","s":1,"r":3,"op":"get","state":{"on":true,"brightness":96,"palette":0,"wifiEnabled":true,"ambientTarget":null,"ambient":{"service":"Ambient Light","automatic":true}},"queued":false,"group":"","pending":null,"terminal":null}
+{"v":1,"id":2,"ok":true,"now":1100,"e":"00112233445566778899aabbccddeeff","s":1,"r":3,"op":"get","state":{"on":true,"brightness":96,"palette":0,"wifiEnabled":true},"queued":false,"group":"","pending":null,"terminal":null}
 ```
 
-`state` contains available actual master `on`, `brightness`, numeric `palette`, `wifiEnabled` and `ambientTarget`. Missing controls remain omitted; `ambientTarget` is null without an active valid sensor override. `ambient` names the enabled ambient-light service and its `automatic` switch, which a `patch` of `{"Services":{"<service>":{"automatic":false}}}` turns off; it is absent without such a service. `queued:true` means a job waits for its deadline. During preparation it becomes false while `pending.state` is `applying`; it does not prove completion.
+`state` contains available actual master `on`, `brightness`, numeric `palette` and `wifiEnabled`. Missing controls remain omitted; the ambient-light sensor has its own [`ambient`](#ambient-light) operation. `queued:true` means a job waits for its deadline. During preparation it becomes false while `pending.state` is `applying`; it does not prove completion.
 
 `info` returns `model`, `ledCount`, `channels`, `basChannels`, `basRestartRequired`, `profileOp` and `wifiOp` in its common envelope, `setupOp` on a firmware that offers [product setup](#product-setup), and `descriptors` on one with [complete scenes](#complete-scenes-and-their-controls). The current source additionally provides `firmwareVersion` and `builtAt` strings; older installed images omit them. When ESP32 reports a distinct running and next app partition, source candidates also include `otaSlotBytes`, the target partition capacity in bytes. The field is omitted if that capacity cannot be established. A build that takes a [signed update](#firmware-update-over-ble) adds `otaTarget`, `securityVersion` and `otaWindow` beside it. It neither authenticates a release nor proves that an update will boot or can be recovered. These labels help distinguish build attempts but are not an image digest, authentication or a reliable substitute for verified release metadata. Output counts are zero and model is empty when those sources are unavailable. These are reported capabilities, not hardware-profile qualification. `effect` returns `effect:null` or the first enabled effect's actual `name`, `type` and available numeric `red`, `green`, `blue`, `white`, `speed`, `brightness`. This summary does not describe a composite scene; use `scene-state` for canonical complete-scene recognition.
 
@@ -125,6 +125,18 @@ The read-only `productProfile` control of the BLE service exposes the same descr
 
 ```json
 {"v":1,"id":7,"ok":true,"now":1000,"e":"00112233445566778899aabbccddeeff","s":1,"r":8,"op":"profile","profile":{"schema":1,"code":22,"source":"selected-model","form":"garment","verified":false,"revision":null,"mapping":null,"diameterMm":null}}
+```
+
+### Ambient light
+
+`ambient` reads the light sensor the master brightness follows: its `service` name, the `automatic` switch, the measured `lux`, the brightness `target` it sets, and the response curve `darkLux`, `darkBrightness`, `brightLux`, `brightBrightness` and `hysteresisLux`. `lux` is null without a valid reading, and `target` is null while the sensor has no reading or `automatic` is off, when the master brightness applies. A `patch` of `{"Services":{"<service>":{"automatic":false}}}` switches it, and the same patch sets the curve fields. The reply is `ambient:null` without an enabled sensor, or when the sensor sits below a group of Services, where no patch can name it. A firmware without the operation answers `error:"operation"`.
+
+```json
+{"$v":1,"$id":8,"$op":"ambient","$e":"00112233445566778899aabbccddeeff","$s":1}
+```
+
+```json
+{"v":1,"id":8,"ok":true,"now":1000,"e":"00112233445566778899aabbccddeeff","s":1,"r":9,"op":"ambient","ambient":{"service":"Ambient Light","automatic":true,"lux":250,"target":136,"darkLux":0,"darkBrightness":16,"brightLux":500,"brightBrightness":255,"hysteresisLux":15}}
 ```
 
 ## Live and saved changes

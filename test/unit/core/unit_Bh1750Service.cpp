@@ -4,8 +4,10 @@
 #include "core/services/Bh1750Service.h"
 #include "light/drivers/Drivers.h"
 
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 
 using namespace mm;
 
@@ -60,4 +62,33 @@ TEST_CASE("the automatic target and the status read as a percentage, the level p
     REQUIRE(target != nullptr);
     CHECK(std::string(target) == "53%");
     CHECK(std::string(sensor.status()).find("brightness 53%") != std::string::npos);
+}
+
+TEST_CASE("a lost sensor shows no lux or target rather than its last reading") {
+    Bh1750Service sensor;
+    sensor.defineControls();
+    const auto text = [&](const char* name) {
+        for (uint8_t i = 0; i < sensor.controls().count(); ++i)
+            if (std::strcmp(sensor.controls()[i].name, name) == 0) return std::string(static_cast<const char*>(sensor.controls()[i].ptr));
+        return std::string();
+    };
+    sensor.prepare();   // a host has no I²C, so the worker's open fails
+    sensor.injectLuxForTest(250);
+    CHECK(text("lux") == "250 lx");
+    CHECK(text("target") == "53%");
+    for (int i = 0; i < 400 && text("lux") != "--"; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        sensor.tick1s();
+    }
+    CHECK(text("lux") == "--");
+    CHECK(text("target") == "manual");
+    uint16_t lux = 0;
+    CHECK_FALSE(sensor.reading(lux));
+    sensor.injectLuxForTest(300);
+    CHECK(text("lux") == "300 lx");
+    CHECK(sensor.reading(lux));
+    CHECK(lux == 300);
+    sensor.release();
+    CHECK(text("lux") == "--");
+    CHECK(text("target") == "manual");
 }

@@ -32,6 +32,10 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ## v7.0.0
 
+### BLE `ambient` reads the light sensor, and `get` leaves it out
+
+**Action: *read `ambient`* in a BLE client that showed the automatic brightness switch.** The `ambient` operation answers the sensor's switch, its lux reading, the target brightness and the response curve. `get` carries `on`, `brightness`, `palette` and `wifiEnabled`. An app build that reads `ambientTarget` or `ambient` from `get` shows no automatic brightness switch over BLE.
+
 ### A single-strip NEBULITE drives every LED socket, and earlier boards get the NEBULITE looks
 
 **Action: *re-run product setup* on a Croptop S3, a Croptop ESP32 or a Fanny pack ESP32.** Their profiles now repeat the strip on every LED socket of the board: GPIO36, 35, 48 and 34 on the S3, GPIO26 and 17 on the ESP32. A board set up before keeps its one output until setup runs again, which offers the 2D layout first where the product has one.

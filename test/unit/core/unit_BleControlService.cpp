@@ -1,4 +1,5 @@
 /// @module BleControlService
+/// @also Bh1750Service
 #include "helio/BleProductProfiles.h"
 #include "doctest.h"
 #include "core/services/BleControlService.h"
@@ -505,29 +506,53 @@ TEST_CASE("BLE can change existing ambient controls but cannot replace services 
     }
 }
 
-TEST_CASE("BLE get names the ambient-light service and its automatic switch, so the app can toggle auto brightness") {
-    struct Ambient : mm::MoonModule {
-        bool automatic = true;
-        void defineControls() override { controls_.addControl("automatic", automatic); }
-    };
+TEST_CASE("BLE ambient answers the sensor Drivers follows, with its switch, reading, target and curve, and null for one a patch cannot name") {
+    const auto npos = std::string::npos;
     BleTree tree;
-    tree.send(R"({"$v":1,"$id":20,"$op":"get"})", 100);
-    CHECK(tree.reply().find("\"ambient\":") == std::string::npos);
+    tree.send(R"({"$v":1,"$id":20,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("ambient":null)") != npos);
 
     auto* services = new mm::MoonModule(); services->setName("Services");
-    auto* ambient = new Ambient(); ambient->setName("Ambient Light"); ambient->setTypeName("Bh1750Service"); ambient->defineControls();
-    services->addChild(ambient); tree.scheduler.addModule(services);
-    tree.send(R"({"$v":1,"$id":21,"$op":"get"})", 100);
-    CHECK(tree.reply().find(R"("ambient":{"service":"Ambient Light","automatic":true})") != std::string::npos);
+    auto* sensor = new mm::Bh1750Service(); sensor->setName("Ambient Light"); sensor->setTypeName("Bh1750Service"); sensor->defineControls();
+    services->addChild(sensor); tree.scheduler.addModule(services);
+    sensor->sda = -1; sensor->prepare();   // seated, with no pins and so no reading yet
+    tree.send(R"({"$v":1,"$id":21,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("ambient":{"service":"Ambient Light","automatic":true,"lux":null,"target":null,"darkLux":0,"darkBrightness":16,"brightLux":500,"brightBrightness":255,"hysteresisLux":15})") != npos);
 
-    tree.send(R"({"$v":1,"$id":22,"$op":"patch","Services":{"Ambient Light":{"automatic":false}}})", 100);
+    sensor->injectLuxForTest(250);   // 136 on the default curve
+    tree.send(R"({"$v":1,"$id":22,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("automatic":true,"lux":250,"target":136,)") != npos);
+
+    // The switch and the curve change through a Services patch; manual brightness has no target.
+    tree.send(R"({"$v":1,"$id":23,"$op":"patch","Services":{"Ambient Light":{"automatic":false,"darkLux":2,"brightBrightness":200}}})", 100);
     tree.finishPrepare(100);
-    tree.send(R"({"$v":1,"$id":23,"$op":"get"})", 100);
-    CHECK(tree.reply().find(R"("ambient":{"service":"Ambient Light","automatic":false})") != std::string::npos);
+    tree.send(R"({"$v":1,"$id":24,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("automatic":false,"lux":250,"target":null,"darkLux":2,"darkBrightness":16,"brightLux":500,"brightBrightness":200,"hysteresisLux":15})") != npos);
 
-    ambient->setEnabled(false);
-    tree.send(R"({"$v":1,"$id":24,"$op":"get"})", 100);
-    CHECK(tree.reply().find("\"ambient\":") == std::string::npos);
+    // get leaves the sensor to this op.
+    tree.send(R"({"$v":1,"$id":25,"$op":"get"})", 100);
+    CHECK(tree.reply().find("ambient") == npos);
+
+    // The largest reply: the longest module name and every number at its maximum.
+    sensor->setName("Ambient Light15"); sensor->automatic = true;
+    sensor->darkLux = sensor->brightLux = sensor->hysteresisLux = 65535; sensor->darkBrightness = sensor->brightBrightness = 255;
+    sensor->injectLuxForTest(65535);
+    tree.send(R"({"$v":1,"$id":26,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("lux":65535)") != npos);
+    CHECK(tree.reply().size() <= 512);
+
+    sensor->setEnabled(false);
+    tree.send(R"({"$v":1,"$id":27,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("ambient":null)") != npos);
+
+    // A seated sensor below a group of Services has no name a patch can reach.
+    sensor->release();
+    auto* group = new mm::MoonModule(); group->setName("Sensors"); services->addChild(group);
+    auto* nested = new mm::Bh1750Service(); nested->setName("Nested"); nested->defineControls(); group->addChild(nested);
+    nested->injectLuxForTest(40);
+    REQUIRE(mm::Bh1750Service::seated() == nested);
+    tree.send(R"({"$v":1,"$id":28,"$op":"ambient"})", 100);
+    CHECK(tree.reply().find(R"("ambient":null)") != npos);
 }
 
 namespace {
