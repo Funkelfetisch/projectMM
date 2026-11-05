@@ -9,6 +9,8 @@ struct NamedCode { uint8_t code; const char* name; };
 /// Exact persisted setup profile names; unknown and custom models remain unclassified.
 inline uint8_t productCodeForModel(const char* model) {
     if (!model) return 0;
+    // HELIO 1 (1) and MINI80 (2) are firmware targets; the necklace is a setup choice on nebulite-s3.
+    if (std::strcmp(model, "HELIO necklace") == 0) return 3;
     if (std::strcmp(model, "NEBULITE Croptop S3") == 0 || std::strcmp(model, "NEBULITE Croptop ESP32") == 0) return 20;
     if (std::strcmp(model, "NEBULITE Jacket S3") == 0 || std::strcmp(model, "NEBULITE Jacket ESP32") == 0) return 22;
     // The 2021 ESP32 bags: the classic fanny pack and the standard six-LED backpack.

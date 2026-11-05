@@ -2399,5 +2399,67 @@
         }
       }
     }
+  },
+  {
+    "name": "HELIO necklace",
+    "chip": "ESP32-S3",
+    "firmwares": [
+      "nebulite-s3"
+    ],
+    "description": "The 8 cm dome worn on a neck string, on the MINI80 SIDE43 board: 43 side-emitting SK6805SIDE GRBW LEDs in one ring on GPIO47, their rail switched by GPIO17. Board-derived; the housing, battery, LED power sequence and light output await physical qualification.",
+    "supported": [
+      "LEDs",
+      "WiFi",
+      "Audio",
+      "I2C"
+    ],
+    "planned": [
+      "Battery",
+      "Charging"
+    ],
+    "state": {
+      "System": {
+        "deviceModel": "HELIO necklace"
+      },
+      "Drivers": {
+        "$patch": "replace",
+        "relayPins": "17",
+        "RmtLed": {
+          "type": "RmtLedDriver",
+          "pins": "47",
+          "ledsPerPin": "43",
+          "fixture": "GRBW",
+          "whiteMode": "Accurate",
+          "curve": "linear"
+        }
+      },
+      "Layouts": {
+        "$patch": "replace",
+        "ProductStrip": {
+          "type": "PixelMapLayout",
+          "points": "14,6;14,5;14,4;13,4;13,3;12,2;11,1;10,1;9,0;8,0;7,0;6,0;5,0;4,1;3,1;3,2;2,2;1,3;1,4;0,5;0,6;0,7;0,8;0,9;1,10;1,11;2,12;3,12;3,13;4,13;5,14;6,14;7,14;8,14;9,14;10,13;11,13;12,12;13,11;13,10;14,10;14,9;14,8"
+        }
+      },
+      "Services": {
+        "Audio": {
+          "type": "AudioService",
+          "mode": "local audio",
+          "sdPin": 39,
+          "wsPin": 38,
+          "sckPin": 40,
+          "mclkPin": -1
+        },
+        "Ambient Light": {
+          "type": "Bh1750Service",
+          "bus": 1,
+          "sda": 26,
+          "scl": 11,
+          "address": 35
+        },
+        "BLE": {
+          "type": "BleControlService"
+        }
+      }
+    }
   }
 ]

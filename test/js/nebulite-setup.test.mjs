@@ -27,7 +27,7 @@ test('NEBULITE product choices derive output state from the canonical catalogue'
     }
 });
 test('product setup requires the actual firmware and chip family', () => {
-    assert.equal(compatibleProductProfiles(profiles, identity).length, 2);
+    assert.deepEqual(compatibleProductProfiles(profiles, identity).map(p => p.name), ['NEBULITE Croptop S3', 'NEBULITE Jacket S3', 'HELIO necklace']);
     for (const wrong of [{ firmware: 'helio1', chip: 'ESP32-S3' }, { firmware: 'nebulite-s3', chip: 'ESP32' },
         { firmware: 'nebulite-s3', chip: 'ESP32-S32' }, { firmware: 'nebulite-s3' }, {}]) {
         assert.deepEqual(compatibleProductProfiles(profiles, wrong), []);
@@ -315,6 +315,21 @@ test('jacket and vest share one visible setup while keeping the stored product i
     assert.equal(productProfilePatch(jacket, identity).System.deviceModel, 'NEBULITE Jacket S3');
     assert.equal(productProfileMatches(jacket, modulesFor(jacket)), true);
     assert.equal(elements(view, 'summary')[0].children[1].textContent, choice.textContent);
+});
+test('the HELIO necklace sets up as one GRBW ring whose rail relay is part of the confirmed setup', () => {
+    const necklace = profiles.find(p => p.name === 'HELIO necklace');
+    const patch = productProfilePatch(necklace, identity);
+    assert.equal(patch.Drivers.relayPins, '17');
+    assert.deepEqual(Object.keys(patch.Drivers).filter(key => patch.Drivers[key]?.type), ['RmtLed']);
+    assert.equal(patch.Layouts.ProductStrip.type, 'PixelMapLayout');
+    assert.equal(patch.Layouts.ProductStrip.points.split(';').length, 43);
+    const modules = modulesFor(necklace);
+    modules[1].controls = [{ name: 'relayPins', value: '17' }];
+    assert.equal(productProfileMatches(necklace, modules), true);
+    assert.equal(productProjection(necklace, modules), 'virtual2d');
+    assert.equal(productProjectionPoints(necklace, modules).width, 15);
+    modules[1].controls[0].value = '';
+    assert.equal(productProfileMatches(necklace, modules), false);
 });
 test('unconfigured NEBULITE opens labelled setup without automatic hardware writes', async () => {
     let writes = 0;

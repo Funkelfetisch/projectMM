@@ -37,7 +37,7 @@ struct BleAdvertisementSnapshot {
 };
 inline bool bleAdvertisementByte(int32_t value) { return value >= 0 && value <= 255; }
 inline bool bleAdvertisementProductCode(uint8_t code) {
-    return code <= 2 || (code >= 16 && code <= 23);
+    return code <= 3 || (code >= 16 && code <= 23);
 }
 inline std::array<uint8_t, 13> encodeBleAdvertisement(const BleAdvertisementSnapshot& value) {
     std::array<uint8_t, 13> bytes{};

@@ -98,6 +98,9 @@ TEST_CASE("BLE advertising: native white requires known RGBW and non-spheres can
     bytes = mm::encodeBleAdvertisement(value);
     CHECK((bytes[1] & 12) == 12); CHECK((bytes[1] & 64) == 64); CHECK(bytes[11] == 111);
     value.product = {2,8}; bytes = mm::encodeBleAdvertisement(value); CHECK(bytes[5] == 8);
+    // The 8 cm necklace is worn, not a sphere: its code goes out, a diameter never does.
+    value.product = {3,8}; bytes = mm::encodeBleAdvertisement(value); CHECK(bytes[2] == 3); CHECK(bytes[5] == 0);
+    value.product = {4,0}; bytes = mm::encodeBleAdvertisement(value); CHECK(bytes[2] == 0);
     value.product = {0,50}; bytes = mm::encodeBleAdvertisement(value); CHECK(bytes[5] == 0);
 }
 
@@ -109,6 +112,8 @@ TEST_CASE("BLE advertising: only exact explicitly selected NEBULITE models ident
     CHECK(productCodeForModel("NEBULITE Jacket ESP32") == 22);
     CHECK(productCodeForModel("NEBULITE Fanny pack ESP32") == 16);
     CHECK(productCodeForModel("NEBULITE Backpack ESP32") == 18);
+    CHECK(productCodeForModel("HELIO necklace") == 3);
+    CHECK(productCodeForModel("HELIO Necklace") == 0);
     CHECK(productCodeForModel("NEBULITE Vest S3") == 0);
     CHECK(productCodeForModel("NEBULITE Croptop") == 0);
     CHECK(productCodeForModel(nullptr) == 0);

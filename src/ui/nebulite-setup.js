@@ -28,6 +28,8 @@ const CROPTOP_POINTS = '1,8;12,8;10,3;16,2;4,0;5,8;13,4;16,8;8,4';
 const JACKET_POINTS = '5,14;7,14;9,14;11,14;13,14;15,14;5,6;7,6;9,6;11,6;13,6;15,6;7,2;8,1;9,1;11,1;12,1;13,2;0,5;1,6;2,7;1,9;2,10;3,11;20,5;19,6;18,7;19,9;18,10;17,11;10,10';
 export function productProjectionProfile(profile, projection = "strip") {
     if (projection === "strip") return { ...profile, projection: "strip" };
+    // A product whose own layout is a point map, such as the necklace's ring, is already two-dimensional.
+    if (projection === "virtual2d" && profile?.state?.Layouts?.ProductStrip?.type === "PixelMapLayout") return { ...profile, projection };
     const dimensions = profile?.name === "NEBULITE Croptop S3" || profile?.name === "NEBULITE Croptop ESP32" ? [3, 3] :
         profile?.name === "NEBULITE Jacket S3" ? [7, 13] : null;
     if (projection !== "virtual2d" || !dimensions) throw new Error("This product has no virtual 2D layout.");
@@ -106,6 +108,11 @@ function productProfileMatchesExact(profile, modules, customPoints = false, geom
         if (physical.some(child => !expectedNames.includes(child.name))) return false;
         for (const [name, settings] of Object.entries(profile.state[group])) {
             if (name === "$patch") continue;
+            // A plain value is the group's own setting, such as the Drivers relay list.
+            if (!settings || typeof settings !== "object") {
+                if (!sameSetting(module, name, settings)) return false;
+                continue;
+            }
             const child = module.children?.find(candidate => candidate.name === name);
             if (!child || child.enabled === false || child.type !== settings.type) return false;
             for (const [key, expected] of Object.entries(settings)) {

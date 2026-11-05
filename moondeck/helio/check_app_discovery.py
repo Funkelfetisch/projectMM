@@ -18,11 +18,12 @@ CPP = r'''
 #include <cstdio>
 int main() {
     const int codes[] = {0,1,2,mm::ble_advertisement::productCodeForModel("NEBULITE Croptop S3"),
-                         mm::ble_advertisement::productCodeForModel("NEBULITE Jacket S3")};
+                         mm::ble_advertisement::productCodeForModel("NEBULITE Jacket S3"),
+                         mm::ble_advertisement::productCodeForModel("HELIO necklace")};
     const int speeds[] = {-32768,-1,0,1,255,32767};
     for (int n = 0; n < 600; ++n) {
         mm::BleAdvertisementSnapshot v;
-        v.product = {static_cast<uint8_t>(codes[n%5]), static_cast<uint8_t>((n%70)+1)};
+        v.product = {static_cast<uint8_t>(codes[n%6]), static_cast<uint8_t>((n%70)+1)};
         v.ledCount = static_cast<uint32_t>((n*79)%65536);
         v.powerKnown = n&1; v.powerOn = n&2;
         v.rgbwKnown = n&4; v.rgbw = n&8;
@@ -43,12 +44,12 @@ JS = r'''
 import { decodeMoonlightAdvertisement, MOONLIGHT_AD_SCENES, MOONLIGHT_AD_PALETTES, MOONLIGHT_AD_PRODUCTS } from APP;
 import { readFileSync } from 'node:fs';
 const lines=readFileSync(process.argv[2],'utf8').trim().split('\n'), rows=lines.slice(0,600);
-const codes=[0,1,2,20,22], speeds=[-32768,-1,0,1,255,32767];
+const codes=[0,1,2,20,22,3], speeds=[-32768,-1,0,1,255,32767];
 const fail=(n,key,got,want)=>{throw new Error(`case ${n} ${key}: ${JSON.stringify(got)} != ${JSON.stringify(want)}`)};
 for (let n=0;n<rows.length;n++) {
  const d=decodeMoonlightAdvertisement(Buffer.from(rows[n],'hex').toString('base64'));
  if(!d) fail(n,'decoder',null,'valid');
- const code=codes[n%5], rgbwKnown=Boolean(n&4), rgbw=Boolean(n&8), rgbKnown=Boolean(n&32);
+ const code=codes[n%6], rgbwKnown=Boolean(n&4), rgbw=Boolean(n&8), rgbKnown=Boolean(n&32);
  const expected={productCode:code,ledCount:(n*79)%65536||null,diameterCm:code===1||code===2?n%70+1:null,
   on:n&1?Boolean(n&2):null,rgbw:rgbwKnown?rgbw:null,animationCode:n%25,
   rawSpeed:n&16?speeds[n%6]:null,white:rgbwKnown&&rgbw&&(n&64)?(n*17)%256:null,
@@ -57,7 +58,7 @@ for (let n=0;n<rows.length;n++) {
  const rgb=[(n*29)%256,(n*71)%256,(n*131)%256];
  const expectedRgb=rgbKnown?{r:Math.round((rgb[0]>>3)*255/31),g:Math.round((rgb[1]>>2)*255/63),b:Math.round((rgb[2]>>3)*255/31)}:null;
  if(JSON.stringify(d.colour)!==JSON.stringify(expectedRgb)) fail(n,'colour',d.colour,expectedRgb);
- const expectedKey={0:null,1:'HELIO1',2:'MINI80',20:'croptop',22:'jacket-vest'}[code];
+ const expectedKey={0:null,1:'HELIO1',2:'MINI80',3:'helio-necklace',20:'croptop',22:'jacket-vest'}[code];
  if((d.product?.key??null)!==expectedKey) fail(n,'product',d.product?.key??null,expectedKey);
  if(d.scene!==(MOONLIGHT_AD_SCENES[n%25]??null)) fail(n,'scene',d.scene,n%25);
  if(d.palette!==(MOONLIGHT_AD_PALETTES[expected.paletteCode]??null)) fail(n,'palette',d.palette,expected.paletteCode);

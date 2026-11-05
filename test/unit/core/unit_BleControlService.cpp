@@ -5,7 +5,11 @@
 #include "core/util/BleUpdateStream.h"
 #include "helio/BleAdvertisementRegistry.h"
 #include "helio/BlePixelMapPage.h"
+#include "light/drivers/Drivers.h"
+#include "light/drivers/FixtureProfilesModule.h"
+#include "light/drivers/RmtLedDriver.h"
 #include "light/layouts/Layouts.h"
+#include "light/layouts/PixelMapLayout.h"
 #include "core/services/BatteryService.h"
 #include "core/system/ControlModule.h"
 #include "core/util/ModuleFactory.h"
@@ -552,6 +556,83 @@ TEST_CASE("BLE setup offers only the catalogue products that name this firmware 
     for (const char* product : {"NEBULITE Croptop ESP32", "NEBULITE Fanny pack ESP32", "NEBULITE Backpack ESP32", "NEBULITE Jacket ESP32"})
         CHECK(names.find(product) != std::string::npos);
     CHECK(names.find("S3") == std::string::npos);
+    CHECK(names.find("HELIO necklace") == std::string::npos);
+}
+
+namespace {
+const char* s3ProfileState(const char* model) { return mm::ble_product_profiles::stateFor(model, "nebulite-s3", "ESP32-S3"); }
+void s3ProfileNames(mm::JsonSink& sink) { mm::ble_product_profiles::writeNames(sink, "nebulite-s3", "ESP32-S3"); }
+struct DeviceModel : mm::MoonModule {
+    char deviceModel[32] = "";
+    void defineControls() override { controls_.addText("deviceModel", deviceModel, sizeof(deviceModel)); }
+};
+}  // namespace
+
+TEST_CASE("BLE setup makes an S3 board the HELIO necklace: one ring of 43 GRBW lights on GPIO47, its rail on GPIO17") {
+    mm::ModuleFactory::registerType<mm::RmtLedDriver>("RmtLedDriver");
+    mm::ModuleFactory::registerType<mm::PixelMapLayout>("PixelMapLayout");
+    mm::platform::clearTestGpioLevel();
+    mm::Scheduler scheduler;
+    auto* system = new DeviceModel(); system->setName("System"); system->defineControls();
+    auto* drivers = new mm::Drivers(); drivers->setName("Drivers"); drivers->setTypeName("Drivers");
+    // The fixture library is wired into Drivers on every board, so the setup's replace keeps it.
+    auto* library = new mm::FixtureProfilesModule(); library->setName("FixtureProfiles"); library->setTypeName("FixtureProfilesModule");
+    library->markWiredByCode(); drivers->addChild(library);
+    auto* layouts = new mm::Layouts(); layouts->setName("Layouts"); layouts->setTypeName("Layouts");
+    scheduler.addModule(system); scheduler.addModule(layouts); scheduler.addModule(drivers);
+    scheduler.setup();
+    mm::BleControlService service;
+    service.setScheduler(&scheduler);
+    service.setEpochForTest(kBleTestEpoch);
+    service.setProductProfiles(&s3ProfileState, &s3ProfileNames);
+    service.setAdvertisingProductResolver(&mm::ble_advertisement::productCodeForModel);
+    service.handle(R"({"$v":1,"$id":1,"$op":"hello","$nonce":"00000000000000000000000000000041"})", 100);
+    const uint32_t session = replyNumber(service.response(), "s");
+    const auto send = [&](const char* request) {
+        std::string scoped = request;
+        scoped.pop_back();
+        scoped += ",\"$e\":\"" + std::string(kBleTestEpoch) + "\",\"$s\":" + std::to_string(session) + "}";
+        service.handle(scoped.c_str(), 100);
+    };
+
+    send(R"({"$v":1,"$id":2,"$op":"profiles"})");
+    CHECK(std::string(service.response()).find("\"HELIO necklace\"") != std::string::npos);
+    send(R"({"$v":1,"$id":3,"$op":"setup","$model":"HELIO necklace","$live":false})");
+    scheduler.preparePending();
+    service.applyDue(100);
+    INFO(std::string(service.response()));
+    CHECK(std::string(service.response()).find("\"ok\":true") != std::string::npos);
+
+    CHECK(std::string(system->deviceModel) == "HELIO necklace");
+    // The scan names the necklace with its own code; like the bags it carries no garment or sphere descriptor.
+    CHECK(mm::encodeBleAdvertisement(service.advertisementSnapshot())[2] == 3);
+    send(R"({"$v":1,"$id":4,"$op":"profile"})");
+    CHECK(std::string(service.response()).find("\"profile\":null") != std::string::npos);
+    CHECK(std::string(drivers->relayPins) == "17");
+    REQUIRE(drivers->childCount() >= 1);
+    const mm::RmtLedDriver* ring = nullptr;
+    for (uint8_t i = 0; i < drivers->childCount(); ++i)
+        if (std::strcmp(drivers->child(i)->typeName(), "RmtLedDriver") == 0) { CHECK(ring == nullptr); ring = static_cast<const mm::RmtLedDriver*>(drivers->child(i)); }
+    REQUIRE(ring != nullptr);
+    CHECK(std::string(ring->pins) == "47");
+    CHECK(std::string(ring->ledsPerPin) == "43");
+    // The SK6805SIDE sends green, red, blue, white, and its datasheet timing (T0H 0.2-0.4 us, T1H 0.62-1.0 us) is the default preset's.
+    CHECK(std::string(ring->fixtureName()) == "GRBW");
+    CHECK(ring->timing == mm::RmtLedDriver::kTiming800k);
+    REQUIRE(layouts->childCount() == 1);
+    REQUIRE(std::strcmp(layouts->child(0)->typeName(), "PixelMapLayout") == 0);
+    const auto* map = static_cast<const mm::PixelMapLayout*>(layouts->child(0));
+    CHECK(map->lightCount() == 43);
+    // LED1 sits at the USB edge just above center, and the chain runs counter-clockwise seen from the dome.
+    CHECK(std::strncmp(map->points, "14,6;14,5;14,4;", 15) == 0);
+
+    // The rail is closed while the ring is on and bright, open when it is off.
+    drivers->on = true; drivers->brightness = 100; drivers->onControlChanged("on");
+    CHECK(mm::platform::gpioRead(17));
+    drivers->on = false; drivers->onControlChanged("on");
+    CHECK_FALSE(mm::platform::gpioRead(17));
+    scheduler.release();
+    mm::platform::clearTestGpioLevel();
 }
 
 TEST_CASE("BLE RPC2 new central sessions distinguish same-ID reads from a retained old-central result") {
