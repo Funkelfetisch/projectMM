@@ -91,9 +91,10 @@ public:
         char identity[kIdentityCapacity]; JsonSink sink(identity, sizeof(identity));
         writeIdentity(sink, batteries);
         if (sink.overflowed()) { setStatus("BLE identity too large", Severity::Error); return; }
-        if (!platform::bleControlStart(transport_, "NEBULITE HELIO", identity, batteries)) {
+        if (!platform::bleControlStart(transport_, bleName(), identity, batteries)) {
             startedBatteries_ = {}; setStatus("BLE unavailable", Severity::Warning); return;
         }
+        std::snprintf(advertisedName_, sizeof(advertisedName_), "%s", bleName());
         std::array<uint8_t, 16> bytes{};
         if (!platform::bleControlEpoch(transport_, bytes)) {
             platform::bleControlStop(transport_); setStatus("BLE epoch unavailable", Severity::Error); return;
@@ -156,23 +157,28 @@ public:
     }
     /// The most bytes the identity characteristic holds, its terminator included.
     static constexpr size_t kIdentityCapacity = 256;
+    /// One System text control, such as the device model or name; empty where there is none.
+    const char* systemText(const char* name) const {
+        if (scheduler_) for (uint8_t i = 0; i < scheduler_->moduleCount(); ++i) {
+            auto* root = scheduler_->module(i);
+            if (std::strcmp(root->name(), "System") != 0) continue;
+            for (uint8_t c = 0; c < root->controls().count(); ++c) {
+                const auto& control = root->controls()[c];
+                if (std::strcmp(control.name, name) == 0 && control.type == ControlType::Text) return static_cast<const char*>(control.ptr);
+            }
+        }
+        return "";
+    }
+    /// The name the device advertises: the user's device name, the one the network uses too, or "MoonLight" before there is one.
+    const char* bleName() const {
+        const char* name = systemText("deviceName");
+        return name[0] ? name : "MoonLight";
+    }
     /// Resolve the same explicitly configured product hint for scan and RPC.
     BleAdvertisementProduct productHint() {
         auto product = advertisingProduct_;
         if (scheduler_) {
-            if (advertisingProductResolver_) {
-                const char* model = "";
-                for (uint8_t i = 0; i < scheduler_->moduleCount(); ++i) {
-                    auto* root = scheduler_->module(i);
-                    if (std::strcmp(root->name(), "System") != 0) continue;
-                    for (uint8_t c = 0; c < root->controls().count(); ++c) {
-                        const auto& control = root->controls()[c];
-                        if (std::strcmp(control.name, "deviceModel") == 0 && control.type == ControlType::Text)
-                            model = static_cast<const char*>(control.ptr);
-                    }
-                }
-                product.code = advertisingProductResolver_(model);
-            }
+            if (advertisingProductResolver_) product.code = advertisingProductResolver_(systemText("deviceModel"));
             int32_t diameter = 0;
             if ((product.code == 1 || product.code == 2) &&
                 scheduler_->getControlWide("System", "physicalDiameterCm", diameter) && diameter >= 0 && diameter <= 255)
@@ -200,6 +206,9 @@ public:
     }
     /// Publish the advertisement, product profile, battery state and the pairing and link counters once a second.
     void tick1s() MM_NONBLOCKING override {
+        // A rename reaches the advertisement within a second; a contended transport takes it on the next.
+        if (transport_.impl && std::strcmp(bleName(), advertisedName_) != 0 && platform::bleControlSetName(transport_, bleName()))
+            std::snprintf(advertisedName_, sizeof(advertisedName_), "%s", bleName());
         const auto advertisement = advertisementSnapshot();
         JsonSink profileSink(profileText_, sizeof(profileText_));
         writeProductProfile(profileSink, advertisement.product);
@@ -888,12 +897,7 @@ private:
         } else {
             const auto* output = LightOutput::active();
             sink.appendf(",\"ledCount\":%u,\"channels\":%u", output ? static_cast<unsigned>(output->summary().lightCount) : 0, output ? output->summary().channelsPerLight : 0);
-            sink.append(",\"model\":"); const char* model = "";
-            if (scheduler_) for (uint8_t i = 0; i < scheduler_->moduleCount(); ++i) {
-                auto* root = scheduler_->module(i); if (std::strcmp(root->name(), "System")) continue;
-                for (uint8_t c = 0; c < root->controls().count(); ++c) if (std::strcmp(root->controls()[c].name, "deviceModel") == 0 && root->controls()[c].type == ControlType::Text) model = static_cast<const char*>(root->controls()[c].ptr);
-            }
-            sink.writeJsonString(model);
+            sink.append(",\"model\":"); sink.writeJsonString(systemText("deviceModel"));
             sink.append(",\"firmwareVersion\":"); sink.writeJsonString(version_);
             sink.append(",\"builtAt\":"); sink.writeJsonString(builtAt_);
             if (const size_t capacity = slotCapacity())
@@ -974,6 +978,7 @@ private:
     const char* build_ = "development";
     const char* version_ = "";
     const char* builtAt_ = "";
+    char advertisedName_[32] = {};   ///< the name the transport advertises, compared once a second against the device name
     platform::BleControlHandle transport_;
     /// Taken by the first `ota-begin` and freed with the module, so an idle service holds no update buffers.
     struct UpdateState {

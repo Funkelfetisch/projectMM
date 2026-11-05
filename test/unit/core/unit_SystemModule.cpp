@@ -47,6 +47,38 @@ TEST_CASE("defaultDeviceName: MM- and the last two MAC bytes, and nothing past a
     CHECK(tiny[0] == 0);
 }
 
+TEST_CASE("defaultDeviceName takes a product's brand in place of MM, and nothing past a short buffer") {
+    const uint8_t mac[6] = {0x10, 0x00, 0x3B, 0xDB, 0x82, 0x00};
+    char name[24];
+    mm::defaultDeviceName(mac, name, sizeof(name), "NEBULITE");
+    CHECK(std::strcmp(name, "NEBULITE-8200") == 0);
+    char tight[13] = {'x'};
+    mm::defaultDeviceName(mac, tight, sizeof(tight), "NEBULITE");
+    CHECK(tight[0] == 0);
+}
+
+TEST_CASE("An unnamed NEBULITE board, or one still carrying MoonLight's MM- default, is NEBULITE- and its MAC digits") {
+    uint8_t mac[6] = {};
+    mm::platform::getMacAddress(mac);
+    char product[24], generic[24];
+    mm::defaultDeviceName(mac, product, sizeof(product), "NEBULITE");
+    mm::defaultDeviceName(mac, generic, sizeof(generic));
+    mm::SystemModule unnamed;
+    unnamed.setDefaultNamePrefix("NEBULITE");
+    unnamed.setup();
+    CHECK(std::strcmp(unnamed.deviceName(), product) == 0);
+    mm::SystemModule saved;
+    saved.setDefaultNamePrefix("NEBULITE");
+    saved.setDefaultDeviceName(generic);   // what an earlier build saved for this board
+    saved.setup();
+    CHECK(std::strcmp(saved.deviceName(), product) == 0);
+    mm::SystemModule named;
+    named.setDefaultNamePrefix("NEBULITE");
+    named.setDefaultDeviceName("Stage-left");
+    named.setup();
+    CHECK(std::strcmp(named.deviceName(), "Stage-left") == 0);
+}
+
 // deviceName is bound as a Text control to the MAC-derived default (see looksLikeMacName).
 TEST_CASE("SystemModule deviceName control") {
     mm::SystemModule sys;

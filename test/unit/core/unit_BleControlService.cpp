@@ -82,6 +82,10 @@ struct BleKnobs : mm::MoonModule {
     }
     bool affectsPrepare(const char*) const override { return rebuild; }
 };
+struct BleNamedSystem : mm::MoonModule {
+    char deviceName[24] = "Lisa's Top";
+    void defineControls() override { controls_.addText("deviceName", deviceName, sizeof(deviceName)); }
+};
 struct BleNetworkKnobs : mm::MoonModule {
     bool wifiEnabled = true;
     void defineControls() override { controls_.addControl("wifiEnabled", wifiEnabled); }
@@ -304,6 +308,19 @@ TEST_CASE("BLE info exposes descriptive build metadata without changing identity
     CHECK(tree.reply().find("\"otaSlotBytes\":3145728") != std::string::npos);
     CHECK(tree.reply().size() <= 512);
     mm::platform::setTestOtaNextAppCapacity(0);
+}
+
+TEST_CASE("BLE advertises the device name the network uses, and MoonLight before there is one") {
+    BleTree tree;
+    CHECK(std::string(tree.service.bleName()) == "MoonLight");
+    auto* system = new BleNamedSystem();
+    system->setName("System");
+    system->defineControls();
+    tree.scheduler.addModule(system);
+    CHECK(std::string(tree.service.bleName()) == "Lisa's Top");
+    // A rename is what the next second's tick hands the transport.
+    std::snprintf(system->deviceName, sizeof(system->deviceName), "%s", "Stage-left");
+    CHECK(std::string(tree.service.bleName()) == "Stage-left");
 }
 
 TEST_CASE("Product firmware registers the animations used by its catalogue") {

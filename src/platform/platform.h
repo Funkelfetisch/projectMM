@@ -995,6 +995,8 @@ bool bleControlOwners(BleControlHandle& handle, uint64_t* out, size_t capacity, 
 bool bleControlPublish(BleControlHandle& handle, const char* response, uint64_t generation) MM_NONBLOCKING;
 /// Coalesced public hints; only the host task updates the scan-response payload.
 bool bleControlPublishAdvertisement(BleControlHandle& handle, const std::array<uint8_t, 13>& bytes) MM_NONBLOCKING;
+/// Rename the device: the GAP device name in full, the advertisement its first characters; false when not started, contended or over 31 bytes.
+bool bleControlSetName(BleControlHandle& handle, const char* name) MM_NONBLOCKING;
 /// Whether the peripheral has an active central connection.
 bool bleControlConnected(const BleControlHandle& handle) MM_NONBLOCKING;
 /// Copy native pairing counters; false when this target has no running host.

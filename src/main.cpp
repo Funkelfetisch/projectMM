@@ -276,6 +276,8 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         systemModule->setDefaultDeviceName("HELIO");
         systemModule->setDefaultDeviceModel("HELIO 1");
     }
+    // An unnamed NEBULITE controller is NEBULITE- and its MAC's last digits, which the BLE advertisement's 8 characters show as NEBULITE.
+    if (nebuliteProduct) systemModule->setDefaultNamePrefix("NEBULITE");
 
     // Services, the core-domain twin of Effects/Drivers, with the AudioService wired in: @xref{why-the-audio-service-is-boot-wired}.
     auto* servicesModule = top("Services");

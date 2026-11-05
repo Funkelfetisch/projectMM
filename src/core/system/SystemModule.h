@@ -47,6 +47,8 @@ public:
     void setDefaultDeviceName(const char* name) {
         std::snprintf(deviceName_, sizeof(deviceName_), "%s", name);
     }
+    /// Name an unnamed board `<prefix>-` and the last two MAC bytes, a product's brand in place of MoonLight's `MM`.
+    void setDefaultNamePrefix(const char* prefix) { namePrefix_ = prefix; }
     /// Seed the profile's model name before loading persisted configuration.
     void setDefaultDeviceModel(const char* model) {
         std::snprintf(deviceModel_, sizeof(deviceModel_), "%s", model);
@@ -61,11 +63,7 @@ public:
     void setup() override {
         // Every network name derives from this, so it is valid before the network reads it.
         sanitizeHostname(deviceName_);
-        if (deviceName_[0] == 0) {
-            uint8_t mac[6];
-            platform::getMacAddress(mac);
-            defaultDeviceName(mac, deviceName_, sizeof(deviceName_));
-        }
+        nameUnnamed();
 
         // The static strings bind straight to the platform's own storage, with no copy here.
         if constexpr (platform::hasWifiCoprocessor) {
@@ -201,11 +199,7 @@ public:
     void tick1s() MM_NONBLOCKING override {
         // It runs before the network module reads the name, so a rename propagates in one tick.
         sanitizeHostname(deviceName_);
-        if (deviceName_[0] == 0) {        // cleared or all-invalid, so fall back to the MAC
-            uint8_t mac[6];
-            platform::getMacAddress(mac);
-            defaultDeviceName(mac, deviceName_, sizeof(deviceName_));
-        }
+        nameUnnamed();   // cleared or all-invalid, so fall back to the MAC
 
         // Update dynamic values
         uint32_t uptimeSec = scheduler_ ? scheduler_->elapsed() / 1000 : 0;
@@ -248,6 +242,15 @@ public:
     /// The physical-hardware identity (device-model catalog entry name), pushed by tooling.
     const char* deviceModel() const { return deviceModel_; }
 
+    /// Give an unnamed board its default name; MoonLight's own `MM-` default on a board whose product names its own counts as unnamed.
+    void nameUnnamed() MM_NONBLOCKING {
+        uint8_t mac[6];
+        platform::getMacAddress(mac);
+        char generic[sizeof(deviceName_)];
+        defaultDeviceName(mac, generic, sizeof(generic));
+        if (deviceName_[0] != 0 && (std::strcmp(namePrefix_, "MM") == 0 || std::strcmp(deviceName_, generic) != 0)) return;
+        defaultDeviceName(mac, deviceName_, sizeof(deviceName_), namePrefix_);
+    }
     /// Delete every setting and preset, so the next boot starts as freshly installed; scripts and other files stay.
     static bool factoryReset() { return FilesystemModule::removeTree(FilesystemModule::CONFIG_DIR); }
 
@@ -270,6 +273,7 @@ private:
     /// The name behind mDNS, the access point and DHCP.
     /// @guide Anything but letters, digits and hyphens is coerced to a valid hostname, and a rename reaches the network within a tick.
     char deviceName_[24] = {};
+    const char* namePrefix_ = "MM";   ///< the default name's brand, MoonLight's own unless a product names one
     /// How much of the UI is shown, cumulative.
     /// @guide User shows the essentials, expert adds the 🎚️ controls, developer the 🔧 ones. Only the UI reads it.
     uint8_t mode_ = 0;

@@ -9,6 +9,7 @@ void bleControlAbandon(BleControlHandle& handle) { handle.impl = nullptr; }
 size_t bleControlReceive(BleControlHandle&, char*, size_t, uint64_t&) MM_NONBLOCKING { return 0; }
 bool bleControlOwners(BleControlHandle&, uint64_t*, size_t, size_t&) MM_NONBLOCKING { return false; }
 bool bleControlPublishAdvertisement(BleControlHandle&, const std::array<uint8_t, 13>&) MM_NONBLOCKING { return false; }
+bool bleControlSetName(BleControlHandle&, const char*) MM_NONBLOCKING { return false; }
 bool bleControlConnected(const BleControlHandle&) MM_NONBLOCKING { return false; }
 bool bleControlPairingState(const BleControlHandle&, BlePairingState& state) MM_NONBLOCKING { state = {}; return false; }
 bool bleControlLinkState(const BleControlHandle&, BleLinkState& state) MM_NONBLOCKING { state = {}; return false; }

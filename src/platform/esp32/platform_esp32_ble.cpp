@@ -93,6 +93,8 @@ struct Peripheral {
     ble_npl_event changed;
     ble_npl_callout replyRetry;   // offers a reply again that the stack could not take
     ble_npl_event advertisementChanged;
+    char name[32] = {};            // the GAP device name a rename asks for, applied on the host task
+    ble_npl_event nameChanged;
     ble_npl_event secure;
     std::atomic<uint16_t> securing{BLE_HS_CONN_HANDLE_NONE};
     std::array<uint8_t, 13> advertisement{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255};
@@ -173,6 +175,19 @@ int updateAdvertisement(Peripheral& peripheral) {
         peripheral.advertisementSet = true;
     }
     return status;
+}
+
+/// Apply a rename on the host task: the GAP device name in full, and a running advertisement restarted to carry its start.
+void nameChanged(ble_npl_event* event) {
+    auto* peripheral = static_cast<Peripheral*>(ble_npl_event_get_arg(event));
+    char name[sizeof(peripheral->name)];
+    { std::lock_guard<std::mutex> lock(peripheral->mutex); std::memcpy(name, peripheral->name, sizeof(name)); }
+    const int status = ble_svc_gap_device_name_set(name);
+    if (status != 0) { ESP_LOGW(kBleTag, "device name: %d", status); return; }
+    if (peripheral != active || !ble_gap_adv_active()) return;   // the next advertisement reads the new name
+    const int stopped = ble_gap_adv_stop();
+    if (stopped != 0 && stopped != BLE_HS_EALREADY) { ESP_LOGW(kBleTag, "rename advertising stop: %d", stopped); return; }
+    advertise();
 }
 
 void advertisementChanged(ble_npl_event* event) {
@@ -616,6 +631,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_npl_event_init(&peripheral->changed, sendReplies, peripheral);
     ble_npl_callout_init(&peripheral->replyRetry, nimble_port_get_dflt_eventq(), sendReplies, peripheral);
     ble_npl_event_init(&peripheral->advertisementChanged, advertisementChanged, peripheral);
+    ble_npl_event_init(&peripheral->nameChanged, nameChanged, peripheral);
     ble_npl_event_init(&peripheral->secure, requestSecurity, peripheral);
     ble_npl_event_init(&peripheral->updateAcked, notifyUpdateAck, peripheral);
     handle.impl = peripheral;
@@ -788,6 +804,16 @@ BleLinkSecurity bleControlSecurity(BleControlHandle& handle, uint64_t generation
         ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->secure);
     }
     return reported;
+}
+
+bool bleControlSetName(BleControlHandle& handle, const char* name) MM_NONBLOCKING {
+    auto* peripheral = static_cast<Peripheral*>(handle.impl);
+    if (!peripheral || !name || std::strlen(name) >= sizeof(peripheral->name)) return false;
+    std::unique_lock<std::mutex> lock(peripheral->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    std::snprintf(peripheral->name, sizeof(peripheral->name), "%s", name);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->nameChanged);
+    return true;
 }
 
 bool bleControlPublishBattery(BleControlHandle& handle, const BleBatterySnapshot& batteries) MM_NONBLOCKING {
