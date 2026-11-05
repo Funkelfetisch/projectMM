@@ -6,19 +6,26 @@
 """Sign NEBULITE firmware releases for the update over BLE.
 
 `keygen` creates the publisher's P-256 key outside every repository and writes the
-public point into src/helio/FirmwarePublisherKey.h. `sign` produces the release
-authorization the device verifies before it opens its update slot: the 60-byte
-claims (HELIO-FW-AUTH-V1, big-endian target, size, security version, image SHA-256)
-and a 64-byte IEEE P1363 signature over their SHA-256.
+public point into src/helio/FirmwarePublisherKey.h. `sign` prints the release manifest
+the app bundles: what the image reports (version, build, builtAt, scene catalogue), each
+found in the image, and the authorization the device verifies before it opens its update
+slot: the 60-byte claims (HELIO-FW-AUTH-V1, big-endian target, size, security version,
+image SHA-256) and a 64-byte IEEE P1363 signature over their SHA-256. With `--out` it
+writes the image and its manifest there, the pair the app's bundler takes.
+
+Run it from the tree that built the image: the build id and the catalogue are this tree's.
 """
 import argparse
 import hashlib
 import json
 import os
+import re
+import shutil
 import struct
 import sys
 from pathlib import Path
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
@@ -26,6 +33,11 @@ ROOT = Path(__file__).resolve().parents[2]
 HEADER = ROOT / "src/helio/FirmwarePublisherKey.h"
 DEFAULT_KEY = Path.home() / ".local/state/nebulite-release-keys/firmware-p256.pem"
 DOMAIN = b"HELIO-FW-AUTH-V1"
+CATALOG = ROOT / "src/helio/BleSceneData.h"
+# build_info.cpp's kBuildDate, `__DATE__ " " __TIME__`, which the controller reports as builtAt.
+BUILT_AT = re.compile(rb"(?<=\0)[A-Z][a-z]{2} [ \d]\d \d{4} \d{2}:\d{2}:\d{2}(?=\0)")
+# esp_app_desc_t follows the 24-byte image header and the first 8-byte segment header; its version is PROJECT_VER.
+APP_DESC, APP_DESC_MAGIC = 0x20, 0xABCD5432
 
 
 def target_of(variant: str) -> int:
@@ -86,14 +98,74 @@ def keygen(args: argparse.Namespace) -> None:
     print(f"wrote {HEADER.relative_to(ROOT)}")
 
 
+def tree_build_id() -> str:
+    """The build id this tree stamps into an image, from its one home."""
+    sys.path.insert(0, str(ROOT / "moondeck/build"))
+    from generate_build_info import build_id
+    return build_id()
+
+
+def tree_catalog() -> str:
+    """The scene catalogue revision this tree compiles in."""
+    match = re.search(r'kRevision = "([0-9a-f]{12})"', CATALOG.read_text())
+    if not match:
+        raise ValueError(f"{CATALOG.relative_to(ROOT)} names no catalogue revision")
+    return match.group(1)
+
+
+def header_values() -> tuple[ec.EllipticCurvePublicKey, int]:
+    """The publisher key and the security version this tree compiles in."""
+    text = HEADER.read_text()
+    point = bytes(int(b, 16) for b in re.findall(r"0x([0-9a-f]{2})", text.split("kFirmwarePublisherKey", 1)[1].split("};", 1)[0]))
+    return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point), int(re.search(r"kFirmwareSecurityVersion = (\d+)", text).group(1))
+
+
+def release(image: bytes, variant: str, security_version: int, key: ec.EllipticCurvePrivateKey, build: str, catalog: str,
+            publisher: ec.EllipticCurvePublicKey) -> dict:
+    """The manifest of a signed release: each value the controller reports is checked in the image, as the app's bundler checks it.
+
+    Raises ValueError for an image that does not carry them, and InvalidSignature when `key` is not `publisher`.
+    """
+    if not re.fullmatch(r"[0-9a-f]{8}", build):
+        raise ValueError(f"a release is signed from a clean tree; this one stamps {build!r}")
+    if build.encode() + b"\0" not in image or build.encode() + b"+\0" in image:
+        raise ValueError(f"the image does not carry the clean build id {build}: it was not built from this tree")
+    built = BUILT_AT.findall(image)
+    if len(built) != 1:
+        raise ValueError(f"the image carries {len(built)} build dates, not one")
+    if image.count(b"\0" + catalog.encode() + b"\0") != 1:
+        raise ValueError(f"the image does not carry scene catalogue {catalog} exactly once")
+    if len(image) < APP_DESC + 48 or struct.unpack_from("<I", image, APP_DESC)[0] != APP_DESC_MAGIC:
+        raise ValueError("the image has no ESP-IDF app descriptor")
+    version = image[APP_DESC + 16:APP_DESC + 48].split(b"\0", 1)[0].decode()
+    digest = hashlib.sha256(image).digest()
+    claims = DOMAIN + struct.pack(">III", target_of(variant), len(image), security_version) + digest
+    signature = key.sign(claims, ec.ECDSA(hashes.SHA256()))
+    publisher.verify(signature, claims, ec.ECDSA(hashes.SHA256()))
+    r, s = utils.decode_dss_signature(signature)
+    return {"family": "moonlight", "variant": variant, "version": version, "size": len(image), "sha256": digest.hex(),
+            "build": build, "builtAt": built[0].decode(), "catalog": catalog, "securityVersion": security_version,
+            "claims": claims.hex(), "signature": (r.to_bytes(32, "big") + s.to_bytes(32, "big")).hex()}
+
+
 def sign(args: argparse.Namespace) -> None:
-    key = load_key(args.key)
-    image = args.image.read_bytes()
-    claims = DOMAIN + struct.pack(">III", target_of(args.variant), len(image), args.security_version) + hashlib.sha256(image).digest()
-    r, s = utils.decode_dss_signature(key.sign(claims, ec.ECDSA(hashes.SHA256())))
-    print(json.dumps({"variant": args.variant, "target": target_of(args.variant), "size": len(image),
-                      "sha256": hashlib.sha256(image).hexdigest(), "securityVersion": args.security_version,
-                      "claims": claims.hex(), "signature": (r.to_bytes(32, "big") + s.to_bytes(32, "big")).hex()}, indent=2))
+    if args.out and not args.source:
+        sys.exit("--out needs --source: where the image comes from, which the manifest records")
+    publisher, compiled_security = header_values()
+    try:
+        manifest = release(args.image.read_bytes(), args.variant, args.security_version or compiled_security,
+                           load_key(args.key), tree_build_id(), tree_catalog(), publisher)
+    except InvalidSignature:
+        sys.exit(f"{args.key} is not the publisher key in {HEADER.relative_to(ROOT)}")
+    except ValueError as failure:
+        sys.exit(f"{args.image}: {failure}")
+    if args.out:
+        name = f"moonlight-{args.variant}-{manifest['version']}-{manifest['build']}"
+        manifest = {**manifest, "file": f"{name}.bin", "source": args.source}
+        args.out.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(args.image, args.out / manifest["file"])
+        (args.out / f"{name}.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(json.dumps(manifest, indent=2))
 
 
 def main() -> None:
@@ -103,11 +175,13 @@ def main() -> None:
     k.add_argument("--key", type=Path, default=DEFAULT_KEY)
     k.add_argument("--security-version", type=int, default=1)
     k.set_defaults(run=keygen)
-    s = sub.add_parser("sign", help="print the release authorization for an app image as JSON")
+    s = sub.add_parser("sign", help="print the signed release manifest of an app image as JSON")
     s.add_argument("image", type=Path)
     s.add_argument("--variant", required=True)
-    s.add_argument("--security-version", type=int, default=1)
+    s.add_argument("--security-version", type=int, help="defaults to the one FirmwarePublisherKey.h compiles in")
     s.add_argument("--key", type=Path, default=DEFAULT_KEY)
+    s.add_argument("--out", type=Path, help="write the image and its manifest into this folder")
+    s.add_argument("--source", help="with --out: where the image comes from, recorded in the manifest")
     s.set_defaults(run=sign)
     args = p.parse_args()
     args.run(args)

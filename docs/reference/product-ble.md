@@ -296,7 +296,7 @@ A garment that runs on BLE alone takes its next firmware from the phone. The upd
 Open lighting access never authorizes an update. Every transfer starts with the release's signed claims, which the device verifies before the slot opens:
 
 - The claims are 60 bytes: the tag `HELIO-FW-AUTH-V1`, then the big-endian target, image size and security version, then the SHA-256 of the image.
-- The signature is 64 bytes, IEEE P1363 `r || s`, over the SHA-256 of the claims. The publisher's P-256 public key is compiled into product firmware; the private key stays outside every repository, and `moondeck/helio/firmware_signing.py` creates it and signs images.
+- The signature is 64 bytes, IEEE P1363 `r || s`, over the SHA-256 of the claims. The publisher's P-256 public key is compiled into product firmware; the private key stays outside every repository, and `moondeck/helio/firmware_signing.py` creates it and signs images. Its `sign` prints the release manifest the app bundles, each reported value (version, build, builtAt, scene catalogue) checked in the image, and `--out` writes the image beside it.
 - The target is the FNV-1a 32-bit hash of the firmware variant name, so `nebulite-esp32` is `0x2aa0a5f1`. The device compares it with its own, which `info` reports as `otaTarget`.
 - The minimum security version is the running firmware's own, reported as `securityVersion`. This refuses a release below the running one; it is not persistent anti-rollback.
 - The claims carry the image's SHA-256, which the device checks over the bytes it received before it commits. ESP-IDF's image validation and the first 4 KB flush, which checks chip, project and variant, follow.
