@@ -32,6 +32,12 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ## v7.0.0
 
+### A NEBULITE Croptop S3 drives every LED pad, and earlier boards get the NEBULITE looks
+
+**Action: *re-run product setup* on a Croptop S3.** The profile now repeats the strip on GPIO36, 35, 48 and 34; a board set up before keeps its one output until setup runs again, which offers the 2D layout first.
+
+A board seeded before the catalog held the NEBULITE scenes gets Rainbow, Blink, Solid, Washing and the others as looks on its next boot. A look its owner deleted earlier may come back once, since the earlier marker recorded the catalog revision rather than the scenes it offered.
+
 ### NEBULITE and HELIO firmware leave out MoonCloud, Devices, Hue, the SD card and the parallel outputs
 
 **Action: *nothing*.** A saved configuration that names one of these loads without it.

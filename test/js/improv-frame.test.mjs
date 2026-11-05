@@ -121,6 +121,23 @@ test("an empty or malformed entry sends no documents", () => {
     }
 });
 
+test("a container over 512 bytes goes as a replacing document and merging ones that rebuild the same children", () => {
+    const strip = pins => ({ type: "RmtLedDriver", pins, fixture: "RGB", start: 0, curve: "linear", whiteMode: "None", ledsPerPin: "8" });
+    const drivers = { $patch: "replace", RGB1: strip("36"), RGB2: strip("35"), RGB3: strip("48"), RGB4: strip("34"),
+        Accent: { type: "PwmLightDriver", pins: "46", fixture: "White", start: 8, count: 1, curve: "linear", whiteMode: "None", bits: 12 } };
+    const docs = stateFrames({ state: { System: { deviceModel: "x" }, Drivers: drivers } });
+    assert.equal(docs[0], JSON.stringify({ System: { deviceModel: "x" } }));
+    const parts = docs.slice(1).map(doc => JSON.parse(doc).Drivers);
+    assert.ok(parts.length > 1);
+    for (const doc of docs) assert.ok(new TextEncoder().encode(doc).length <= 512);
+    // Only the first replaces; together they carry every child once, in order.
+    assert.equal(parts[0].$patch, "replace");
+    assert.ok(parts.slice(1).every(part => !("$patch" in part)));
+    const rebuilt = Object.assign({}, ...parts);
+    assert.deepEqual(Object.keys(rebuilt), Object.keys(drivers));
+    assert.deepEqual(rebuilt, drivers);
+});
+
 test("no catalog entry has a container document the device cannot reassemble (512 bytes)", async () => {
     const { readFileSync } = await import("node:fs");
     const catalog = JSON.parse(readFileSync(new URL("../../mooninstaller/deviceModels.json", import.meta.url), "utf8"));

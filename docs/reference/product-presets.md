@@ -42,7 +42,7 @@ Reset fetches a factory template and saves it with the preset's current file rev
 
 ## Initial presets and startup
 
-Factory initialization creates missing files once and records `/.config/presets/.product-v1`. Deliberately deleting every card preserves that marker, so reboot does not recreate the collection. Existing files are never overwritten. Incomplete initialization leaves the marker absent and reports the failure.
+Factory initialization offers each factory scene once: it creates the missing files and lists the offered scene ids in `/.config/presets/.product-v1`. A deleted card stays deleted, and a scene the catalog gains later is offered on the next boot. A marker from an earlier build, which held a catalog revision, offers every missing look once. Existing files are never overwritten. Incomplete initialization leaves the marker unwritten and reports the failure.
 
 An updated firmware may add animation templates without recreating deleted or customized cards. Use **Add animation** to create a preset from any current template. Musical-note labels stay visible in the template list; their suggested stored names use `Music -` because preset filenames currently accept printable ASCII only.
 

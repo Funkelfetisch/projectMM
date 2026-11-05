@@ -3,12 +3,14 @@
 #include "core/util/PresetStore.h"
 #include "helio/BleSceneCatalog.h"
 
+#include <string>
+
 namespace mm {
 
 /// Factory looks use the scene engine's native documents and the shared conditional preset store.
 class ProductPresets {
 public:
-    /// The file whose presence records that the factory looks were seeded.
+    /// The factory scenes already offered as looks, one id per line.
     static constexpr const char* kMarker = "/.config/presets/.product-v1";
 
     /// Product templates exist independently of the user's saved, renamed or deleted preset files.
@@ -41,9 +43,12 @@ public:
         return length > 0 && static_cast<size_t>(length) < sizeof(name) && PresetStore::validName(name);
     }
 
-    /// Seed missing factory looks once; the marker survives deliberate deletion of every preset.
+    /// Offer each factory scene once as a look: a deleted look stays deleted, and a scene the catalog gains later is offered on the next boot.
     static const char* initialize(Scheduler& scheduler) {
-        if (platform::fsExists(kMarker)) return nullptr;
+        const std::string offered = offeredScenes();
+        bool due = false;
+        for (const auto& entry : product_scenes::kEntries) due = due || !wasOffered(offered, entry.id);
+        if (!due) return nullptr;
         // Validate the entire set before creating anything, so two different factory scenes never alias to the same stored preset name.
         for (size_t i = 0; i < BleSceneCatalog::count(); ++i) {
             char name[PresetStore::kMaxNameLen];
@@ -55,7 +60,10 @@ public:
             }
         }
         if (!platform::fsMkdir(PresetStore::kDirectory)) return "could not create preset directory";
+        std::string marker;
         for (const auto& entry : product_scenes::kEntries) {
+            marker.append(entry.id).append("\n");
+            if (wasOffered(offered, entry.id)) continue;
             char name[PresetStore::kMaxNameLen];
             if (!fileName(entry.name, name)) return "invalid factory preset name";
             char path[80]; PresetStore::pathFor(name, path, sizeof(path));
@@ -68,8 +76,19 @@ public:
             if (!stored) return stored.error;
             PresetStore::notifyChanged(scheduler, name);
         }
-        const char* revision = BleSceneCatalog::revision();
-        return platform::fsWriteAtomic(kMarker, revision, std::strlen(revision)) ? nullptr : "could not mark product presets initialized";
+        return platform::fsWriteAtomic(kMarker, marker.data(), marker.size()) ? nullptr : "could not mark product presets initialized";
+    }
+
+private:
+    /// The marker's scene ids framed by newlines, so a lookup matches whole ids; an older marker held a catalog revision, which matches none, so every missing look is seeded once.
+    static std::string offeredScenes() {
+        std::string text(2048, '\0');
+        const int n = platform::fsExists(kMarker) ? platform::fsRead(kMarker, text.data(), text.size()) : 0;
+        text.resize(n > 0 ? static_cast<size_t>(n) : 0);
+        return "\n" + text + "\n";
+    }
+    static bool wasOffered(const std::string& offered, const char* id) {
+        return offered.find("\n" + std::string(id) + "\n") != std::string::npos;
     }
 };
 

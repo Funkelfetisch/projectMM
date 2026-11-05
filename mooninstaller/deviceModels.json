@@ -2210,7 +2210,7 @@
     "firmwares": [
       "nebulite-s3"
     ],
-    "description": "Source-derived bench profile; battery protection, buttons, output and update recovery require physical qualification.",
+    "description": "Source-derived bench profile: the strip's eight pixels are mirrored on GPIO36, 35, 48 and 34, every LED pad of the controller, so it lights on whichever one it is wired to. Battery protection, buttons, output and update recovery require physical qualification.",
     "supported": [
       "LEDs",
       "WiFi",
@@ -2229,6 +2229,33 @@
         "RGB1": {
           "type": "RmtLedDriver",
           "pins": "36",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "8"
+        },
+        "RGB2": {
+          "type": "RmtLedDriver",
+          "pins": "35",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "8"
+        },
+        "RGB3": {
+          "type": "RmtLedDriver",
+          "pins": "48",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "8"
+        },
+        "RGB4": {
+          "type": "RmtLedDriver",
+          "pins": "34",
           "fixture": "RGB",
           "start": 0,
           "curve": "linear",

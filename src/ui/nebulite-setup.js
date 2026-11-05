@@ -117,6 +117,8 @@ function productProfileMatchesExact(profile, modules, customPoints = false, geom
             if (!child || child.enabled === false || child.type !== settings.type) return false;
             for (const [key, expected] of Object.entries(settings)) {
                 if (key === "$patch" || key === "type") continue;
+                // A pin is the product's default output, which the user may move: it never decides which product a board is.
+                if (group === 'Drivers' && key === 'pins') continue;
                 // Preview frames are pre-driver RGB. These settings change the
                 // physical response, not output order or the garment geometry.
                 if (geometryOnly && group === 'Drivers' && ['curve', 'whiteMode', 'bits'].includes(key)) continue;
@@ -137,6 +139,18 @@ export function productProfileMatches(profile, modules) {
     if (productProfileMatchesExact(profile, modules, false, true)) return true;
     try { return productProfileMatchesExact(productProjectionProfile(profile, "virtual2d"), modules, true, true); }
     catch { return false; }
+}
+
+/// The profile a setup applies: the chosen layout, or the 1D strip for a product without a 2D layout.
+function setupProfile(profile, projection) {
+    try { return productProjectionProfile(profile, projection); }
+    catch { return productProjectionProfile(profile, "strip"); }
+}
+
+/// The layout a setup offers: the board's own when it is set up, otherwise the 2D layout, which a product without one applies as its strip.
+function setupProjection(current, modules) {
+    if (current) return productProjection(current, modules) || "strip";
+    return "virtual2d";
 }
 
 export function productProjection(profile, modules) {
@@ -186,11 +200,11 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
     const attempt = session.attempt ||= {
         profileName: current?.name || "", busy: false, written: false,
         confirmed: false, message: "", phase: "", touched: false,
-        projection: productProjection(current, modules) || "strip",
+        projection: setupProjection(current, modules),
     };
-    attempt.projection ||= productProjection(current, modules) || "strip";
+    attempt.projection ||= setupProjection(current, modules);
     if (metadataReady && attempt.confirmed && (current?.name !== attempt.profileName ||
-        productProjection(current, modules) !== attempt.projection)) {
+        setupProjection(current, modules) !== attempt.projection)) {
         attempt.confirmed = false;
         attempt.message = "The controller setup has changed. Check its current setup.";
     }
@@ -236,7 +250,7 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
         current = choices.find(profile => productProfileMatches(profile, latestModules));
         if (metadataReady && !metadataFailed && !attempt.touched && !attempt.busy && !attempt.written && !attempt.confirmed && current) {
             attempt.profileName = current.name;
-            attempt.projection = productProjection(current, latestModules) || "strip";
+            attempt.projection = setupProjection(current, latestModules);
         }
         selected.textContent = metadataFailed ? "Setup unknown" : !metadataReady ? "Checking setup…" :
             current ? displayName(current) : (hasPhysicalOutput(latestModules) ? "Custom setup" : "Choose your NEBULITE");
@@ -244,7 +258,7 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
         note.textContent = attempt.profileName === "NEBULITE Croptop ESP32"
             ? "Experimental archived configuration: verify GPIO26, LED wiring, power and recovery on this controller. Battery and charging wiring are not configured. The 2D layout is approximate."
             : attempt.profileName === "NEBULITE Croptop S3"
-            ? "Experimental configuration: verify GPIO36 and GPIO46, LED wiring, power and recovery on this controller. Matching the chip does not verify the board wiring. Battery settings are separate; the 2D layout is approximate."
+            ? "Experimental configuration: the strip is mirrored on GPIO36, 35, 48 and 34, so it lights on whichever pad it is wired to; verify GPIO46, LED wiring, power and recovery on this controller. Matching the chip does not verify the board wiring. Battery settings are separate; the 2D layout is approximate."
             : attempt.profileName === "NEBULITE Jacket S3"
             ? "Experimental configuration: verify the GPIOs, LED wiring, power and recovery on this controller. Matching the chip does not verify the board wiring. The approximate 30-LED 2D layout uses the first RGB output; check for parallel branches. Battery settings are separate."
             : choices.length ? "Product configurations are experimental; verify the wiring on the controller. Battery settings are separate; the 2D layout is approximate."
@@ -284,7 +298,7 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
     });
     action.addEventListener("click", async () => {
         const base = choices.find(candidate => candidate.name === attempt.profileName);
-        const profile = base ? productProjectionProfile(base, attempt.projection) : null;
+        const profile = base ? setupProfile(base, attempt.projection) : null;
         if (attempt.busy || !profile || attempt.confirmed) return;
         attempt.busy = true;
         try {
@@ -327,7 +341,7 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
             metadataFailed = false;
             if (ready && !attempt.busy && attempt.confirmed &&
                 !choices.some(profile => profile.name === attempt.profileName &&
-                    productProfileMatches(productProjectionProfile(profile, attempt.projection), getModules()))) {
+                    productProfileMatches(setupProfile(profile, attempt.projection), getModules()))) {
                 attempt.confirmed = false;
                 attempt.message = "The controller setup has changed. Check its current setup.";
             }

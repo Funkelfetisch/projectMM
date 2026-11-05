@@ -191,6 +191,49 @@ TEST_CASE("Product preset seeding preserves existing customer content and the ma
         CHECK(file.path().extension() != ".json");
 }
 
+TEST_CASE("A factory scene the catalog gains later is offered once, and a deleted look stays deleted") {
+    ProductTree tree;
+    REQUIRE(mm::ProductPresets::initialize(tree.scheduler) == nullptr);
+    char first[mm::PresetStore::kMaxNameLen], last[mm::PresetStore::kMaxNameLen];
+    REQUIRE(mm::ProductPresets::fileName(mm::product_scenes::kEntries[0].name, first));
+    const auto& newest = mm::product_scenes::kEntries[std::size(mm::product_scenes::kEntries) - 1];
+    REQUIRE(mm::ProductPresets::fileName(newest.name, last));
+    // The board was seeded before the catalog had its newest scene, and its owner deleted the first look since.
+    std::string earlier;
+    for (const auto& entry : mm::product_scenes::kEntries)
+        if (&entry != &newest) earlier.append(entry.id).append("\n");
+    REQUIRE(mm::platform::fsWriteAtomic(mm::ProductPresets::kMarker, earlier.data(), earlier.size()));
+    REQUIRE(mm::PresetStore::erase(first, nullptr, false));
+    REQUIRE(mm::PresetStore::erase(last, nullptr, false));
+    REQUIRE(mm::ProductPresets::initialize(tree.scheduler) == nullptr);
+    mm::PresetStore::File file;
+    CHECK(mm::PresetStore::read(last, file));
+    CHECK_FALSE(mm::PresetStore::read(first, file));
+    // Offered once: deleting the new look too keeps it deleted.
+    REQUIRE(mm::PresetStore::erase(last, nullptr, false));
+    REQUIRE(mm::ProductPresets::initialize(tree.scheduler) == nullptr);
+    CHECK_FALSE(mm::PresetStore::read(last, file));
+}
+
+TEST_CASE("A board marked by an earlier build gets the factory looks it lacks, and keeps the ones it has") {
+    ProductTree tree;
+    const char* custom = R"({"Effects":{"enabled":false},"$owner":"customer"})";
+    char kept[mm::PresetStore::kMaxNameLen];
+    REQUIRE(mm::ProductPresets::fileName(mm::product_scenes::kEntries[0].name, kept));
+    REQUIRE(mm::PresetStore::put(kept, custom, mm::PresetStore::Mode::Create));
+    // The earlier marker held the catalog revision it seeded, not the scenes.
+    REQUIRE(mm::platform::fsWriteAtomic(mm::ProductPresets::kMarker, "0123456789ab", 12));
+    REQUIRE(mm::ProductPresets::initialize(tree.scheduler) == nullptr);
+    mm::PresetStore::File file;
+    REQUIRE(mm::PresetStore::read(kept, file));
+    CHECK(std::strcmp(file.text, custom) == 0);
+    for (const auto& entry : mm::product_scenes::kEntries) {
+        char name[mm::PresetStore::kMaxNameLen];
+        REQUIRE(mm::ProductPresets::fileName(entry.name, name));
+        CHECK(mm::PresetStore::read(name, file));
+    }
+}
+
 TEST_CASE("Product preset seeding leaves no completion marker after a partial failure and retries only missing files") {
     ProductTree tree;
     const char* custom = R"({"Effects":{"enabled":false}})";

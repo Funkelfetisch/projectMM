@@ -280,6 +280,43 @@ test('a truncated HTTP 200 index is rejected without discarding mounted preset r
     assert.equal(fixture.requests.length, 2);
 });
 
+test('a remount shows the cards it knows at once and keeps them until the fresh listing replaces them', async () => {
+    const first = { items: [{ name: 'A', kind: 'look', etag: 'e1' }, { name: 'B', kind: 'look', etag: 'e2' }], active: { effects: null }, limit: 64 };
+    let release;
+    const refreshed = new Promise(resolve => { release = resolve; });
+    let lists = 0;
+    const client = { async list() {
+        if (++lists === 1) return first;
+        await refreshed;
+        return { ...first, items: [first.items[1], { name: 'C', kind: 'look', etag: 'e3' }] };
+    } };
+    const element = () => ({ isConnected: true, children: [],
+        setAttribute() {}, append(...children) { this.children.push(...children); },
+        appendChild(child) { this.children.push(child); },
+        replaceChildren(...children) { this.children = children; } });
+    const cardsSource = readFileSync(new URL('../../src/ui/helio-preset-cards.js', import.meta.url), 'utf8')
+        .replace(/^import[^\n]+\n/gm, '')
+        .replace('export class HelioPresetCards', 'class HelioPresetCards');
+    const Cards = vm.runInNewContext(cardsSource + '\nHelioPresetCards;', { document: { createElement: element }, PresetEditor });
+    let previews = 0;
+    const cards = new Cards({ client, onPreview() { previews++; } });
+    cards.addForm = element;
+    cards.card = record => ({ name: record.name });
+    await cards.mount(element());
+    assert.deepEqual(cards.grid.children.map(card => card.name), ['A', 'B']);
+
+    // A scene change rebuilds the page: the section must not empty while the listing refreshes.
+    const remount = cards.mount(element());
+    assert.deepEqual(cards.grid.children.map(card => card.name), ['A', 'B']);
+    assert.notEqual(cards.status.textContent, 'Loading presets…');
+    assert.equal(previews, 2);
+
+    release();
+    await remount;
+    assert.deepEqual(cards.grid.children.map(card => card.name), ['B', 'C']);
+    assert.equal(cards.records.has('A'), false);
+});
+
 test('the controller ASCII-name validation failure remains HTTP 400 in the client', async () => {
     const fixture = adapter([response({ error: 'invalid preset name' }, { status: 400 })]);
     await assert.rejects(fixture.client.read('Warm weiß'), error =>

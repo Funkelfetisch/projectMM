@@ -53,8 +53,11 @@ export function buildImprovFrame(type, payload) {
     return frame;
 }
 
+// The device's reassembly buffer for one state document, in bytes.
+export const STATE_DOCUMENT_MAX = 512;
+
 // The documents a catalog entry sends: one {"<Root>": <its object>} per top-level container
-// of the entry's `state`, as JSON strings in the entry's key order. Each fits the device's
+// of the entry's `state`, as JSON strings in the entry's key order, so each fits the device's
 // 512-byte reassembly buffer where the whole state would not.
 export function stateFrames(entry) {
     const state = entry && entry.state;
@@ -62,7 +65,27 @@ export function stateFrames(entry) {
     // Drivers goes last: starting an output prints on UART0, which a classic board shares with Improv, and LED pins 1 or 3 end serial reception.
     return Object.entries(state)
         .sort(([a], [b]) => (a === "Drivers") - (b === "Drivers"))
-        .map(([root, body]) => JSON.stringify({ [root]: body }));
+        .flatMap(([root, body]) => containerDocuments(root, body));
+}
+
+// A container too large for one document goes as several that rebuild the same state: the first carries its
+// own settings, `$patch` included, and the children that fit; each later one merges the next children, which
+// the device creates because they name their `type` (docs/reference/integrating.md).
+function containerDocuments(root, body) {
+    const size = doc => new TextEncoder().encode(JSON.stringify({ [root]: doc })).length;
+    if (!body || typeof body !== "object" || Array.isArray(body) || size(body) <= STATE_DOCUMENT_MAX) return [JSON.stringify({ [root]: body })];
+    const isChild = value => value && typeof value === "object" && !Array.isArray(value);
+    const documents = [];
+    let current = Object.fromEntries(Object.entries(body).filter(([, value]) => !isChild(value)));
+    for (const [name, child] of Object.entries(body).filter(([, value]) => isChild(value))) {
+        const grown = { ...current, [name]: child };
+        if (size(grown) > STATE_DOCUMENT_MAX && Object.values(current).some(isChild)) {
+            documents.push(current);
+            current = { [name]: child };
+        } else current = grown;
+    }
+    documents.push(current);
+    return documents.map(doc => JSON.stringify({ [root]: doc }));
 }
 
 // Encode ONE state document (an object, or its JSON string) into the APPLY_OP frame(s) it

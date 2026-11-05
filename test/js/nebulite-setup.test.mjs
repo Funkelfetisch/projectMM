@@ -7,6 +7,10 @@ const { NEBULITE_SETUP_PROFILES: profiles } = await load('../../src/ui/nebulite-
 const identity = { firmware: 'nebulite-s3', chip: 'ESP32-S3 (rev 0.2)' };
 const profile = profiles.find(item => item.name === 'NEBULITE Croptop S3');
 const clone = value => JSON.parse(JSON.stringify(value));
+// What setup applies when the owner picks no layout: the 2D one where the product has it, its strip otherwise.
+const defaultSetup = p => { try { return productProjectionProfile(p, 'virtual2d'); } catch { return productProjectionProfile(p, 'strip'); } };
+// A wiring change that still counts, now that a moved pin stays the product: a different light count.
+const changeWiring = modules => { modules[1].children[0].controls.find(control => control.name === 'ledsPerPin').value = '9'; return modules; };
 function modulesFor(p = profile) {
     return [
         { name: 'System', controls: [{ name: 'deviceModel', value: p.name }] },
@@ -91,7 +95,7 @@ test('edited point maps remain recognized but never satisfy exact setup verifica
     pointControl.value += ';0,0'; assert.equal(productProjection(base,modules),null);
     pointControl.value = original.replace('5,14;', '99,14;'); assert.equal(productProjection(base,modules),null);
 });
-test('preview geometry survives output correction changes without weakening setup verification', () => {
+test('preview geometry survives output corrections and a moved pin without weakening setup verification', () => {
     for (const name of ['NEBULITE Croptop S3', 'NEBULITE Jacket S3']) {
         const base = profiles.find(p => p.name === name);
         const candidate = productProjectionProfile(base, 'virtual2d');
@@ -101,9 +105,10 @@ test('preview geometry survives output correction changes without weakening setu
         assert.equal(productProjection(base, modules), 'virtual2d');
         assert.equal(productProfileMatches(base, modules), true);
         assert.equal(productProfileMatches(candidate, modules), false);
-        rgb.controls.find(control => control.name === 'pins').value = '99';
-        assert.equal(productProjection(base, modules), null);
-        assert.equal(productProfileMatches(base, modules), false);
+        // The profile's pin is a default the owner may move, as to a bench string on another pad.
+        rgb.controls.find(control => control.name === 'pins').value = '34';
+        assert.equal(productProjection(base, modules), 'virtual2d');
+        assert.equal(productProfileMatches(base, modules), true);
     }
 });
 test('disabled output, layout or owning group is never reported as a working product setup', () => {
@@ -114,12 +119,12 @@ test('disabled output, layout or owning group is never reported as a working pro
         assert.equal(productProfileMatches(profile, modules), false, path.join('.'));
     }
 });
-test('a product name alone cannot confirm wiring and extra outputs are custom setup', () => {
+test('a product name alone cannot confirm wiring, a moved pin stays the product, and extra outputs are custom setup', () => {
     const modules = modulesFor();
     assert.equal(productProfileMatches(profile, [modules[0]]), false);
     assert.equal(productProfileMatches(profile, modules), true);
     const pins = modules[1].children[0].controls.find(control => control.name === 'pins');
-    pins.value = '99'; assert.equal(productProfileMatches(profile, modules), false);
+    pins.value = '99'; assert.equal(productProfileMatches(profile, modules), true);
     pins.value = profile.state.Drivers[modules[1].children[0].name].pins;
     modules[1].children.push({ name: 'Extra', type: 'RmtLedDriver', role: 'driver', controls: [] });
     assert.equal(productProfileMatches(profile, modules), false);
@@ -201,9 +206,27 @@ test('S3 setup warns that a matching chip does not establish board wiring', asyn
     const view = mount();
     const [product] = elements(view, 'select');
     product.value = 'NEBULITE Croptop S3'; await product.fire('change');
-    assert(elements(view, 'p').some(node => /verify GPIO36 and GPIO46.*Matching the chip does not verify the board wiring/.test(node.textContent)));
+    assert(elements(view, 'p').some(node => /mirrored on GPIO36, 35, 48 and 34.*verify GPIO46.*Matching the chip does not verify the board wiring/.test(node.textContent)));
     product.value = 'NEBULITE Jacket S3'; await product.fire('change');
     assert(elements(view, 'p').some(node => /verify the GPIOs.*Matching the chip does not verify the board wiring.*parallel branches/.test(node.textContent)));
+});
+test('setup offers the 2D layout first, mirrors the Croptop S3 strip on every LED pad, and gives a product without 2D its strip', async () => {
+    let written;
+    const view = mount({ apply: async patch => { written = patch; } });
+    const [product, projection] = elements(view, 'select');
+    product.value = 'NEBULITE Croptop S3'; await product.fire('change');
+    assert.equal(projection.value, 'virtual2d');
+    await elements(view, 'button')[0].fire('click');
+    assert.equal(written.Layouts.ProductStrip.type, 'PixelMapLayout');
+    const strips = ['RGB1', 'RGB2', 'RGB3', 'RGB4'];
+    assert.deepEqual(strips.map(name => written.Drivers[name].pins), ['36', '35', '48', '34']);
+    assert(strips.every(name => written.Drivers[name].start === 0 && written.Drivers[name].ledsPerPin === '8'));
+    const classicIdentity = { firmware: 'nebulite-esp32', chip: 'ESP32 (rev 3)' };
+    const classic = mount({ identity: classicIdentity, apply: async patch => { written = patch; } });
+    const [fanny] = elements(classic, 'select');
+    fanny.value = 'NEBULITE Fanny pack ESP32'; await fanny.fire('change');
+    await elements(classic, 'button')[0].fire('click');
+    assert.equal(written.Layouts.ProductStrip.type, 'GridLayout');
 });
 test('setup applies and verifies the selected virtual 2D profile once', async () => {
     let written, checked;
@@ -275,8 +298,7 @@ test('late metadata identifies an existing custom output from the latest state',
     let current = []; const pending = deferred();
     const view = mount({ modules: current, getModules: () => current, loadMetadata: () => pending.promise });
     assert.equal(elements(view, 'summary')[0].children[1].textContent, 'Checking setup…');
-    current = modulesFor();
-    current[1].children[0].controls.find(control => control.name === 'pins').value = '99';
+    current = changeWiring(modulesFor());
     pending.resolve(true);
     await until(() => elements(view, 'summary')[0].children[1].textContent === 'Custom setup');
     assert.equal(elements(view, 'select')[0].value, '');
@@ -292,8 +314,7 @@ test('controllers without compatible profiles do not wait for unused metadata', 
 });
 
 test('a previously confirmed setup is invalidated if late metadata shows changed wiring', async () => {
-    const full = modulesFor(), changed = clone(full);
-    changed[1].children[0].controls.find(control => control.name === 'pins').value = '99';
+    const full = modulesFor(), changed = changeWiring(clone(full));
     const session = { attempt: { profileName: profile.name, busy: false, written: true,
         confirmed: true, message: 'Product setup saved.', phase: '', touched: true } };
     let current = full; const pending = deferred();
@@ -369,7 +390,7 @@ test('existing wiring keeps setup collapsed and unsupported controllers cannot a
 test('setup sends one write and confirms readback before reporting saved', async () => {
     let writes = 0, checks = 0, release;
     const ready = new Promise(resolve => { release = resolve; });
-    const view = mount({ apply: async patch => { writes++; assert.deepEqual(patch, productProfilePatch(profile, identity)); await ready; },
+    const view = mount({ apply: async patch => { writes++; assert.deepEqual(patch, productProfilePatch(defaultSetup(profile), identity)); await ready; },
         verify: async selected => { checks++; assert.equal(selected.name, profile.name); return true; } });
     const [select] = elements(view, 'select'), [button] = elements(view, 'button');
     select.value = profile.name; await select.fire('change');
@@ -428,7 +449,7 @@ test('remounts share a busy apply and verification and its completion updates th
     const applied = deferred(), verified = deferred();
     let writes = 0, checks = 0;
     const options = { session,
-        apply: async patch => { writes++; assert.deepEqual(patch, productProfilePatch(profile, identity)); await applied.promise; },
+        apply: async patch => { writes++; assert.deepEqual(patch, productProfilePatch(defaultSetup(profile), identity)); await applied.promise; },
         verify: async selected => { checks++; assert.equal(selected.name, profile.name); return verified.promise; } };
     const first = mount(options);
     await choose(first, profile.name);
@@ -506,10 +527,10 @@ test('an explicit different choice after a settled uncertain attempt allows one 
     assert.equal(controls(second).button.disabled, false);
     await controls(second).button.fire('click');
     assert.equal(writes.length, 2);
-    assert.deepEqual(writes[0], productProfilePatch(profile, identity));
-    assert.deepEqual(writes[1], productProfilePatch(other, identity));
+    assert.deepEqual(writes[0], productProfilePatch(defaultSetup(profile), identity));
+    assert.deepEqual(writes[1], productProfilePatch(defaultSetup(other), identity));
     assert.deepEqual(checks, [other.name]);
-    const current = controls(mount({ ...options, modules: modulesFor(other) }));
+    const current = controls(mount({ ...options, modules: modulesFor(defaultSetup(other)) }));
     assert.equal(current.select.value, other.name);
     assert.equal(current.button.textContent, 'Setup saved');
 });
@@ -522,9 +543,8 @@ test('fresh externally changed wiring invalidates a confirmed setup instead of k
     await choose(first, profile.name);
     await controls(first).button.fire('click');
     assert.equal(controls(first).button.textContent, 'Setup saved');
-    assert.equal(controls(mount({ ...options, modules: modulesFor() })).button.textContent, 'Setup saved');
-    const changed = modulesFor();
-    changed[1].children[0].controls.find(control => control.name === 'pins').value = '99';
+    assert.equal(controls(mount({ ...options, modules: modulesFor(defaultSetup(profile)) })).button.textContent, 'Setup saved');
+    const changed = changeWiring(modulesFor(defaultSetup(profile)));
     const current = controls(mount({ ...options, modules: changed,
         verify: async () => { checks++; return false; } }));
     assert.equal(current.select.value, profile.name);

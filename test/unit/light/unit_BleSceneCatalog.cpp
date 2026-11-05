@@ -95,6 +95,25 @@ void envelope(mm::JsonSink& sink) {
 }
 }
 
+static bool anyDirty(mm::MoonModule* m) {
+    if (m->dirty()) return true;
+    for (uint8_t i = 0; i < m->childCount(); ++i) if (anyDirty(m->child(i))) return true;
+    return false;
+}
+
+TEST_CASE("A scene picked to keep is saved and one played live is not") {
+    SceneTree tree;
+    static int saves = 0;
+    saves = 0;
+    tree.scheduler.setNoteDirtyHook([] { ++saves; });
+    REQUIRE(mm::BleSceneCatalog::apply(tree.scheduler, "nebulite-rainbow", mm::BleSceneCatalog::revision(), "{}", true).ok);
+    CHECK(saves == 0);
+    CHECK_FALSE(anyDirty(tree.effects));
+    REQUIRE(mm::BleSceneCatalog::apply(tree.scheduler, "nebulite-blink", mm::BleSceneCatalog::revision(), "{}", false).ok);
+    CHECK(saves > 0);
+    CHECK(anyDirty(tree.effects));
+}
+
 TEST_CASE("BLE scenes: the shared catalog has stable IDs and bounded real control metadata") {
     SceneTree tree;
     CHECK(mm::BleSceneCatalog::count() == 35);

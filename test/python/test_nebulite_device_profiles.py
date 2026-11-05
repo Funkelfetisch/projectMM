@@ -28,9 +28,15 @@ def test_nebulite_profile_preserves_historical_gpio_counts_and_manual_white(hist
     assert profile['firmwares'] == ['nebulite-s3']
     assert source['ledCount'] == count
     assert [(item['start'], item['len'], item['pin'][0]) for item in source['outputs']] == mapping
-    drivers = [item for item in profile['state']['Drivers'].values() if isinstance(item, dict)]
-    actual = sorted((item['start'], int(item.get('ledsPerPin', item.get('count', 0))), int(item['pins'])) for item in drivers)
-    assert actual == mapping
+    every = [item for item in profile['state']['Drivers'].values() if isinstance(item, dict)]
+    shape = lambda item: (item['start'], int(item.get('ledsPerPin', item.get('count', 0))), int(item['pins']))
+    # Every historical output is kept; a single-strand product also repeats its strip on the controller's other LED pads.
+    drivers = [item for item in every if shape(item) in mapping]
+    assert sorted(shape(item) for item in drivers) == mapping
+    mirrors = [shape(item) for item in every if shape(item) not in mapping]
+    assert all((start, length) == mapping[0][:2] for start, length, _ in mirrors)
+    assert sorted(pin for *_, pin in mirrors) == ([34, 35, 48] if historical == 'croptop' else [])
+    assert all(item['fixture'] == 'RGB' and item['curve'] == 'linear' for item in every if shape(item) in mirrors)
     # WLED const.h: order 1 is RGB, type 22 is WS2812 RGB, type 41 is single-channel PWM.
     # Match output roles as well as pin/count; equal ranges alone cannot catch swapped channels.
     assert all(item['order'] == 1 for item in source['outputs'])

@@ -46,11 +46,16 @@ export class HelioPresetCards {
         const forms = [this.addForm()];
         if (this.showLegacyImport?.()) forms.push(this.legacyImportForm());
         host.replaceChildren(heading, this.grid, ...forms);
-        this.status.textContent = "Loading presets…";
+        // A remount, as after a scene change rebuilds the page, shows the cards it knows while the listing refreshes, so the section never empties and the page keeps its scroll position.
+        if (this.records.size) {
+            this.grid.replaceChildren(...[...this.records.values()].map(record => this.card(record)));
+            this.onPreview?.();
+        } else this.status.textContent = "Loading presets…";
         try {
             const listing = await this.client.list();
             if (!host.isConnected || generation !== this.mountGeneration) return;
             const names = new Set();
+            const cards = [];
             for (const item of listing.items.filter(item => item.kind === "look")) {
                 names.add(item.name);
                 let record = this.records.get(item.name);
@@ -59,18 +64,21 @@ export class HelioPresetCards {
                     this.records.set(item.name, record);
                 }
                 record.item = item;
-                this.grid.appendChild(this.card(record));
+                cards.push(this.card(record));
             }
+            const removed = [];
             for (const [name, record] of this.records) {
                 if (!names.has(name) && !record.editor?.dirty) {
                     this.cancelQueuedRead(record);
                     record.editor?.dispose();
                     this.records.delete(name);
                 } else if (!names.has(name)) {
-                    this.grid.appendChild(this.card(record));
-                    record.status.textContent = "Preset removed elsewhere. Your draft is retained; save a copy.";
+                    cards.push(this.card(record));
+                    removed.push(record);
                 }
             }
+            this.grid.replaceChildren(...cards);
+            for (const record of removed) record.status.textContent = "Preset removed elsewhere. Your draft is retained; save a copy.";
             this.status.textContent = this.notice || (names.size ? "Changes save automatically" : "Add an animation to begin");
             this.onPreview?.();
         } catch (error) { this.status.textContent = error.message; }

@@ -74,9 +74,13 @@ test('NEBULITE previews skip the actual separate white output only after profile
         context.drawHelioCardTracePreview({}, 0, () => [], count);
         assert.deepEqual(plain(calls[0][4]), model === 'NEBULITE Jacket S3'
             ? [{ start: 0, count: 30 }, { start: 31, count: 30 }, { start: 61, count: 30 }] : [whiteSlot]);
-        modules[1].children[0].controls.find(item => item.name === 'pins').value = '99';
+        // A moved pin is still the product; a different light count is custom wiring.
+        modules[1].children[0].controls.find(item => item.name === 'pins').value = '34';
         context.drawHelioCardTracePreview({}, 0, () => [], count);
-        assert.deepEqual(plain(calls[1][4]), [], 'an unverified custom wiring must not inherit the profile assumption');
+        assert.deepEqual(plain(calls[1][4]), plain(calls[0][4]), 'a moved pin keeps the profile');
+        modules[1].children[0].controls.find(item => item.name === 'ledsPerPin').value = '9';
+        context.drawHelioCardTracePreview({}, 0, () => [], count);
+        assert.deepEqual(plain(calls[2][4]), [], 'an unverified custom wiring must not inherit the profile assumption');
     }
 });
 
@@ -99,9 +103,12 @@ test('historical crop-top geometry requires matching live setup and complete log
     context.drawHelioCardTracePreview({}, 0, () => [], 9);
     assert.deepEqual(calls, ['historical']);
     context.drawHelioCardTracePreview({}, 0, () => [], 8);
-    modules[1].children[0].controls.find(item => item.name === 'pins').value = '99';
+    // The bench case: the strip moved to the pad at GPIO34 still shows the crop-top.
+    modules[1].children[0].controls.find(item => item.name === 'pins').value = '34';
     context.drawHelioCardTracePreview({}, 0, () => [], 9);
-    assert.deepEqual(calls, ['historical', 'strip', 'strip']);
+    modules[1].children[0].controls.find(item => item.name === 'ledsPerPin').value = '9';
+    context.drawHelioCardTracePreview({}, 0, () => [], 9);
+    assert.deepEqual(calls, ['historical', 'strip', 'historical', 'strip']);
 });
 
 test('a 2D scene is sampled at each output cell before the garment simulator uses strip order', async () => {
