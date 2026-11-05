@@ -267,6 +267,7 @@ add_executable(mm_tests
     unit/light/unit_ParticlesEffect.cpp
     unit/light/unit_PlasmaEffect.cpp
     unit/light/unit_PreviewDriver.cpp
+    unit/light/unit_PreviewFrameSnapshot.cpp
     unit/light/unit_RainbowEffect.cpp
     unit/light/unit_NebuliteRainbowEffect.cpp
     unit/light/unit_NebuliteBlinkEffect.cpp

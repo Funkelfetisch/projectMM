@@ -20,6 +20,8 @@ public:
     static constexpr uint16_t kMaxLights = 512;
     /// The lights one page of the snapshot carries.
     static constexpr uint16_t kPageLights = 32;
+    /// How old a captured frame may be for a request that starts at offset 0.
+    static constexpr int32_t kMaxAgeMs = 5000;
     /// Retire every captured frame, so a revision-pinned page reports the frame changed.
     void invalidate() { generation_.fetch_add(1, std::memory_order_relaxed); }
     /// Called from the owner's prepare(), never on the encode task: hold room for `lights` (up to kMaxLights) and drop any captured frame.
@@ -57,8 +59,11 @@ public:
         uint8_t page[kPageLights * 3]; uint16_t count = 0, end = 0; char revision[33]{};
         const char* error = nullptr;
         std::snprintf(revision, sizeof(revision), "%016llx%016llx", static_cast<unsigned long long>(capturedGeneration_), static_cast<unsigned long long>(sequence_));
-        if (generation_.load(std::memory_order_relaxed) == capturedGeneration_ && tooMany_ && now - capturedAt_ <= 5000) error = "frame-too-large";
-        else if (!valid_ || generation_.load(std::memory_order_relaxed) != capturedGeneration_ || now - capturedAt_ > 5000) error = "frame-pending";
+        const bool current = generation_.load(std::memory_order_relaxed) == capturedGeneration_;
+        // Signed, so a capture stamped just after the caller read `now` is fresh; only a new request ages a frame out, a continuation being pinned by its revision.
+        const bool fresh = offset != 0 || static_cast<int32_t>(now - capturedAt_) <= kMaxAgeMs;
+        if (current && tooMany_ && fresh) error = "frame-too-large";
+        else if (!valid_ || !current || !fresh) error = "frame-pending";
         else if (offset && (!expected || std::strcmp(expected, revision))) error = "frame-changed";
         else if (offset >= count_) error = "frame-offset";
         else {
