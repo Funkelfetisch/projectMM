@@ -91,6 +91,7 @@ struct Peripheral {
     std::atomic<uint32_t> fullAllowed{0}, fullRejected{0}, overflows{0}, fullUnknown{0};
     ble_gatt_svc_def services[2] = {};
     ble_npl_event changed;
+    ble_npl_callout replyRetry;   // offers a reply again that the stack could not take
     ble_npl_event advertisementChanged;
     ble_npl_event secure;
     std::atomic<uint16_t> securing{BLE_HS_CONN_HANDLE_NONE};
@@ -300,10 +301,6 @@ int gapEvent(ble_gap_event* event, void* arg) {
             if (event->conn_update.status == 0) recordLinkParameters(*peripheral, event->conn_update.conn_handle);
             ESP_LOGI(kBleTag, "connection parameter update status=%d", event->conn_update.status);
             break;
-        case BLE_GAP_EVENT_NOTIFY_TX:
-            if (event->notify_tx.attr_handle == peripheral->valueHandle)
-                ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->changed);
-            break;
         case BLE_GAP_EVENT_SUBSCRIBE: {
             std::lock_guard<std::mutex> lock(peripheral->mutex);
             if (event->subscribe.attr_handle == peripheral->valueHandle)
@@ -450,12 +447,17 @@ bool configureBatteries(Peripheral& peripheral, const BleBatteryConfig& config) 
     return true;
 }
 
-/// Send each subscribed peer's waiting reply in notifications of at most its ATT MTU less three; out of buffers, a transmit completion runs this again.
+/// How long a reply the stack could not take waits before it is offered again.
+constexpr uint32_t kReplyRetryMs = 10;
+
+/// Send each subscribed peer's waiting reply in notifications of at most its ATT MTU less three; one the stack cannot take is offered again after kReplyRetryMs.
 void sendReplies(ble_npl_event* event) {
     auto* peripheral = static_cast<Peripheral*>(ble_npl_event_get_arg(event));
     std::array<uint16_t, kPeerCapacity> targets{}; size_t count = 0;
     { std::lock_guard<std::mutex> lock(peripheral->mutex); count = peripheral->peers.subscribers(0, targets.data(), targets.size()); }
     uint8_t bytes[BleMessage::kCapacity + 1];
+    // NimBLE reports no buffer coming free, and its NOTIFY_TX reports an attempt rather than a transmission, so a timer is what resumes a reply.
+    const auto retry = [peripheral] { ble_npl_callout_reset(&peripheral->replyRetry, ble_npl_time_ms_to_ticks32(kReplyRetryMs)); };
     for (size_t n = 0; n < count; ++n) {
         const uint16_t mtu = ble_att_mtu(targets[n]);
         const size_t room = mtu > 23 ? std::min<size_t>(mtu - 3u, sizeof(bytes)) : 20;
@@ -464,9 +466,9 @@ void sendReplies(ble_npl_event* event) {
             { std::lock_guard<std::mutex> lock(peripheral->mutex); length = peripheral->peers.pending(targets[n], bytes, room); }
             if (!length) break;
             os_mbuf* buffer = ble_hs_mbuf_from_flat(bytes, static_cast<uint16_t>(length));
-            if (!buffer) return;
-            // The stack consumes the buffer either way; a link that refuses waits for its next completion or its disconnect.
-            if (ble_gatts_notify_custom(targets[n], peripheral->valueHandle, buffer) != 0) break;
+            if (!buffer) { retry(); return; }
+            // The stack consumes the buffer either way.
+            if (ble_gatts_notify_custom(targets[n], peripheral->valueHandle, buffer) != 0) { retry(); break; }
             std::lock_guard<std::mutex> lock(peripheral->mutex);
             peripheral->peers.sent(targets[n], length);
         }
@@ -612,6 +614,7 @@ bool bleControlStart(BleControlHandle& handle, const char* name, const char* ide
     ble_hs_cfg.store_status_cb = storeStatus;
     ble_hs_cfg.store_status_arg = peripheral;
     ble_npl_event_init(&peripheral->changed, sendReplies, peripheral);
+    ble_npl_callout_init(&peripheral->replyRetry, nimble_port_get_dflt_eventq(), sendReplies, peripheral);
     ble_npl_event_init(&peripheral->advertisementChanged, advertisementChanged, peripheral);
     ble_npl_event_init(&peripheral->secure, requestSecurity, peripheral);
     ble_npl_event_init(&peripheral->updateAcked, notifyUpdateAck, peripheral);
@@ -637,6 +640,9 @@ bool bleControlStop(BleControlHandle& handle) {
         ble_hs_cfg.store_status_cb = nullptr;
         ble_hs_cfg.store_status_arg = nullptr;
     }
+    // The retry's timer outlives the host loop, so it stops before the peripheral it names is freed.
+    ble_npl_callout_stop(&peripheral->replyRetry);
+    ble_npl_callout_deinit(&peripheral->replyRetry);
     nimble_port_deinit();
     active = nullptr;
     delete peripheral;
@@ -678,9 +684,10 @@ bool bleControlPublish(BleControlHandle& handle, const char* response, uint64_t 
     const auto result = peripheral->peers.publish(response, generation);
     // Consumed, not retried: a stale result against a later connection, or one no peer could take.
     if (result == Publish::Stale || result == Publish::Invalid) return true;
-    // Send it, or resume the reply still going out should a completion have been missed.
+    // A reply still going out keeps this one waiting for the caller's next attempt; sendReplies finishes that one.
+    if (result != Publish::Stored) return false;
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &peripheral->changed);
-    return result == Publish::Stored;
+    return true;
 }
 
 bool bleControlPublishAdvertisement(BleControlHandle& handle, const std::array<uint8_t, 13>& bytes) MM_NONBLOCKING {

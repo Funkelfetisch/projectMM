@@ -8,14 +8,18 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PRE = r'''
 #include <cassert>
-struct Peripheral { ~Peripheral(){++destroyed;} static int destroyed; }; int Peripheral::destroyed=0;
+struct ble_npl_callout {};
+struct Peripheral { ble_npl_callout replyRetry; ~Peripheral(){++destroyed;} static int destroyed; }; int Peripheral::destroyed=0;
 struct BleControlHandle { void* impl=nullptr; };
 void storeStatus() {}
 struct Config { void (*store_status_cb)()=nullptr; void* store_status_arg=nullptr; } ble_hs_cfg;
 Peripheral* active=nullptr;
 int status=0, logged=0, deinits=0, stops=0;
 int nimble_port_stop(){++stops;return status;}
-void nimble_port_deinit(){++deinits;}
+int calloutStops=0, calloutDeinits=0;
+void ble_npl_callout_stop(ble_npl_callout*){++calloutStops;}
+void ble_npl_callout_deinit(ble_npl_callout*){++calloutDeinits;}
+void nimble_port_deinit(){assert(calloutStops==deinits+1 && calloutDeinits==deinits+1); ++deinits;}
 #define ESP_LOGE(tag,fmt,value) (logged=(value))
 const char* kBleTag="test";
 '''
@@ -25,7 +29,7 @@ int main(){
  ble_hs_cfg.store_status_cb=storeStatus; ble_hs_cfg.store_status_arg=p;
  status=17; assert(!bleControlStop(handle));
  assert(handle.impl==p && active==p && ble_hs_cfg.store_status_cb==storeStatus && ble_hs_cfg.store_status_arg==p);
- assert(logged==17 && deinits==0 && Peripheral::destroyed==0 && stops==1);
+ assert(logged==17 && deinits==0 && calloutDeinits==0 && Peripheral::destroyed==0 && stops==1);
  status=0; assert(bleControlStop(handle));
  assert(!handle.impl && !active && !ble_hs_cfg.store_status_cb && !ble_hs_cfg.store_status_arg);
  assert(deinits==1 && Peripheral::destroyed==1 && stops==2);
@@ -73,14 +77,18 @@ class BleHostStopSeam(unittest.TestCase):
 
         pre = r'''
 #include <cassert>
-struct Peripheral { bool abandoned=false; ~Peripheral(){++destroyed;} static int destroyed; }; int Peripheral::destroyed=0;
+struct ble_npl_callout {};
+struct Peripheral { bool abandoned=false; ble_npl_callout replyRetry; ~Peripheral(){++destroyed;} static int destroyed; }; int Peripheral::destroyed=0;
 struct BleControlHandle { void* impl=nullptr; };
 void storeStatus() {}
 struct Config { void (*store_status_cb)()=nullptr; void* store_status_arg=nullptr; } ble_hs_cfg;
 Peripheral* active=nullptr;
 int status=0, deinits=0, stops=0;
 int nimble_port_stop(){++stops;return status;}
-void nimble_port_deinit(){++deinits;}
+int calloutStops=0, calloutDeinits=0;
+void ble_npl_callout_stop(ble_npl_callout*){++calloutStops;}
+void ble_npl_callout_deinit(ble_npl_callout*){++calloutDeinits;}
+void nimble_port_deinit(){assert(calloutStops==deinits+1 && calloutDeinits==deinits+1); ++deinits;}
 #define ESP_LOGE(...) ((void)0)
 const char* kBleTag="test";
 '''
@@ -91,7 +99,7 @@ int main(){
  assert(reapAbandonedHost() && stops==0); // an owned host is not stopped
  status=17; assert(!bleControlStop(h)); bleControlAbandon(h);
  assert(!h.impl && active==p && p->abandoned && Peripheral::destroyed==0);
- assert(!reapAbandonedHost()); assert(active==p && deinits==0 && Peripheral::destroyed==0);
+ assert(!reapAbandonedHost()); assert(active==p && deinits==0 && calloutDeinits==0 && Peripheral::destroyed==0);
  status=0; assert(reapAbandonedHost());
  assert(!active && deinits==1 && Peripheral::destroyed==1 && stops==3);
  assert(reapAbandonedHost() && stops==3);
