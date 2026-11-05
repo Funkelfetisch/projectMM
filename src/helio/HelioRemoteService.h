@@ -36,8 +36,8 @@ public:
         BleRemoteService::onControlChanged(name);
         if (!std::strcmp(name, "music mode")) ensurePresetGroup();
     }
-    /// Claim the timer seat and re-check the saved preset selection before the observer starts.
-    void prepare() override { timer_.seat.claim(); selectionChecked_ = false; BleRemoteService::prepare(); }
+    /// Claim the timer seat before the observer starts.
+    void prepare() override { timer_.seat.claim(); BleRemoteService::prepare(); }
     /// Cancel the timer and give up its seat before the observer stops.
     void release() override { timer_.cancel(); timer_.seat.vacate(); BleRemoteService::release(); }
     /// Run the timer and the auto-step, handle the queued keys, and refresh the remaining readout.
@@ -51,10 +51,6 @@ public:
         timer_.seat.claim();
         BleRemoteService::tick();
         now = platform::millis();
-        if (!selectionChecked_ && ControlModule::active()) {
-            selectionChecked_ = true;
-            ensurePresetGroup();
-        }
         if (automatic && !timer_.visible(now) && !timer_.indicating(now) && now - autoAt_ >= uint32_t(autoIntervalSeconds) * 1000) {
             stepPreset(1); autoAt_ = now;
         }
@@ -157,7 +153,6 @@ private:
     RemoteTimer timer_;
     uint64_t audioRows_ = 0, lookRows_ = 0;
     uint32_t presetRevision_ = UINT32_MAX;
-    bool selectionChecked_ = false;
     void refreshGroups(ControlModule& control) {
         if (presetRevision_ == control.presetsRevision()) return;
         audioRows_ = lookRows_ = 0;

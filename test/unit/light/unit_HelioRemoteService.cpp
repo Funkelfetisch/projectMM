@@ -331,6 +331,41 @@ TEST_CASE("HELIO Auto visits every native preset and Mode wraps both directions"
     scheduler.release();
 }
 
+TEST_CASE("A restart keeps the restored look until the handset or a music mode change selects a preset") {
+    char root[] = "/tmp/helio-remote-restart-XXXXXX";
+    REQUIRE(mkdtemp(root) != nullptr);
+    struct Cleanup { const char* path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{root};
+    mm::platform::fsSetRoot(root);
+    mm::Scheduler scheduler;
+    mm::ModuleFactory::registerType<mm::Effects>("Effects");
+    mm::ModuleFactory::registerType<mm::Layer>("Layer");
+    mm::ModuleFactory::registerType<mm::SolidEffect>("SolidEffect");
+    mm::ModuleFactory::registerType<mm::HelioStarburstEffect>("HelioStarburstEffect");
+    auto* fs = new mm::FilesystemModule(); fs->setTypeName("FilesystemModule"); fs->setScheduler(&scheduler);
+    scheduler.addModule(fs);
+    auto* effects = new mm::Effects(); effects->setName("Effects"); effects->setTypeName("Effects"); scheduler.addModule(effects);
+    auto* control = new mm::ControlModule(); control->setName("Control"); control->setTypeName("ControlModule"); scheduler.addModule(control);
+    auto* remote = new Handset(); remote->setName("Remote"); scheduler.addModule(remote);
+    // The presets are on flash before boot, as on a device.
+    mm::platform::fsMkdir(mm::ControlModule::kPresetDir);
+    for (const char* entry : {"Calm|SolidEffect", "Pulse|HelioStarburstEffect"}) {
+        const std::string text(entry), name = text.substr(0, text.find('|')), type = text.substr(text.find('|') + 1);
+        const std::string path = std::string(mm::ControlModule::kPresetDir) + "/" + name + ".json";
+        const std::string document = R"({"Effects":{"$patch":"replace","enabled":true,"Layer":{"type":"Layer","BLE Scene":{"type":")" + type + R"("}}}})";
+        REQUIRE(mm::platform::fsWriteAtomic(path.c_str(), document.c_str(), document.size()));
+    }
+    scheduler.setup();
+    REQUIRE(control->presetCount() == 2);
+    // Boot: the look restored from the saved state is named by no preset, and the remote's ticks leave it running.
+    for (int i = 0; i < 3; ++i) remote->tick();
+    CHECK(control->currentLook()[0] == '\0');
+    CHECK(effects->childCount() == 0);
+    // Choosing the music group selects its preset.
+    remote->musicMode = 1; remote->onControlChanged("music mode");
+    CHECK(std::strcmp(control->currentLook(), "Pulse") == 0);
+    scheduler.release();
+}
+
 TEST_CASE("Music indication uses dedicated warm white, blue and purple then restores the output") {
     mm::RemoteTimer overlay; std::array<uint8_t, 222 * 4> bytes;
     for (auto color : {std::array<uint8_t,4>{0,0,0,255}, {0,0,255,0}, {160,0,255,0}}) {

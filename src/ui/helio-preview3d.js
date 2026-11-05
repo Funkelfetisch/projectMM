@@ -526,9 +526,8 @@ function parsePreviewCoords(view, buf) {
     drawLights(null);
 }
 
+// A browser without WebGL still hands every frame to the live listeners, such as the 2D product stage; drawLights skips the 3D view itself.
 function renderPreviewFrame(view, buf) {
-    if (!gl) initWebGL();
-    if (!gl) return;
     // Hold frames until positions have arrived (the device sends the table on a geometry
     // rebuild and when a new client connects, so a fresh client gets it on connect).
     if (!previewCoords_ || previewCoordCount_ === 0) return;
