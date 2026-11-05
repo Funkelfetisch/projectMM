@@ -1,5 +1,6 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// The BLE preview frame: a pull snapshot that pages out one captured frame, pinned by its revision.
+/// @module PreviewDriver
+
+/// The BLE preview frame: a pull snapshot that pages out one captured frame, pinned by its revision.
 #include "doctest.h"
 #include "core/module/MoonModule.h"
 #include "light/drivers/PreviewFrameSnapshot.h"
