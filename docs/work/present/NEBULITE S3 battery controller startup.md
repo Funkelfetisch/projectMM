@@ -22,10 +22,16 @@ start because the serial device disappeared during re-enumeration.
 module starts, then holds both enables with `gpio_hold_en`. The pad hold lives
 in the RTC domain: a software restart, a panic or a watchdog reset keeps it, so
 an update's restart no longer switches the controller off. Customers switch it
-off with the reset button, which pulls EN low; per the ESP32-S3 datasheet EN low
-switches the chip off and stops its pads driving, so the main MOSFET still drops.
-That is still to be seen on the controller, whose clamp the owner removed on
-2026-11-05. A battery-free USB test cannot qualify ADC measurement or charging.
+off with the reset button, which pulls EN low and switches the chip off.
+
+On 2026-11-05 the Croptop S3 (DC:54:75:CC:82:00) was tested with a diagnostic
+build that logged `RTC_CNTL_PAD_HOLD_REG` at boot and called `esp_restart()`
+every 20 s. Unclamped, it stayed on through eight software restarts
+(`rst:0xc`), both enables reading held (`0x00204000`) at every boot. The reset
+button switched it off. A plain USB reset (`rst:0x15`) kept both holds, but
+flashing over USB cleared GPIO21's hold in download mode, so a USB flash still
+needs the ON button held. A battery-free USB test cannot qualify ADC
+measurement or charging.
 
 On 2026-10-31 the live EasyEDA project `Nebulite S3 V6 - Minimal` (project
 `3aac7de93e7345909d80e266141f39de`, PCB
