@@ -1616,14 +1616,17 @@ bool gpioRead(uint8_t gpio);
 /// Drive one GPIO as a push-pull output, configuring it on first use; false where it has no driver.
 bool gpioWrite(uint8_t gpio, bool high);
 
+/// Latch a driven output at its level until the power goes, through every software reset; later writes leave it. False where the chip cannot hold that pad.
+bool gpioHold(uint8_t gpio);
+
 /// Set the output latch before enabling output; the caller must first detach any peripheral from this pin, and this does not prove the external wire level.
 bool gpioPreloadOutput(uint8_t gpio, bool high);
 /// Low-level convenience for an explicitly owned, detached output.
 bool gpioPreloadLowOutput(uint8_t gpio);
 
-/// Make gpioRead answer `level` for one pin.
+/// Make gpioRead answer `level` for one pin, as a wire would: gpioInputBegin's pull does not move it.
 void setTestGpioLevel(uint8_t gpio, bool level);
-/// Drop every injected level.
+/// Drop every injected level and hold, as a power cycle does.
 void clearTestGpioLevel();
 
 /// Read one ADC pin as a raw count; false on an unsupported pin, contention or read failure, leaving the output unchanged.

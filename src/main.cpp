@@ -153,6 +153,7 @@
 #include "platform/platform.h"
 #include "core/util/build_info.h"
 #include "helio/HelioAudioMigration.h"
+#include "helio/NebuliteS3Power.h"   // the battery controller holds its own power
 #include "core/services/BleControlService.h"
 #include "helio/BleSceneCatalog.h"
 #include "helio/BleProductProfiles.h"
@@ -233,15 +234,11 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         mm::platform::gpioInputBegin(kNebuliteClassicStrapGpio, mm::platform::GpioPull::Down);
         printBoardPins({kNebuliteClassicBuzzerGpio, kNebuliteClassicStrapGpio});
     }
-    // A Rev4 battery controller holds its own power on, so GPIO10 reading high means driving both enable lines before anything else; a USB controller reads it low and carries a button on that same GPIO21. From the pinned WLED source.
+    // A battery controller holds its own power on, before anything else.
     if (std::strcmp(mm::kFirmwareName, "nebulite-s3") == 0) {
-        constexpr uint8_t kRev4ProbeGpio = 10, kRev4EnableGpio = 21, kRev4MainEnableGpio = 14;
-        if (mm::platform::gpioInputBegin(kRev4ProbeGpio, mm::platform::GpioPull::None)
-            && mm::platform::gpioRead(kRev4ProbeGpio)) {
-            mm::platform::gpioWrite(kRev4EnableGpio, true);
-            mm::platform::gpioWrite(kRev4MainEnableGpio, true);
-        }
-        printBoardPins({kRev4ProbeGpio, kRev4EnableGpio, kRev4MainEnableGpio});
+        using mm::helio::NebuliteS3Power;
+        NebuliteS3Power::hold();
+        printBoardPins({NebuliteS3Power::kProbeGpio, NebuliteS3Power::kEnableGpio, NebuliteS3Power::kMainEnableGpio});
     }
     mm::registerModuleTypes();
     mm::Scheduler scheduler;
@@ -249,8 +246,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     const bool productFirmware = mm::kProductFirmware;
     const bool nebuliteProduct = mm::isNebuliteFirmware(mm::kFirmwareName);
 
-    // Every container is created as the device boots it, from the one table the scenario runner builds its trees from too: @xref{how-the-boot-tree-is-created}.
-    // Each carries the apparatus wired into it, marked wired so a saved tree that predates a child keeps it: @xref{why-markwiredbycode-matters}.
+    // Each container comes from the table the scenario runner uses too (@xref{how-the-boot-tree-is-created}), its wired children marked so an older saved tree keeps them (@xref{why-markwiredbycode-matters}).
     const auto top = [](const char* typeName) {
         mm::MoonModule* m = mm::createTopLevel(typeName);
         if (!m) {

@@ -318,6 +318,9 @@ bool gpioWrite(uint8_t gpio, bool high) {
     return true;
 }
 
+// The Teensy has no pad hold: a reset releases every pin.
+bool gpioHold(uint8_t) { return false; }
+
 bool gpioPreloadOutput(uint8_t gpio, bool high) {
     // The Teensy latch-before-direction behavior is not qualified here.
     (void)gpio; (void)high;

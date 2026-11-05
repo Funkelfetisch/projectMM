@@ -18,12 +18,14 @@ not identify the board revision or prove that flash is empty. No flash or GPIO
 operation was performed. A read-only chip-identification attempt could not
 start because the serial device disappeared during re-enumeration.
 
-The current MoonLight candidates do not implement the above board-specific
-startup sequence and are not qualified to maintain power on this controller.
-The old GPIO10 detection, pin levels and their safe startup timing must be
-verified for the actual hardware revision, including pin ownership and
-shutdown/recovery behavior, before enabling them or releasing the clamp. A
-battery-free USB test cannot qualify ADC measurement or charging.
+`nebulite-s3` (src/helio/NebuliteS3Power.h) runs the same sequence before any
+module starts, then holds both enables with `gpio_hold_en`. The pad hold lives
+in the RTC domain: a software restart, a panic or a watchdog reset keeps it, so
+an update's restart no longer switches the controller off. Customers switch it
+off with the reset button, which pulls EN low; per the ESP32-S3 datasheet EN low
+switches the chip off and stops its pads driving, so the main MOSFET still drops.
+That is still to be seen on the controller, whose clamp the owner removed on
+2026-11-05. A battery-free USB test cannot qualify ADC measurement or charging.
 
 On 2026-10-31 the live EasyEDA project `Nebulite S3 V6 - Minimal` (project
 `3aac7de93e7345909d80e266141f39de`, PCB

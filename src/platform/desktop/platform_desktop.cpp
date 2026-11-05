@@ -2915,19 +2915,19 @@ bool i2cDeviceWrite(I2cDeviceHandle&, const uint8_t*, size_t, uint32_t) { return
 bool i2cDeviceRead(I2cDeviceHandle&, uint8_t*, size_t, uint32_t) { return false; }
 void i2cDeviceDeinit(I2cDeviceHandle& handle) { handle = {}; }
 
-// No receiver here, so the seam is a no-op and the service still runs with its buttons working through the control path.
-// A host has no pins either, so reads come from what a test injected.
-// The button logic is ordinary code and gets tested here, leaving only the electrical half for the bench.
+// A host has no receiver or pins, so a read answers what a test injected: the button logic is tested here, leaving only the electrical half to the bench.
 namespace {
 // A flat table rather than a map: a pin number IS the index, there are at most 48 of them, and this allocates nothing.
 constexpr uint8_t kMaxGpio = 48;
 std::atomic<bool> g_gpioLevel[kMaxGpio] = {};   // a sensor worker and a render-side input may share the pin
+std::atomic<bool> g_gpioHeld[kMaxGpio] = {};    // a held pad keeps its level, as the ESP32's pad hold does
+std::atomic<bool> g_gpioWired[kMaxGpio] = {};   // an injected level is a wire that beats the internal pull
 }
 
 bool gpioInputBegin(uint8_t gpio, GpioPull pull) {
     if (gpio >= kMaxGpio) return false;
-    // The PULL sets the resting level as on a board: pull-up idles HIGH, pull-down LOW. Otherwise an active-low button reads as HELD. A test wanting another level calls setTestGpioLevel after.
-    g_gpioLevel[gpio] = (pull == GpioPull::Up);
+    // The PULL sets the resting level as on a board: pull-up idles HIGH, pull-down LOW. Otherwise an active-low button reads as HELD. A level a test injected is a wire, which the pull does not move.
+    if (!g_gpioWired[gpio]) g_gpioLevel[gpio] = (pull == GpioPull::Up);
     return true;
 }
 
@@ -2936,7 +2936,13 @@ bool gpioRead(uint8_t gpio) { return gpio < kMaxGpio && g_gpioLevel[gpio]; }
 bool gpioWrite(uint8_t gpio, bool high) {
     // A write is observable through gpioRead, so a test can drive a pin and read back what a module put there (a relay enable, MoonLive's write-then-read hello world).
     if (gpio >= kMaxGpio) return false;
-    g_gpioLevel[gpio] = high;
+    if (!g_gpioHeld[gpio]) g_gpioLevel[gpio] = high;
+    return true;
+}
+
+bool gpioHold(uint8_t gpio) {
+    if (gpio >= kMaxGpio) return false;
+    g_gpioHeld[gpio] = true;
     return true;
 }
 
@@ -2948,8 +2954,12 @@ bool gpioPreloadOutput(uint8_t gpio, bool high) {
 
 bool gpioPreloadLowOutput(uint8_t gpio) { return gpioPreloadOutput(gpio, false); }
 
-void setTestGpioLevel(uint8_t gpio, bool level) { if (gpio < kMaxGpio) g_gpioLevel[gpio] = level; }
-void clearTestGpioLevel() { for (auto& b : g_gpioLevel) b = false; }
+void setTestGpioLevel(uint8_t gpio, bool level) { if (gpio < kMaxGpio) { g_gpioLevel[gpio] = level; g_gpioWired[gpio] = true; } }
+void clearTestGpioLevel() {
+    for (auto& b : g_gpioLevel) b = false;
+    for (auto& h : g_gpioHeld) h = false;
+    for (auto& w : g_gpioWired) w = false;
+}
 
 // --- ADC ---
 // The desktop has no converter, so a read reports what a test injected, as with the GPIO level. That pins a pedal's mapping, min/max/invert and smoothing on the host.

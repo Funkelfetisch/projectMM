@@ -6,31 +6,21 @@
 ///
 /// ## Two sources, because one of the questions has no query
 ///
-/// The SDK's own checks answer whether a pin is valid, output-capable and in the low-power domain, and those are always correct.
-/// Whether a pin is a boot strap or belongs to the flash or external memory has no query at all, being board and datasheet knowledge.
-/// So a small per-chip table carries it.
-/// That table mirrors the hardware reference page, which is its one documented source, and the two are kept in step.
+/// The SDK answers whether a pin is valid, output-capable or low-power; whether it is a strap or belongs to flash or external memory has no query, so a per-chip table mirroring the hardware reference page carries it.
 ///
 /// ## Two lists per chip, one of them conditional
 ///
-/// Reserved pins corrupt the device if used, and straps change the boot mode if driven at reset.
-/// The set is keyed on the build's target, so the build IS the chip variant, and a pin listed in neither is neither.
+/// Reserved pins corrupt the device if used, and straps change the boot mode if driven at reset; the build's target picks the set, and a pin in neither list is neither.
 ///
-/// The second list is the pins the memory bus takes only when the module HAS external memory, which is a runtime fact rather than a build one.
-/// One image runs on a bare module and on one with it fitted, so those are added only when it is actually present.
+/// The second list is the memory bus pins taken only when the module HAS external memory, a runtime fact, so one image adds them only when it is fitted.
 ///
 /// ## The package is read at runtime, not from the build
 ///
-/// The system-in-package parts wire their in-package memory differently while the same firmware runs on all of them, so the package comes from the chip's own fuses.
-/// On one of them four pads are not bonded at all, which in practice means the in-package parts use them.
-/// Muxing a peripheral onto one wedges the flash cache, and the board resets with no panic and no dump.
-/// Two neighboring pins ARE free on that package, which one bench board's microphone uses.
+/// The system-in-package parts wire their in-package memory differently under one firmware, so the package is read from the fuses: on one, muxing any of four unbonded pads wedges the flash cache with no panic.
 ///
 /// ## Pins are configured for input and output together
 ///
-/// A plain output leaves the input buffer disabled, so a read returns nothing on a pin that is really driving high, and the map's live column then lies about it.
-/// That cost a long debugging round on a relay that was working the whole time.
-/// The input buffer costs nothing here and makes a driven pin readable, which is what every other peripheral on this chip already does.
+/// A plain output disables the input buffer, so a read of a pin driving high returns nothing and the map's live column lies; the buffer costs nothing, as every other peripheral here uses it.
 ///
 #include "platform/platform.h"
 #include "platform/GpioPreload.h"
@@ -73,9 +63,7 @@ uint32_t packageId() {
     return pkg;
 }
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
-// The wider memory bus reserves a second range, but only on a module that has it, and the mode is the image's rather than the part's.
-// So a narrower build leaves those free, which one board drives panel lines on, and the wider image cannot run on that part anyway.
-// The debug and serial roles are conflicts rather than reservations: they stay usable as ordinary pins, so they are not flagged here.
+// The octal memory bus takes a second range only in an image built for it, so a quad build leaves those pins free; debug and serial pins stay usable, conflicts rather than reservations.
 constexpr uint8_t kReserved[]        = {26, 27, 28, 29, 30, 31, 32};
 #if CONFIG_SPIRAM_MODE_OCT
 constexpr uint8_t kReservedIfPsram[] = {33, 34, 35, 36, 37};
@@ -113,7 +101,7 @@ GpioCapability gpioCapability(uint8_t gpio) {
     c.outputCapable = GPIO_IS_VALID_OUTPUT_GPIO(gpio);
     c.rtc           = rtc_gpio_is_valid_gpio(static_cast<gpio_num_t>(gpio));
     c.strap         = inList(gpio, kStrap, sizeof(kStrap));
-    // kReservedIfPsram is gated on PSRAM being PRESENT, except where the image itself fixes the pins: an octal-PSRAM S3 build wires 33-37 to the PSRAM bus whatever the runtime finds, and a board whose PSRAM failed to init would otherwise hand those pads out as free GPIO.
+    // kReservedIfPsram needs PSRAM present, except where the image fixes the pins: an octal-PSRAM S3 build wires 33-37 to it whatever the runtime finds, so a failed PSRAM init frees none.
 #if defined(CONFIG_IDF_TARGET_ESP32S3) && CONFIG_SPIRAM_MODE_OCT
     constexpr bool kPsramPinsFixedByImage = true;
 #else
@@ -154,7 +142,7 @@ GpioLiveState gpioLiveState(uint8_t gpio) {
     gpio_drive_cap_t cap = GPIO_DRIVE_CAP_DEFAULT;
     gpio_get_drive_capability(static_cast<gpio_num_t>(gpio), &cap);
     s.driveCap = static_cast<uint8_t>(cap);    // 0..3 = WEAK / MEDIUM / STRONG / STRONGEST
-    // Live pin DIRECTION straight off the pad config (not the role's intent): is the output driver / input buffer enabled right now. A role that should drive but reads back !output = the pin isn't being driven (a dead driver or wire fault), the mismatch the map flags.
+    // The live direction off the pad config, not the role's intent: a role that should drive but reads back no output driver is the dead-driver mismatch the map flags.
     gpio_io_config_t io = {};
     if (gpio_get_io_config(static_cast<gpio_num_t>(gpio), &io) == ESP_OK) {
         s.output   = io.oe;
@@ -166,7 +154,7 @@ GpioLiveState gpioLiveState(uint8_t gpio) {
 }
 
 // --- GPIO as a working input/output -----------------------------------------------------------
-// The two above are the pin map's diagnostics. These are the role: a module that owns a pin reads a switch or drives a line through them. Thin by design - gpio_config once, then the register-level get/set - so a per-tick poll costs a read and the module keeps the policy (debounce, edges).
+// The pin map's diagnostics are above; a module drives a line or reads a switch through these: gpio_config once, then register get/set, so a poll costs one read.
 
 bool gpioInputBegin(uint8_t gpio, GpioPull pull) {
     if (!GPIO_IS_VALID_GPIO(gpio)) return false;
@@ -213,6 +201,13 @@ bool gpioPreloadOutput(uint8_t gpio, bool high) {
 }
 
 bool gpioPreloadLowOutput(uint8_t gpio) { return gpioPreloadOutput(gpio, false); }
+
+bool gpioHold(uint8_t gpio) {
+    // The same refusals as gpioWrite: only a pin it may drive is held.
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio) || gpioCapability(gpio).reserved) return false;
+    // The pad hold lives in the RTC domain, so a software, panic or watchdog reset keeps it; only a power loss or an EN reset clears it.
+    return gpio_hold_en(static_cast<gpio_num_t>(gpio)) == ESP_OK;
+}
 
 void setTestGpioLevel(uint8_t, bool) {}
 void clearTestGpioLevel() {}
