@@ -2041,14 +2041,15 @@
     "name": "NEBULITE Croptop ESP32",
     "chip": "ESP32",
     "firmwares": ["nebulite-esp32"],
-    "description": "Experimental archived WLED crop-top configuration; verify GPIO26, LED wiring, power and recovery on the actual controller before use. Battery and charging wiring are not configured.",
+    "description": "Experimental archived WLED crop-top configuration: eight RGB pixels on GPIO26, mirrored on GPIO17 so either LED socket carries the strip. Verify LED wiring, power and recovery on the actual controller before use. Battery and charging wiring are not configured.",
     "supported": ["LEDs"],
     "planned": ["Battery", "Charging"],
     "state": {
       "System": {"deviceModel": "NEBULITE Croptop ESP32"},
       "Drivers": {
         "$patch": "replace",
-        "RGB1": {"type": "RmtLedDriver", "pins": "26", "fixture": "RGB", "start": 0, "curve": "linear", "whiteMode": "None", "ledsPerPin": "8"}
+        "RGB1": {"type": "RmtLedDriver", "pins": "26", "fixture": "RGB", "start": 0, "curve": "linear", "whiteMode": "None", "ledsPerPin": "8"},
+        "RGB2": {"type": "RmtLedDriver", "pins": "17", "fixture": "RGB", "start": 0, "curve": "linear", "whiteMode": "None", "ledsPerPin": "8"}
       },
       "Layouts": {"$patch": "replace", "ProductStrip": {"type": "GridLayout", "width": 8, "height": 1, "depth": 1}}
     }
@@ -2059,7 +2060,7 @@
     "firmwares": [
       "nebulite-esp32"
     ],
-    "description": "Source: NEBULITE Smart ESP32 v0.5.0 (Funkelfetisch/NEBULITE-Smart 9fbc10e1, src/neopixel.cpp): four RGB pixels on GPIO26. Verify LED wiring, power and recovery on the actual controller before use; battery and charging are not configured.",
+    "description": "Source: NEBULITE Smart ESP32 v0.5.0 (Funkelfetisch/NEBULITE-Smart 9fbc10e1, src/neopixel.cpp): four RGB pixels on GPIO26, mirrored on GPIO17 so either LED socket carries the strip. Verify LED wiring, power and recovery on the actual controller before use; battery and charging are not configured.",
     "supported": [
       "LEDs"
     ],
@@ -2076,6 +2077,15 @@
         "RGB1": {
           "type": "RmtLedDriver",
           "pins": "26",
+          "fixture": "RGB",
+          "start": 0,
+          "curve": "linear",
+          "whiteMode": "None",
+          "ledsPerPin": "4"
+        },
+        "RGB2": {
+          "type": "RmtLedDriver",
+          "pins": "17",
           "fixture": "RGB",
           "start": 0,
           "curve": "linear",

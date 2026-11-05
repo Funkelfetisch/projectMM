@@ -185,7 +185,7 @@ test('setup explains that applying it replaces custom outputs and LED positions'
         }
     }
 });
-test('classic crop-top setup is opt-in, chip-specific and uses the archived eight-output map', async () => {
+test('classic crop-top setup is opt-in, chip-specific and repeats the archived eight-output map on both LED sockets', async () => {
     const classic = profiles.find(p => p.name === 'NEBULITE Croptop ESP32');
     const classicIdentity = { firmware: 'nebulite-esp32', chip: 'ESP32 (rev 3)' };
     assert.deepEqual(compatibleProductProfiles(profiles, classicIdentity).map(p => p.name),
@@ -195,11 +195,12 @@ test('classic crop-top setup is opt-in, chip-specific and uses the archived eigh
     const view = mount({ identity: classicIdentity, apply: async patch => { written = patch; } });
     const [product, projection] = elements(view, 'select');
     product.value = classic.name; await product.fire('change');
-    assert(elements(view, 'p').some(node => /verify GPIO26.*Battery and charging wiring are not configured/.test(node.textContent)));
+    assert(elements(view, 'p').some(node => /GPIO26, mirrored on GPIO17.*Battery and charging wiring are not configured/.test(node.textContent)));
     projection.value = 'virtual2d'; await projection.fire('change');
     await elements(view, 'button')[0].fire('click');
-    assert.equal(written.Drivers.RGB1.pins, '26');
-    assert.deepEqual(Object.keys(written.Drivers).sort(), ['$patch', 'RGB1']);
+    assert.deepEqual([written.Drivers.RGB1.pins, written.Drivers.RGB2.pins], ['26', '17']);
+    assert.equal(written.Drivers.RGB2.start, written.Drivers.RGB1.start);
+    assert.deepEqual(Object.keys(written.Drivers).sort(), ['$patch', 'RGB1', 'RGB2']);
     assert.equal(written.Layouts.ProductStrip.points.split(';').length, 8);
 });
 test('S3 setup warns that a matching chip does not establish board wiring', async () => {

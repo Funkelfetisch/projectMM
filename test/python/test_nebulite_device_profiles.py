@@ -13,6 +13,27 @@ PROFILES = [
     ('jacket', 'NEBULITE Jacket S3', 91, [(0, 30, 36), (30, 1, 46), (31, 30, 35), (61, 30, 48)]),
 ]
 
+# The LED data lines each controller drives: the S3 garment board's four sockets, the classic board's two (rev1 leaves GPIO17 unconnected, so driving it there is harmless).
+SOCKETS = {'ESP32-S3': {34, 35, 36, 48}, 'ESP32': {17, 26}}
+NEBULITE = [item for item in CATALOG if item['name'].startswith('NEBULITE')]
+
+
+def windows(profile, types=('RmtLedDriver',)):
+    """Each output's (start, length, pin), for the driver types named."""
+    return sorted((item['start'], int(item.get('ledsPerPin', item.get('count', 0))), int(item['pins']))
+                  for item in profile['state']['Drivers'].values() if isinstance(item, dict) and item.get('type') in types)
+
+
+@pytest.mark.parametrize('profile', NEBULITE, ids=lambda item: item['name'])
+def test_a_single_strand_product_lights_every_socket_and_a_multi_strand_product_continues_its_segments(profile):
+    strips = windows(profile)
+    if len({(start, length) for start, length, _ in strips}) == 1:
+        assert {pin for *_, pin in strips} == SOCKETS[profile['chip']]
+    else:
+        outputs = windows(profile, ('RmtLedDriver', 'PwmLightDriver'))
+        assert all(start + length == following for (start, length, _), (following, *_) in zip(outputs, outputs[1:]))
+        assert len({pin for *_, pin in strips}) == len(strips)
+
 
 def test_nebulite_profile_source_is_pinned_without_claiming_physical_qualification():
     assert SOURCE['source'] == {'repo': 'AuraviaLTD/WLED', 'ref': 'autobuild',

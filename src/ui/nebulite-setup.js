@@ -256,7 +256,7 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
             current ? displayName(current) : (hasPhysicalOutput(latestModules) ? "Custom setup" : "Choose your NEBULITE");
         select.value = attempt.profileName;
         note.textContent = attempt.profileName === "NEBULITE Croptop ESP32"
-            ? "Experimental archived configuration: verify GPIO26, LED wiring, power and recovery on this controller. Battery and charging wiring are not configured. The 2D layout is approximate."
+            ? "Experimental archived configuration: the strip on GPIO26, mirrored on GPIO17, lights on either LED socket; verify LED wiring, power and recovery on this controller. Battery and charging wiring are not configured. The 2D layout is approximate."
             : attempt.profileName === "NEBULITE Croptop S3"
             ? "Experimental configuration: the strip is mirrored on GPIO36, 35, 48 and 34, so it lights on whichever pad it is wired to; verify GPIO46, LED wiring, power and recovery on this controller. Matching the chip does not verify the board wiring. Battery settings are separate; the 2D layout is approximate."
             : attempt.profileName === "NEBULITE Jacket S3"
