@@ -39,8 +39,9 @@ endif()
 
 # The paths go through a file rather than the command line: a few hundred of them would overrun the
 # command-length limit on Windows long before the library stops growing.
+# It is written where the build runs this script, never beside OUT in src/: there the build id, stamped in parallel, would read a clean tree as dirty.
 string(REPLACE ";" "\n" SCRIPT_LIST "${SCRIPT_PATHS}")
-set(LIST_FILE "${OUT}.filelist")
+set(LIST_FILE "${CMAKE_CURRENT_BINARY_DIR}/script_catalog.filelist")
 file(WRITE "${LIST_FILE}" "${SCRIPT_LIST}\n")
 
 execute_process(
