@@ -484,7 +484,7 @@ TEST_CASE("BLE reads actual RGBW effect values without collapsing white into RGB
     CHECK(tree.reply().find("\"white\":40") != std::string::npos);
 }
 
-TEST_CASE("BLE can change existing ambient controls but cannot replace services or disable its own transport") {
+TEST_CASE("BLE sets the ambient sensor's switch and curve but never its bus, pins, address or enabled, nor replaces services or its own transport") {
     struct Ambient : mm::MoonModule {
         bool automatic = true;
         void defineControls() override { controls_.addControl("automatic", automatic); }
@@ -500,7 +500,12 @@ TEST_CASE("BLE can change existing ambient controls but cannot replace services 
     for (const char* request : {
         R"({"$v":1,"$id":14,"$op":"patch","Services":{"Ambient Light":null}})",
         R"({"$v":1,"$id":15,"$op":"patch","Services":{"Ambient Light":{"type":"Other"}}})",
-        R"({"$v":1,"$id":16,"$op":"patch","Services":{"BLE":{"enabled":false}}})"}) {
+        R"({"$v":1,"$id":16,"$op":"patch","Services":{"BLE":{"enabled":false}}})",
+        R"({"$v":1,"$id":17,"$op":"patch","Services":{"Ambient Light":{"sda":5}}})",
+        R"({"$v":1,"$id":18,"$op":"patch","Services":{"Ambient Light":{"scl":4}}})",
+        R"({"$v":1,"$id":19,"$op":"patch","Services":{"Ambient Light":{"bus":0}}})",
+        R"({"$v":1,"$id":20,"$op":"patch","Services":{"Ambient Light":{"address":92}}})",
+        R"({"$v":1,"$id":21,"$op":"patch","Services":{"Ambient Light":{"enabled":false}}})"}) {
         tree.send(request, 100);
         CHECK(tree.reply().find("scope") != std::string::npos);
     }

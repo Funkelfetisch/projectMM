@@ -164,6 +164,13 @@ public:
         return sensor && sensor->effectivelyEnabled() ? sensor : nullptr;
     }
 
+    /// Whether a phone may set this control over BLE: the switch and the response curve, never the bus, pins, address or enabled.
+    static bool peerSettable(const char* control) {
+        for (const char* name : {"automatic", "darkLux", "darkBrightness", "brightLux", "brightBrightness", "hysteresisLux"})
+            if (std::strcmp(control, name) == 0) return true;
+        return false;
+    }
+
     /// The latest measured illuminance, the value the lux control shows; false without a valid reading.
     bool reading(uint16_t& lux) const {
         if (!valid_) return false;

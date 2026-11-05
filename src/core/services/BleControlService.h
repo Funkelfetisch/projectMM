@@ -941,10 +941,11 @@ private:
             MoonModule* target = nullptr;
             for (uint8_t i = 0; i < services->childCount(); ++i)
                 if (std::strcmp(services->child(i)->name(), value.key) == 0) target = services->child(i);
-            if (!target || (std::strcmp(target->typeName(), "AudioService") && std::strcmp(target->typeName(), "Bh1750Service"))) return false;
+            const bool sensor = target && std::strcmp(target->typeName(), "Bh1750Service") == 0;
+            if (!target || (!sensor && std::strcmp(target->typeName(), "AudioService"))) return false;
             for (int field = value.firstChild; field >= 0; field = doc.nodes[field].next) {
                 const auto& control = doc.nodes[field];
-                if (!control.key || control.key[0] == '$' || std::strcmp(control.key, "type") == 0 ||
+                if (!control.key || control.key[0] == '$' || std::strcmp(control.key, "type") == 0 || (sensor && !Bh1750Service::peerSettable(control.key)) ||
                     control.type == json::JsonType::Object || control.type == json::JsonType::Array || control.type == json::JsonType::Null) return false;
             }
         }

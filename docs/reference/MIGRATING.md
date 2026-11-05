@@ -34,7 +34,7 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ### BLE `ambient` reads the light sensor, and `get` leaves it out
 
-**Action: *read `ambient`* in a BLE client that showed the automatic brightness switch.** The `ambient` operation answers the sensor's switch, its lux reading, the target brightness and the response curve. `get` carries `on`, `brightness`, `palette` and `wifiEnabled`. An app build that reads `ambientTarget` or `ambient` from `get` shows no automatic brightness switch over BLE.
+**Action: *read `ambient`* in a BLE client that showed the automatic brightness switch.** The `ambient` operation answers the sensor's switch, its lux reading, the target brightness and the response curve. `get` carries `on`, `brightness`, `palette` and `wifiEnabled`. An app build that reads `ambientTarget` or `ambient` from `get` shows no automatic brightness switch over BLE. A BLE `patch` reaches the sensor's switch and curve; its bus, pins, address and `enabled` answer `scope`.
 
 ### A single-strip NEBULITE drives every LED socket, and earlier boards get the NEBULITE looks
 
