@@ -1,6 +1,7 @@
 dependencies:
+  # Pinned to the tested minor: the lock is not committed, and 1.15.0 fails the S3 build under GCC 15.2 (mdns_receive.c strncpy, -Werror=stringop-truncation).
   espressif/mdns:
-    version: "*"
+    version: "~1.14.1"
   joltwallet/littlefs:
     version: "^1.16.0"
   improv/improv:
