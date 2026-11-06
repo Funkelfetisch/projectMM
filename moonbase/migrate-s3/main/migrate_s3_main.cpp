@@ -166,11 +166,12 @@ bool powerReady() {
     channel.bitwidth = ADC_BITWIDTH_DEFAULT;
     bool ok = adc_oneshot_config_channel(adc, ADC_CHANNEL_4, &channel) == ESP_OK;
     adc_cali_handle_t calibration = nullptr;
-    adc_cali_line_fitting_config_t config{};
+    adc_cali_curve_fitting_config_t config{};
     config.unit_id = init.unit_id;
+    config.chan = ADC_CHANNEL_4;
     config.atten = channel.atten;
     config.bitwidth = channel.bitwidth;
-    ok = ok && adc_cali_create_scheme_line_fitting(&config, &calibration) == ESP_OK;
+    ok = ok && adc_cali_create_scheme_curve_fitting(&config, &calibration) == ESP_OK;
     uint32_t totalMv = 0;
     for (int sample = 0; ok && sample < 16; ++sample) {
         int raw = 0, mv = 0;
@@ -178,7 +179,7 @@ bool powerReady() {
              adc_cali_raw_to_voltage(calibration, raw, &mv) == ESP_OK && mv > 0;
         if (ok) totalMv += static_cast<uint32_t>(mv);
     }
-    if (calibration) adc_cali_delete_scheme_line_fitting(calibration);
+    if (calibration) adc_cali_delete_scheme_curve_fitting(calibration);
     adc_oneshot_del_unit(adc);
     if (!ok) return false;
     const uint32_t batteryMv = batteryMillivolts(totalMv / 16);

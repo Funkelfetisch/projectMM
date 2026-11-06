@@ -12,12 +12,23 @@ import build_esp32  # noqa: E402
 import moonbase_images  # noqa: E402
 
 
-@pytest.mark.parametrize("size", [1, 2093056])
-def test_the_wled_upload_budget_includes_its_exact_limit(tmp_path, size):
-    image = tmp_path / "migrator.bin"
-    with image.open("wb") as out:
+def esp_image(path, size, chip=9):
+    """An ESP app image header naming `chip`, padded to `size` bytes."""
+    header = bytes([0xE9, 3, 2, 0x3F]) + bytes(8) + chip.to_bytes(2, "little")
+    with path.open("wb") as out:
+        out.write(header[:size])
         out.truncate(size)
-    assert moonbase_images.check_s3_migrate_size(image) == size
+    return path
+
+
+@pytest.mark.parametrize("size", [64, 2093056])
+def test_the_wled_upload_budget_includes_its_exact_limit(tmp_path, size):
+    assert moonbase_images.check_s3_migrate_size(esp_image(tmp_path / "migrator.bin", size)) == size
+
+
+def test_a_migrator_built_for_another_chip_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="not an ESP32-S3 image"):
+        moonbase_images.check_s3_migrate_size(esp_image(tmp_path / "migrator.bin", 4096, chip=0))
 
 
 @pytest.mark.parametrize("size", [0, 2093057])
@@ -49,7 +60,7 @@ def migration_build(monkeypatch, tmp_path):
         build_dir.mkdir(exist_ok=True)
         (build_dir / "CMakeCache.txt").touch()
         if cmd[-1] == "build":
-            (build_dir / moonbase_images.S3_MIGRATE_BIN).write_bytes(b"S3")
+            esp_image(build_dir / moonbase_images.S3_MIGRATE_BIN, 64)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(moonbase_images.subprocess, "run", run)
@@ -65,11 +76,11 @@ def test_the_s3_build_embeds_only_the_product_table_and_records_its_defaults(mig
     args = calls[-1][0]
     assert f"-DTABLE_BIN={app}/partition_table/partition-table.bin" in args
     assert "-DPROJECT_VER=7.0.0+dbce2f47" in args
-    assert "-DMM_MIGRATE_VARIANT=helio1" in args
+    assert "-DMM_MIGRATE_VARIANT=helio1" in args and "-DIDF_TARGET=esp32s3" in args
     assert all(not arg.startswith("-DMOONBASE_BIN=") for arg in args)
     build = root / "build" / "migrate-helio1"
     assert (build / moonbase_images.sdkconfig_fragments.RECORD).is_file()
-    assert "2093054 bytes below WLED's upload limit" in capsys.readouterr().out
+    assert "2092992 bytes below WLED's upload limit" in capsys.readouterr().out
 
 
 def test_a_changed_pause_regenerates_the_rehearsal_config_only(migration_build):

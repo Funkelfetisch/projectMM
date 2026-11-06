@@ -21,11 +21,18 @@ S3_MIGRATE_BIN = "MoonLight-migrate-s3.bin"
 WLED_S3_UPLOAD_LIMIT = 0x200000 - 0x1000
 
 
+# The ESP image header's chip id (offset 12, little-endian): 9 is the ESP32-S3.
+ESP32S3_CHIP_ID = 9
+
+
 def check_s3_migrate_size(image: Path) -> int:
-    """Require a nonempty migration image within WLED's upload budget and return its size."""
-    size = image.stat().st_size
+    """Require an ESP32-S3 migration image within WLED's upload budget and return its size."""
+    data = image.read_bytes()
+    size = len(data)
     if not 0 < size <= WLED_S3_UPLOAD_LIMIT:
         raise ValueError(f"S3 migration image is {size} bytes; WLED accepts 1..{WLED_S3_UPLOAD_LIMIT}")
+    if size < 14 or data[0] != 0xE9 or int.from_bytes(data[12:14], "little") != ESP32S3_CHIP_ID:
+        raise ValueError(f"{image} is not an ESP32-S3 image; its build directory was configured for another chip")
     return size
 
 
@@ -85,7 +92,8 @@ def build_migrate(cmd: list[str], env: dict, chip: str, app_build_dir: Path, pau
     build_dir = ROOT / "build" / (f"migrate-{name}-pause" if pause else f"migrate-{name}")
     moonbase_bin = ROOT / "build" / f"moonbase-{chip}" / MOONBASE_BIN
     table_bin = app_build_dir / "partition_table" / "partition-table.bin"
-    b_arg = ["-B", str(build_dir), f"-DSDKCONFIG={build_dir}/sdkconfig", f"-DTABLE_BIN={table_bin}"]
+    # The target on every call, not only at set-target: a set-target that failed leaves a cache behind, and a later reconfigure would fall back to IDF's default chip.
+    b_arg = ["-B", str(build_dir), f"-DSDKCONFIG={build_dir}/sdkconfig", f"-DTABLE_BIN={table_bin}", f"-DIDF_TARGET={chip}"]
     if s3:
         b_arg += [f"-DPROJECT_VER={compute_version.compute('local', '')}+{build_id()}", f"-DMM_MIGRATE_VARIANT={variant}"]
     else:
