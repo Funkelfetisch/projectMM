@@ -12,6 +12,7 @@ add_executable(mm_tests
     unit/core/unit_BleRemoteService.cpp
     unit/light/unit_HelioRemoteService.cpp
     unit/light/unit_NebuliteS3Power.cpp
+    unit/light/unit_ProductBoot.cpp
     unit/light/unit_MiniLedPowerSequence.cpp
     unit/core/unit_BleAdvertisement.cpp
     unit/core/unit_PresetStore.cpp

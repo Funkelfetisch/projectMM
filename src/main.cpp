@@ -153,7 +153,7 @@
 #include "platform/platform.h"
 #include "core/util/build_info.h"
 #include "helio/HelioAudioMigration.h"
-#include "helio/NebuliteS3Power.h"   // the battery controller holds its own power
+#include "helio/ProductBoot.h"   // a product board's unclaimed pins and a garment's radio defaults
 #include "core/services/BleControlService.h"
 #include "helio/BleSceneCatalog.h"
 #include "helio/BleProductProfiles.h"
@@ -166,7 +166,6 @@
 #include "core/util/PresetTemplates.h"
 
 #include <cstdio>
-#include <initializer_list>
 #include <cstdlib>
 #include <cstring>
 
@@ -198,9 +197,10 @@ static void printModuleMetrics(mm::MoonModule* mod, int depth) {
 }
 
 /// The board pins a product firmware settles before any module starts, as the pads read back: their wiring is otherwise invisible, since no module claims them.
-static void printBoardPins(std::initializer_list<uint8_t> pins) {
+static void printBoardPins(const mm::helio::BoardPins& pins) {
     std::printf("Board pins:");
-    for (const uint8_t gpio : pins) {
+    for (uint8_t i = 0; i < pins.count; ++i) {
+        const uint8_t gpio = pins.gpio[i];
         const auto pin = mm::platform::gpioLiveState(gpio);
         std::printf(" GPIO%u %s%s%s%s", static_cast<unsigned>(gpio), pin.level ? "HIGH" : "LOW", pin.output ? " out" : "",
                     pin.pullUp ? " pull-up" : "", pin.pullDown ? " pull-down" : "");
@@ -225,21 +225,8 @@ static int savedHelioAudioMode() {
 }
 
 void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
-    // The classic NEBULITE board hangs a buzzer's NPN base on GPIO5 through 100 Ohm, and GPIO5 leaves reset with its weak pull-up on, so the buzzer draws a standing current that warms the board until something claims the pin.
-    if (std::strcmp(mm::kFirmwareName, "nebulite-esp32") == 0) {
-        constexpr uint8_t kNebuliteClassicBuzzerGpio = 5;
-        mm::platform::gpioPreloadLowOutput(kNebuliteClassicBuzzerGpio);
-        // Veit's rule for the classic garments: GPIO2 (a strap pin, wired to the TOUCH2 pad) is pulled down, an input held low rather than driven.
-        constexpr uint8_t kNebuliteClassicStrapGpio = 2;
-        mm::platform::gpioInputBegin(kNebuliteClassicStrapGpio, mm::platform::GpioPull::Down);
-        printBoardPins({kNebuliteClassicBuzzerGpio, kNebuliteClassicStrapGpio});
-    }
-    // A battery controller holds its own power on, before anything else.
-    if (std::strcmp(mm::kFirmwareName, "nebulite-s3") == 0) {
-        using mm::helio::NebuliteS3Power;
-        NebuliteS3Power::hold();
-        printBoardPins({NebuliteS3Power::kProbeGpio, NebuliteS3Power::kEnableGpio, NebuliteS3Power::kMainEnableGpio});
-    }
+    // A product board's unclaimed pins settle before anything else, a battery controller's power hold among them.
+    if (const auto board = mm::helio::settleBoard(mm::kFirmwareName); board.count) printBoardPins(board);
     mm::registerModuleTypes();
     mm::Scheduler scheduler;
     const bool helioProduct = std::strcmp(mm::kFirmwareName, "helio1") == 0;
@@ -340,11 +327,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     auto* networkModule = static_cast<mm::NetworkModule*>(top("NetworkModule"));
     networkModule->setScheduler(&scheduler);
     networkModule->allowWifiToggle(productFirmware);
-    // A garment is worn on a battery and reached by its app over BLE, so it boots with the radio down, and sleeps it between beacons once the owner turns it on for an update or a venue. HELIO stays on the mains and keeps both as they were.
-    if (nebuliteProduct) {
-        networkModule->setWifiDefaultEnabled(false);
-        networkModule->setWifiPowerSaveDefault(true);
-    }
+    mm::helio::applyNetworkDefaults(*networkModule, mm::kFirmwareName);
     networkModule->setSystemModule(systemModule);
     networkModule->setEthernet(static_cast<mm::EthernetModule*>(wired(networkModule, "EthernetModule")));
     networkModule->setWiFi(static_cast<mm::WiFiModule*>(wired(networkModule, "WiFiModule")));

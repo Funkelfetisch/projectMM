@@ -229,7 +229,7 @@ TEST_CASE("a garment boots with its radio down, and a saved choice still outrank
     {
         WiFiNetwork w;
         w.net.allowWifiToggle(true);
-        // What main.cpp does for a NEBULITE firmware, before the load phase.
+        // A garment's defaults (helio::applyNetworkDefaults), set before the load phase.
         w.net.setWifiDefaultEnabled(false);
         w.net.setWifiPowerSaveDefault(true);
         w.net.defineControls();

@@ -211,5 +211,6 @@ bool gpioHold(uint8_t gpio) {
 
 void setTestGpioLevel(uint8_t, bool) {}
 void clearTestGpioLevel() {}
+bool testGpioInputPull(uint8_t, GpioPull&) { return false; }
 
 }  // namespace mm::platform

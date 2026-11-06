@@ -1630,6 +1630,8 @@ bool gpioPreloadLowOutput(uint8_t gpio);
 void setTestGpioLevel(uint8_t gpio, bool level);
 /// Drop every injected level and hold, as a power cycle does.
 void clearTestGpioLevel();
+/// The pull the last gpioInputBegin set on one pin; false while no input was begun there since the last clearTestGpioLevel.
+bool testGpioInputPull(uint8_t gpio, GpioPull& pull);
 
 /// Read one ADC pin as a raw count; false on an unsupported pin, contention or read failure, leaving the output unchanged.
 bool adcRead(uint8_t gpio, uint16_t& raw);

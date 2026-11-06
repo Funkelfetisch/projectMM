@@ -2922,12 +2922,14 @@ constexpr uint8_t kMaxGpio = 48;
 std::atomic<bool> g_gpioLevel[kMaxGpio] = {};   // a sensor worker and a render-side input may share the pin
 std::atomic<bool> g_gpioHeld[kMaxGpio] = {};    // a held pad keeps its level, as the ESP32's pad hold does
 std::atomic<bool> g_gpioWired[kMaxGpio] = {};   // an injected level is a wire that beats the internal pull
+std::atomic<uint8_t> g_gpioPull[kMaxGpio] = {};  // the pull an input was begun with, plus one; zero while none was
 }
 
 bool gpioInputBegin(uint8_t gpio, GpioPull pull) {
     if (gpio >= kMaxGpio) return false;
     // The PULL sets the resting level as on a board: pull-up idles HIGH, pull-down LOW. Otherwise an active-low button reads as HELD. A level a test injected is a wire, which the pull does not move.
     if (!g_gpioWired[gpio]) g_gpioLevel[gpio] = (pull == GpioPull::Up);
+    g_gpioPull[gpio] = static_cast<uint8_t>(static_cast<uint8_t>(pull) + 1);
     return true;
 }
 
@@ -2959,6 +2961,13 @@ void clearTestGpioLevel() {
     for (auto& b : g_gpioLevel) b = false;
     for (auto& h : g_gpioHeld) h = false;
     for (auto& w : g_gpioWired) w = false;
+    for (auto& p : g_gpioPull) p = 0;
+}
+
+bool testGpioInputPull(uint8_t gpio, GpioPull& pull) {
+    if (gpio >= kMaxGpio || !g_gpioPull[gpio]) return false;
+    pull = static_cast<GpioPull>(g_gpioPull[gpio] - 1);
+    return true;
 }
 
 // --- ADC ---
