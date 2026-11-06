@@ -267,6 +267,7 @@ FIRMWARES: dict[str, dict] = {
         "ships": False,
         "installable": False,
         "product": True,
+        "legacyUpdater": True,   # installed through the 2021 BLE updater: see pad_for_legacy_updater
     },
     "nebulite-s3": {
         "chip": "esp32s3",
@@ -801,6 +802,22 @@ def build_dir_for(firmware: str) -> Path:
     return ROOT / "build" / f"esp32-{firmware}"
 
 
+# The 2021 NEBULITE BLE updater ends an update on the first packet shorter than its full packet, which the Jul 2021
+# stock build fixes at 512 bytes, so an image whose size is a multiple of 512 never finishes there. Bytes past an
+# image's own hash are never read: the bootloader and esp_ota_end measure an image by its segment headers.
+LEGACY_UPDATER_PACKET = 512
+LEGACY_UPDATER_PAD = 16   # keeps the 16-byte alignment the image already has
+
+
+def pad_for_legacy_updater(image: Path) -> bool:
+    """Append LEGACY_UPDATER_PAD erased-flash bytes when the image would end on a full 2021 updater packet; True when it padded."""
+    if image.stat().st_size % LEGACY_UPDATER_PACKET:
+        return False
+    with image.open("ab") as out:
+        out.write(b"\xff" * LEGACY_UPDATER_PAD)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="ESP32 chip type (legacy; derived from --firmware)")
@@ -920,6 +937,8 @@ def main():
     # The flash/RAM summary, read from the linker map: `idf.py size` builds again first, and the build stamp would relink the image a second time.
     subprocess.run([cmd[0], "-m", "esp_idf_size", str(build_dir / "MoonLight.map")], cwd=ESP32_DIR, env=env)
 
+    if FIRMWARES[firmware].get("legacyUpdater") and pad_for_legacy_updater(build_dir / APP_BIN):
+        print(f"{APP_BIN} padded by {LEGACY_UPDATER_PAD} bytes, so the 2021 BLE updater's last packet is a short one.")
     if FIRMWARES[firmware].get("moonbase"):
         build_moonbase(cmd, env, chip, args.version)
     if FIRMWARES[firmware].get("migrate"):
