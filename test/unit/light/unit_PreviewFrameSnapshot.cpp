@@ -1,11 +1,17 @@
 /// @module PreviewDriver
+/// @also RmtLedDriver, PwmLightDriver
 
 /// The BLE preview frame: a pull snapshot that pages out one captured frame, pinned by its revision.
 #include "doctest.h"
 #include "core/module/MoonModule.h"
+#include "light/drivers/FixtureProfilesModule.h"
+#include "light/drivers/PreviewDriver.h"
 #include "light/drivers/PreviewFrameSnapshot.h"
+#include "light/drivers/PwmLightDriver.h"
+#include "light/drivers/RmtLedDriver.h"
 
 #include <string>
+#include <vector>
 
 using namespace mm;
 
@@ -39,7 +45,7 @@ std::string revisionOf(const Page& p) {
 /// A snapshot holding a frame captured at `capturedAt`: the first request asks for it, the encode task takes it.
 void capture(PreviewFrameSnapshot& snapshot, const Source& source, uint32_t capturedAt) {
     CHECK(page(snapshot, 0, nullptr, capturedAt).error == "frame-pending");
-    snapshot.captureIfRequested(&source.buffer, kNoWhite, capturedAt);
+    snapshot.captureIfRequested(&source.buffer, kNoWhite, PreviewOutputMap{}, capturedAt);
 }
 } // namespace
 
@@ -103,4 +109,48 @@ TEST_CASE("a retired frame is pending for a new request and for a continuation a
     snapshot.invalidate();
     CHECK(page(snapshot, 32, revision.c_str(), 1100).error == "frame-pending");
     CHECK(page(snapshot, 0, nullptr, 1100).error == "frame-pending");
+}
+
+TEST_CASE("a garment's preview frame shows what each output emits: the RGB strips their colour, the white accent its white") {
+    FixtureProfilesModule fixtures; fixtures.setup();
+    MoonModule drivers; drivers.setName("Drivers");
+    auto* preview = new PreviewDriver(); preview->setTypeName("PreviewDriver"); drivers.addChild(preview);
+    // A candle scene on the four-channel layer: orange with white on every light.
+    Buffer source; source.allocate(9, 4);
+    for (uint16_t i = 0; i < 9; ++i) { uint8_t* px = source.data() + i * 4; px[0] = 255; px[1] = 120; px[2] = 0; px[3] = 200; }
+    // The Croptop S3's shape: a strip of 8 mirrored on four RGB outputs, each window running to the end of the buffer as the profile sets it, and a white accent as light 8.
+    std::vector<RmtLedDriver*> strips;
+    const char* pins[] = {"36", "35", "48", "34"};
+    for (const char* pin : pins) {
+        auto* strip = new RmtLedDriver(); strip->setTypeName("RmtLedDriver"); strip->setName(pin);
+        strip->setDefaultCorrection("RGB", WhiteMode::None); strip->rebuildControls(); strip->rebuildCorrection(255);
+        std::snprintf(strip->pins, sizeof(strip->pins), "%s", pin);
+        std::snprintf(strip->ledsPerPin, sizeof(strip->ledsPerPin), "%s", "8");
+        strip->setWindow(0, 0); strip->setSourceBuffer(&source); strip->prepare();
+        drivers.addChild(strip); strips.push_back(strip);
+        REQUIRE(strip->lightsDriven() == 8);
+    }
+    auto* accent = new PwmLightDriver(); accent->setTypeName("PwmLightDriver"); accent->setName("Accent");
+    accent->setDefaultCorrection("White", WhiteMode::None); accent->rebuildControls(); accent->rebuildCorrection(255);
+    accent->setWindow(8, 1); drivers.addChild(accent);
+    REQUIRE(accent->correction().offWhite != Correction::kAbsent);
+    preview->setSourceBuffer(&source);
+    preview->bleFrame().reserve(9);
+    CHECK(page(preview->bleFrame(), 0, nullptr, 100).error == "frame-pending");
+    preview->tick();
+    const Page frame = page(preview->bleFrame(), 0, nullptr, 100);
+    REQUIRE(frame.error.empty());
+    // Lights 0-7 as the strips emit them, orange without white; light 8 as the accent emits it, white without colour.
+    std::string expected;
+    for (int i = 0; i < 8; ++i) expected += "ff7800";
+    expected += "c8c8c8";
+    CHECK(frame.text.find("\"rgb\":\"" + expected + "\"") != std::string::npos);
+
+    // With the strips off, lights 0-7 have no output, and the preview shows them as composed, white included.
+    for (auto* strip : strips) strip->setEnabled(false);
+    CHECK(page(preview->bleFrame(), 0, nullptr, 200).error.empty());   // the last page asks for the next frame
+    preview->tick();
+    CHECK(page(preview->bleFrame(), 0, nullptr, 200).text.find("\"rgb\":\"ffffc8") != std::string::npos);
+    preview->setSourceBuffer(nullptr);
+    for (auto* strip : strips) strip->setSourceBuffer(nullptr);
 }

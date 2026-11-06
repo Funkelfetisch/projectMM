@@ -2,6 +2,7 @@
 
 #include "core/util/JsonSink.h"
 #include "core/util/ScratchBuffer.h"
+#include "light/drivers/PreviewOutputMap.h"
 #include "light/layers/Buffer.h"
 #include <atomic>
 #include <cstdint>
@@ -32,8 +33,8 @@ public:
         lock_.clear(std::memory_order_release);
         invalidate();
     }
-    /// Called only on the encode task while its source frame is stable.
-    void captureIfRequested(const Buffer* source, const uint8_t whitePoint[3], uint32_t now) {
+    /// Called only on the encode task while its source frame is stable; each light shows the channels `outputs` says its outputs emit.
+    void captureIfRequested(const Buffer* source, const uint8_t whitePoint[3], const PreviewOutputMap& outputs, uint32_t now) {
         if (!requested_.exchange(false, std::memory_order_acq_rel)) return;
         if (lock_.test_and_set(std::memory_order_acquire)) { requested_.store(true, std::memory_order_release); return; }
         capturedGeneration_ = generation_.load(std::memory_order_relaxed);
@@ -45,8 +46,10 @@ public:
             const uint8_t* data = source->data(); const auto channels = source->channelsPerLight();
             for (uint16_t i = 0; i < count_; ++i) for (uint8_t c = 0; c < 3; ++c) {
                 const uint8_t* pixel = data + static_cast<size_t>(i) * channels;
-                const uint16_t white = channels >= 4 ? pixel[3] : 0;
-                const uint16_t value = pixel[c] + (white * whitePoint[c] + 127) / 255;
+                const uint8_t emitted = outputs.channels(i);
+                const uint16_t colour = emitted & PreviewOutputMap::kColour ? pixel[c] : 0;
+                const uint16_t white = channels >= 4 && (emitted & PreviewOutputMap::kWhite) ? pixel[3] : 0;
+                const uint16_t value = colour + (white * whitePoint[c] + 127) / 255;
                 pixels_.data()[i * 3 + c] = static_cast<uint8_t>(value > 255 ? 255 : value);
             }
         }

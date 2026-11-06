@@ -204,7 +204,8 @@ public:
 
     /// Serve a requested table, then stream one frame on @xref{its-own-channel-and-why|its own channel} if the previous one finished draining; blocking, since the socket write and the resize are real.
     void tick() MM_NONBLOCKING override {
-        bleFrame_.captureIfRequested(sourceBuffer_, whitePoint_, platform::millis());
+        readOutputWindows();
+        bleFrame_.captureIfRequested(sourceBuffer_, whitePoint_, outputs_, platform::millis());
         // The PULL model: no standing request means no gather, no send, nothing at all.
         if (!broadcaster_) return;
         nrOfLightsType wantStride = 0;
@@ -490,17 +491,19 @@ public:
         struct ColCtx {
             uint8_t* out; size_t at; const uint8_t* src; nrOfLightsType n; uint8_t cpl;
             const uint8_t* whitePoint;
+            const PreviewOutputMap* outputs;
             void emit(nrOfLightsType idx) {
                 const uint8_t* px = (idx < n) ? src + static_cast<size_t>(idx) * cpl : nullptr;
-                const uint8_t white = px && cpl >= 4 ? px[3] : 0;
+                const uint8_t emitted = outputs->channels(idx);
+                const uint8_t white = px && cpl >= 4 && (emitted & PreviewOutputMap::kWhite) ? px[3] : 0;
                 for (uint8_t channel = 0; channel < 3; channel++) {
-                    const uint16_t rgb = px && cpl > channel ? px[channel] : 0;
+                    const uint16_t rgb = px && cpl > channel && (emitted & PreviewOutputMap::kColour) ? px[channel] : 0;
                     const uint16_t lit = rgb + (static_cast<uint16_t>(white) * whitePoint[channel] + 127) / 255;
                     out[at++] = static_cast<uint8_t>(lit > 255 ? 255 : lit);
                 }
             }
         };
-        ColCtx col{staging_, 0, src, n, cpl, whitePoint_};
+        ColCtx col{staging_, 0, src, n, cpl, whitePoint_, &outputs_};
         if (denseGrid()) {
             const lengthType W = layer_->physicalWidth(), H = layer_->physicalHeight();
             const lengthType az = layer_->physicalDepth() > 0 ? layer_->physicalDepth() : 1;
@@ -530,6 +533,28 @@ public:
 
 private:
     uint8_t whitePoint_[3] = {255, 255, 255};
+    PreviewOutputMap outputs_;
+    /// Read which lights each sibling output drives and which channels it emits; a few comparisons per output, so a fixture or window change shows on the next frame.
+    void readOutputWindows() {
+        outputs_.clear();
+        MoonModule* drivers = parent();
+        if (!drivers || !sourceBuffer_) return;
+        const nrOfLightsType n = sourceBuffer_->count();
+        for (uint8_t i = 0; i < drivers->childCount(); ++i) {
+            const MoonModule* child = drivers->child(i);
+            if (child == this || child->role() != ModuleRole::Driver || !child->enabled() || !std::strcmp(child->typeName(), typeName())) continue;
+            const auto* output = static_cast<const DriverBase*>(child);
+            nrOfLightsType start = 0, length = 0;
+            output->windowSlice(n, start, length);
+            // A strip sends only the lights it drives, such as its ledsPerPin inside a window that runs to the end of the buffer.
+            const int32_t driven = output->lightsDriven();
+            if (driven >= 0 && static_cast<nrOfLightsType>(driven) < length) length = static_cast<nrOfLightsType>(driven);
+            const Correction& c = output->correction();
+            const bool colour = c.offRed != Correction::kAbsent || c.offGreen != Correction::kAbsent || c.offBlue != Correction::kAbsent;
+            outputs_.add(start, length, static_cast<uint8_t>((colour ? PreviewOutputMap::kColour : 0) |
+                                                             (c.offWhite != Correction::kAbsent ? PreviewOutputMap::kWhite : 0)));
+        }
+    }
     /// Free the preview buffers, cancelling any in-flight send so no drain outlives its buffer.
     void freePreviewBuffers() {
         if (broadcaster_) broadcaster_->cancelBufferedSend();

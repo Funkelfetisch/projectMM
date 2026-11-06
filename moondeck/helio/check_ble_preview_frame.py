@@ -15,9 +15,10 @@ int main() {
  mm::Scheduler scheduler;
  auto* root=new mm::MoonModule();root->setName("Drivers");root->setTypeName("Drivers");
  auto* preview=new mm::PreviewDriver();preview->setTypeName("PreviewDriver");root->addChild(preview);scheduler.addModule(root);
+ // prepare() sizes the BLE frame copy on a device; reserve() stands in for it beside each source.
  mm::Buffer data;if(!data.allocate(65,4))return 2;
  for(int i=0;i<65;i++){data.data()[i*4]=i;data.data()[i*4+1]=2*i;data.data()[i*4+2]=3*i;data.data()[i*4+3]=10;}
- preview->setPreviewWhitePoint(255,128,0);preview->setSourceBuffer(&data);
+ preview->setPreviewWhitePoint(255,128,0);preview->setSourceBuffer(&data);preview->bleFrame().reserve(data.count());
  mm::BleControlService service;service.setScheduler(&scheduler);service.setPreviewFrameReader(&mm::BlePreviewFramePage::writeCurrent);
  service.setEpochForTest("00000000000000000000000000000001");
  service.handle(R"({"$v":1,"$id":1,"$op":"hello","$nonce":"00000000000000000000000000000002"})",mm::platform::millis());
@@ -27,18 +28,18 @@ int main() {
  std::string response(service.response());auto start=response.find("\"revision\":\"")+12;auto rev=response.substr(start,32);
  read(5,32,rev.c_str());read(6,64,rev.c_str());
  data.data()[0]=77;preview->tick();read(7,32,rev.c_str());
- read(8,0,nullptr); preview->setSourceBuffer(&data);read(9,0,nullptr);
+ read(8,0,nullptr); preview->setSourceBuffer(&data);preview->bleFrame().reserve(data.count());read(9,0,nullptr);
  mm::Buffer sphere;if(!sphere.allocate(222,3))return 3;
  for(int i=0;i<222;i++){sphere.data()[i*3]=i;sphere.data()[i*3+1]=255-i;sphere.data()[i*3+2]=42;}
- preview->setSourceBuffer(&sphere);read(10,0,nullptr);preview->tick();read(11,0,nullptr);
+ preview->setSourceBuffer(&sphere);preview->bleFrame().reserve(sphere.count());read(10,0,nullptr);preview->tick();read(11,0,nullptr);
  response=service.response();start=response.find("\"revision\":\"")+12;rev=response.substr(start,32);
  for(int offset=32;offset<222;offset+=32)read(11+offset/32,offset,rev.c_str());
  mm::Buffer oversized;if(!oversized.allocate(513,3))return 4;
- preview->setSourceBuffer(&oversized);read(18,0,nullptr);preview->tick();read(19,0,nullptr);
+ preview->setSourceBuffer(&oversized);preview->bleFrame().reserve(oversized.count());read(18,0,nullptr);preview->tick();read(19,0,nullptr);
  // MINI80 source-profile size, still a synthetic buffer and not a board test.
  mm::Buffer mini;if(!mini.allocate(52,4))return 5;
  for(int i=0;i<52;i++){mini.data()[i*4]=i;mini.data()[i*4+1]=2*i;mini.data()[i*4+2]=3*i;mini.data()[i*4+3]=10;}
- preview->setSourceBuffer(&mini);read(20,0,nullptr);preview->tick();read(21,0,nullptr);
+ preview->setSourceBuffer(&mini);preview->bleFrame().reserve(mini.count());read(20,0,nullptr);preview->tick();read(21,0,nullptr);
  response=service.response();start=response.find("\"revision\":\"")+12;rev=response.substr(start,32);
  read(22,32,rev.c_str());
  scheduler.release();

@@ -71,6 +71,17 @@ public:
     void setDefaultCurve(Correction::Curve curve) {
         curveSel_ = static_cast<uint8_t>(curve);
     }
+    /// Resolve the window against a buffer, writing the clamped first light and the length.
+    void windowSlice(nrOfLightsType bufN, nrOfLightsType& outStart,
+                     nrOfLightsType& outLen) const {
+        // The controls' lower bound keeps both at 0 or above, so they compare as unsigned.
+        const uint32_t start = static_cast<uint32_t>(start_), count = static_cast<uint32_t>(count_);
+        outStart = start < bufN ? static_cast<nrOfLightsType>(start) : bufN;
+        const nrOfLightsType avail = static_cast<nrOfLightsType>(bufN - outStart);
+        outLen = (count == 0 || count > avail) ? avail : static_cast<nrOfLightsType>(count);
+    }
+    /// How many lights from the window's start this driver sends out, as its last configuration reported: fewer than the window when a strip ends sooner, 0 while it is in error, -1 for a driver that reports none, whose whole window counts.
+    int32_t lightsDriven() const { return lightsDriven_; }
     /// Test-only: resolve the window against a buffer of `bufN` lights into its length.
     nrOfLightsType resolveWindowLenForTest(nrOfLightsType bufN) const {
         nrOfLightsType outStart = 0, outLen = 0;
@@ -316,19 +327,11 @@ protected:
         return std::strcmp(name, "start") == 0 || std::strcmp(name, "count") == 0;
     }
 
-    /// Resolve the window against a buffer, writing the clamped first light and the length.
-    void windowSlice(nrOfLightsType bufN, nrOfLightsType& outStart,
-                     nrOfLightsType& outLen) const {
-        // The controls' lower bound keeps both at 0 or above, so they compare as unsigned.
-        const uint32_t start = static_cast<uint32_t>(start_), count = static_cast<uint32_t>(count_);
-        outStart = start < bufN ? static_cast<nrOfLightsType>(start) : bufN;
-        const nrOfLightsType avail = static_cast<nrOfLightsType>(bufN - outStart);
-        outLen = (count == 0 || count > avail) ? avail : static_cast<nrOfLightsType>(count);
-    }
 
     /// The status verdicts this driver set; each is cleared only when the status still shows the one this driver set.
     const char* configErr_ = nullptr;
     const char* configWarn_ = nullptr;
+    int32_t lightsDriven_ = -1;
     char* failBuf_ = nullptr;
     /// The status buffer size: the widest verdict is the loopback's worst case, which a narrower buffer clips.
     static constexpr size_t kFailBufLen = 64;
@@ -336,9 +339,11 @@ protected:
     /// Show an error status and remember it, so clearConfigErr can later retract exactly this one.
     void setConfigErr(const char* err) {
         configErr_ = err;
+        lightsDriven_ = 0;
         setStatus(err, Severity::Error);
     }
     void clearConfigErr() {
+        lightsDriven_ = -1;   // until this parse reports what it drives
         if (configErr_) {
             if (status() == configErr_) clearStatus();
             configErr_ = nullptr;
@@ -372,6 +377,7 @@ protected:
     /// Show how many lights are driven, set last so an error or warning from earlier in the same parse still wins.
     void setDrivingInfo(unsigned driven, unsigned total, unsigned channels = 1,
                         const char* mode = nullptr) {
+        lightsDriven_ = static_cast<int32_t>(driven < total ? driven : total);
         if (char* buf = failBufEnsure()) {
             int n;
             if (channels > 1)
