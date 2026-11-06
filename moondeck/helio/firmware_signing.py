@@ -38,6 +38,9 @@ CATALOG = ROOT / "src/helio/BleSceneData.h"
 BUILT_AT = re.compile(rb"(?<=\0)[A-Z][a-z]{2} [ \d]\d \d{4} \d{2}:\d{2}:\d{2}(?=\0)")
 # esp_app_desc_t follows the 24-byte image header and the first 8-byte segment header; its version is PROJECT_VER.
 APP_DESC, APP_DESC_MAGIC = 0x20, 0xABCD5432
+# One migrator per S3 product; its target, the FNV-1a of this name, never matches an application's.
+MIGRATOR_VARIANTS = ("migrate-nebulite-s3", "migrate-helio1")
+MIGRATOR_PROJECT = b"MoonLight-migrate-s3"
 
 
 def target_of(variant: str) -> int:
@@ -128,23 +131,41 @@ def release(image: bytes, variant: str, security_version: int, key: ec.EllipticC
     """
     if not re.fullmatch(r"[0-9a-f]{8}", build):
         raise ValueError(f"a release is signed from a clean tree; this one stamps {build!r}")
-    if build.encode() + b"\0" not in image or build.encode() + b"+\0" in image:
-        raise ValueError(f"the image does not carry the clean build id {build}: it was not built from this tree")
-    built = BUILT_AT.findall(image)
-    if len(built) != 1:
-        raise ValueError(f"the image carries {len(built)} build dates, not one")
-    if image.count(b"\0" + catalog.encode() + b"\0") != 1:
-        raise ValueError(f"the image does not carry scene catalogue {catalog} exactly once")
     if len(image) < APP_DESC + 48 or struct.unpack_from("<I", image, APP_DESC)[0] != APP_DESC_MAGIC:
         raise ValueError("the image has no ESP-IDF app descriptor")
     version = image[APP_DESC + 16:APP_DESC + 48].split(b"\0", 1)[0].decode()
+    project = image[APP_DESC + 48:APP_DESC + 80].split(b"\0", 1)[0]
+    if variant in MIGRATOR_VARIANTS:
+        if (len(image) < APP_DESC + 112 or image[0] != 0xE9 or
+                struct.unpack_from("<H", image, 12)[0] != 9 or project != MIGRATOR_PROJECT):
+            raise ValueError("the S3 migrator needs an ESP32-S3 MoonLight-migrate-s3 image")
+        if not version.endswith("+" + build):
+            raise ValueError(f"the migrator descriptor does not carry the clean build id {build}")
+        # IDF's app descriptor carries the migrator's build date; the scene application has its own build_info string.
+        date = image[APP_DESC + 96:APP_DESC + 112].split(b"\0", 1)[0]
+        time = image[APP_DESC + 80:APP_DESC + 96].split(b"\0", 1)[0]
+        built_at = date + b" " + time
+        if BUILT_AT.findall(b"\0" + built_at + b"\0") != [built_at]:
+            raise ValueError("the migrator descriptor has no build date")
+        catalog = ""
+    else:
+        if project == MIGRATOR_PROJECT:
+            raise ValueError("a migrator image needs a migrate-<product> variant")
+        if build.encode() + b"\0" not in image or build.encode() + b"+\0" in image:
+            raise ValueError(f"the image does not carry the clean build id {build}: it was not built from this tree")
+        built = BUILT_AT.findall(image)
+        if len(built) != 1:
+            raise ValueError(f"the image carries {len(built)} build dates, not one")
+        built_at = built[0]
+        if not catalog or image.count(b"\0" + catalog.encode() + b"\0") != 1:
+            raise ValueError(f"the image does not carry scene catalogue {catalog} exactly once")
     digest = hashlib.sha256(image).digest()
     claims = DOMAIN + struct.pack(">III", target_of(variant), len(image), security_version) + digest
     signature = key.sign(claims, ec.ECDSA(hashes.SHA256()))
     publisher.verify(signature, claims, ec.ECDSA(hashes.SHA256()))
     r, s = utils.decode_dss_signature(signature)
     return {"family": "moonlight", "variant": variant, "version": version, "size": len(image), "sha256": digest.hex(),
-            "build": build, "builtAt": built[0].decode(), "catalog": catalog, "securityVersion": security_version,
+            "build": build, "builtAt": built_at.decode(), "catalog": catalog, "securityVersion": security_version,
             "claims": claims.hex(), "signature": (r.to_bytes(32, "big") + s.to_bytes(32, "big")).hex()}
 
 
@@ -154,7 +175,8 @@ def sign(args: argparse.Namespace) -> None:
     publisher, compiled_security = header_values()
     try:
         manifest = release(args.image.read_bytes(), args.variant, args.security_version or compiled_security,
-                           load_key(args.key), tree_build_id(), tree_catalog(), publisher)
+                           load_key(args.key), tree_build_id(),
+                           "" if args.variant in MIGRATOR_VARIANTS else tree_catalog(), publisher)
     except InvalidSignature:
         sys.exit(f"{args.key} is not the publisher key in {HEADER.relative_to(ROOT)}")
     except ValueError as failure:

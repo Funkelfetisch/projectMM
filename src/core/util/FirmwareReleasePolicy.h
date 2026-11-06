@@ -10,6 +10,8 @@
 #include <limits>
 
 namespace mm {
+/// Fixed width of the domain, three big-endian claims fields, and image SHA-256.
+inline constexpr size_t kFirmwareReleaseClaimsSize = sizeof("HELIO-FW-AUTH-V1") - 1 + 12 + 32;
 /// Experimental internal signed claims; this is not an advertised wire format. The caller must obtain the immutable target, minimum version and publisher key from trusted device state, and must handle key rotation and rollback.
 struct FirmwareReleaseClaims {
     uint32_t target = 0,           ///< The target the image is signed for.
@@ -25,8 +27,7 @@ inline bool decodeFirmwareReleaseClaims(const uint8_t* bytes, size_t size,
                                         FirmwareReleaseClaims& out) {
     static constexpr uint8_t domain[] = "HELIO-FW-AUTH-V1";
     constexpr size_t domainSize = sizeof(domain) - 1;
-    constexpr size_t payloadSize = domainSize + 12 + 32;
-    if (!bytes || !signature || size != payloadSize || signatureSize != 64 ||
+    if (!bytes || !signature || size != kFirmwareReleaseClaimsSize || signatureSize != 64 ||
         !std::equal(domain, domain + domainSize, bytes)) return false;
     const auto read32 = [](const uint8_t* p) {
         return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |

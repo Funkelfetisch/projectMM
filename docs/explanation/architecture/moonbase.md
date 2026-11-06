@@ -47,6 +47,29 @@ Everything that can reject it is therefore decided from its FIRST CHUNK, before 
 That is the image magic, the chip id, and the descriptor naming the recovery image (one of `kMoonBaseImageNames`) rather than the app.
 The chip id matters because there is one MoonBase per chip, one paste apart, and a checksum does not catch a swap. Those rules live in `src/core/util/FirmwareImage.h` so a host test can drive them. What remains is a window, during the write, in which the device holds no recovery image; the app keeps running throughout, so the answer to a failure is to retry.
 
+## From WLED
+
+A board running WLED moves to MoonLight without a cable through WLED's own update page: it installs a migration image, which rewrites the partition table and starts what comes next. Every step re-reads what the flash holds, so a power cut anywhere starts the image over, except during the one 4 KB partition-table sector write, which a cut leaves for USB recovery. `moondeck/build/wled_migration_test.py` cuts the power at each pause of the rehearsal image.
+
+On an ESP32-C3 (`moonbase/migrate`), the image writes MoonBase into the factory slot, the network WLED knew into the new filesystem, and MoonLight's table, then starts MoonBase, which installs MoonLight.
+
+### From WLED on an S3
+
+The 2025 NEBULITE S3 garments and HELIO 1 run WLED on an 8 MB table with two 2 MB app slots. MoonLight does not fit those slots. Their migration image (`moonbase/migrate-s3`, one per product) moves them to MoonLight's own dual-OTA table, `esp32s3_n8r8.csv`, so they keep MoonLight's slot-to-slot update over BLE. Its decisions live in `src/helio/S3Migration.h`, where a host test drives them:
+
+1. It refuses before writing anything, and starts WLED again, when it cannot finish:
+   - the flash is under 8 MB;
+   - flash encryption or secure boot is on;
+   - the table is not WLED's;
+   - the battery is low.
+
+   The garment image first holds the battery controller's power switch, as MoonLight does.
+2. It saves WLED's networks in NVS, which both tables place at 0x9000, while WLED's filesystem still exists.
+3. Running from WLED's second slot, it copies itself to 0x10000, inside MoonLight's first slot, and both otadata sectors keep selecting it.
+4. It receives MoonLight over HTTP, on WLED's network or on an access point with WLED's name and password. It writes MoonLight raw into 0x310000, MoonLight's second slot, and accepts only its own product's release-signed image: the claims' size and SHA-256, the publisher key, and at least the compiled security version.
+5. It writes the network into the new filesystem, then MoonLight's table at 0x8000, reads the table back, and restarts under it.
+6. Under the new table it selects MoonLight's slot and starts MoonLight.
+
 ## Telling the two images apart
 
 Each image reports its version from the app descriptor IDF puts in every binary, with `PROJECT_VER` set to the same computed version for both. The app can therefore read the factory partition's version without booting it, and say when the two were built apart. A device that cannot name its own recovery image cannot be diagnosed: two boards that looked identical, one of which could not install firmware, took a bisect of the git log to tell apart.

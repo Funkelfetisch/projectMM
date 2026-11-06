@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+find_program(MM_CCACHE ccache)
+if(MM_CCACHE)
+    set(CCACHE_ENABLE 1)
+endif()
+project(MoonLight-migrate-s3)

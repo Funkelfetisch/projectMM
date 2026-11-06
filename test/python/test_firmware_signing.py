@@ -82,3 +82,62 @@ def test_the_tree_values_come_from_the_compiled_headers():
     publisher, security = signing.header_values()
     assert isinstance(publisher, ec.EllipticCurvePublicKey) and security >= 1
     assert len(signing.tree_catalog()) == 12
+
+
+def migrator_image(project="MoonLight-migrate-s3", chip=9, build=BUILD, date="Nov  5 2026", time="01:34:04") -> bytes:
+    """An S3 migrator reports its build through the ESP-IDF descriptor, with no scene catalogue."""
+    data = bytearray(512)
+    data[0] = 0xE9
+    struct.pack_into("<H", data, 12, chip)
+    struct.pack_into("<I", data, signing.APP_DESC, signing.APP_DESC_MAGIC)
+    for offset, value in ((16, VERSION + "+" + build), (48, project), (80, time), (96, date)):
+        data[signing.APP_DESC + offset:signing.APP_DESC + offset + len(value)] = value.encode()
+    return bytes(data)
+
+
+def test_a_catalogue_free_s3_migrator_signs_for_its_own_target(key):
+    data = migrator_image()
+    manifest = signing.release(data, signing.MIGRATOR_VARIANTS[0], 1, key, BUILD, "", key.public_key())
+    assert manifest["catalog"] == ""
+    assert manifest["builtAt"] == BUILT_AT
+    claims = bytes.fromhex(manifest["claims"])
+    assert struct.unpack_from(">I", claims, len(signing.DOMAIN))[0] == signing.target_of(signing.MIGRATOR_VARIANTS[0])
+    assert manifest["sha256"] == hashlib.sha256(data).hexdigest()
+    raw = bytes.fromhex(manifest["signature"])
+    der = utils.encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+    key.public_key().verify(der, claims, ec.ECDSA(hashes.SHA256()))
+
+
+@pytest.mark.parametrize("data", [migrator_image(project="MoonLight"), migrator_image(chip=0), image()],
+                         ids=["application", "classic chip", "unidentified image"])
+def test_the_migrator_variant_refuses_another_project_or_chip(key, data):
+    with pytest.raises(ValueError, match="ESP32-S3 MoonLight-migrate-s3"):
+        signing.release(data, signing.MIGRATOR_VARIANTS[0], 1, key, BUILD, "", key.public_key())
+
+
+@pytest.mark.parametrize("variant", ["nebulite-s3", "helio1", "migrate-esp32"])
+def test_a_migrator_cannot_be_signed_as_a_product_or_another_migrator(key, variant):
+    with pytest.raises(ValueError, match="migrate-<product> variant"):
+        signing.release(migrator_image(), variant, 1, key, BUILD, CATALOG, key.public_key())
+
+
+@pytest.mark.parametrize("build", ["cc2ab293", BUILD + "+"])
+def test_a_migrator_from_a_different_or_dirty_build_is_refused(key, build):
+    with pytest.raises(ValueError, match="clean build id"):
+        signing.release(migrator_image(build=build), signing.MIGRATOR_VARIANTS[0], 1, key, BUILD, "", key.public_key())
+
+
+def test_a_migrator_with_no_descriptor_build_date_is_refused(key):
+    with pytest.raises(ValueError, match="build date"):
+        signing.release(migrator_image(date=""), signing.MIGRATOR_VARIANTS[0], 1, key, BUILD, "", key.public_key())
+
+
+def test_the_catalogue_exception_applies_only_to_the_migrator(key):
+    with pytest.raises(ValueError, match="scene catalogue"):
+        signing.release(image(catalog=""), "nebulite-s3", 1, key, BUILD, "", key.public_key())
+
+
+def test_a_migrator_still_requires_the_compiled_publisher(key):
+    with pytest.raises(InvalidSignature):
+        signing.release(migrator_image(), signing.MIGRATOR_VARIANTS[0], 1, key, BUILD, "",
+                        ec.generate_private_key(ec.SECP256R1()).public_key())

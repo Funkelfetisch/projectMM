@@ -271,6 +271,7 @@ FIRMWARES: dict[str, dict] = {
     },
     "nebulite-s3": {
         "chip": "esp32s3",
+        "migrate": True,
         "fragments": ["sdkconfig.defaults", "sdkconfig.defaults.helio1"],
         "eth_only": False,
         "description": "NEBULITE S3 bench candidate, 8 MB flash, no PSRAM, BLE and WiFi.",
@@ -280,6 +281,7 @@ FIRMWARES: dict[str, dict] = {
     },
     "helio1": {
         "chip": "esp32s3",
+        "migrate": True,
         "fragments": ["sdkconfig.defaults", "sdkconfig.defaults.helio1"],
         "eth_only": False,
         "description": "HELIO 1 — ESP32-S3, 8 MB flash, no PSRAM, WiFi and RGBW RMT output.",
@@ -942,9 +944,9 @@ def main():
     if FIRMWARES[firmware].get("moonbase"):
         build_moonbase(cmd, env, chip, args.version)
     if FIRMWARES[firmware].get("migrate"):
-        build_migrate(cmd, env, chip, build_dir)
+        build_migrate(cmd, env, chip, build_dir, variant=firmware)
         if args.migrate_pause:
-            build_migrate(cmd, env, chip, build_dir, args.migrate_pause)
+            build_migrate(cmd, env, chip, build_dir, args.migrate_pause, variant=firmware)
 
     sys.stdout.flush()  # Keep these warnings after the buffered build summary in redirected logs.
     if FIRMWARES[firmware].get("moonbase"):

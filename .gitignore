@@ -153,3 +153,5 @@ __pycache__/
 
 moonbase/migrate/managed_components/
 moonbase/migrate/dependencies.lock
+moonbase/migrate-s3/managed_components/
+moonbase/migrate-s3/dependencies.lock

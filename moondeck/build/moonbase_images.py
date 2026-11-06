@@ -16,6 +16,17 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 # MoonBase's output name, the `project()` name in moonbase/CMakeLists.txt; build_esp32.py re-exports it beside the app's.
 MOONBASE_BIN = "MoonLight-moonbase.bin"
+S3_MIGRATE_BIN = "MoonLight-migrate-s3.bin"
+# WLED's Update.begin reserves one 4 KB sector from its 2 MB OTA slot.
+WLED_S3_UPLOAD_LIMIT = 0x200000 - 0x1000
+
+
+def check_s3_migrate_size(image: Path) -> int:
+    """Require a nonempty migration image within WLED's upload budget and return its size."""
+    size = image.stat().st_size
+    if not 0 < size <= WLED_S3_UPLOAD_LIMIT:
+        raise ValueError(f"S3 migration image is {size} bytes; WLED accepts 1..{WLED_S3_UPLOAD_LIMIT}")
+    return size
 
 
 def build_moonbase(cmd: list[str], env: dict, chip: str, version: str = "") -> None:
@@ -61,23 +72,32 @@ def build_moonbase(cmd: list[str], env: dict, chip: str, version: str = "") -> N
         print(f"MoonBase image: {kb:.0f} KB")
 
 
-def build_migrate(cmd: list[str], env: dict, chip: str, app_build_dir: Path, pause: int = 0) -> None:
-    """Build the migration image for `chip` into build/migrate-<chip>, or with `pause` the rehearsal image into build/migrate-<chip>-pause.
+def build_migrate(cmd: list[str], env: dict, chip: str, app_build_dir: Path, pause: int = 0, variant: str = "") -> None:
+    """Build the migration image into build/migrate-<name>, or with `pause` the rehearsal image into build/migrate-<name>-pause.
 
-    The image a board running WLED installs through WLED's own update page: it carries this variant's partition table and MoonBase, writes both, and restarts into MoonBase (moonbase/migrate/).
-    It embeds what the app and MoonBase builds produced, so it builds after both.
+    The C3 image, named after its chip, embeds MoonBase and the app's table. An S3 image, one per product `variant` (nebulite-s3, helio1) and named after it, embeds the dual-OTA table and receives that product's signed image over HTTP.
     """
-    project = ROOT / "moonbase" / "migrate"
-    build_dir = ROOT / "build" / (f"migrate-{chip}-pause" if pause else f"migrate-{chip}")
+    s3 = chip == "esp32s3"
+    if s3 and not variant:
+        sys.exit("an S3 migration image is built for one product variant")
+    name = variant if s3 else chip
+    project = ROOT / "moonbase" / ("migrate-s3" if s3 else "migrate")
+    build_dir = ROOT / "build" / (f"migrate-{name}-pause" if pause else f"migrate-{name}")
     moonbase_bin = ROOT / "build" / f"moonbase-{chip}" / MOONBASE_BIN
     table_bin = app_build_dir / "partition_table" / "partition-table.bin"
-    b_arg = ["-B", str(build_dir), f"-DSDKCONFIG={build_dir}/sdkconfig",
-             f"-DMOONBASE_BIN={moonbase_bin}", f"-DTABLE_BIN={table_bin}"]
+    b_arg = ["-B", str(build_dir), f"-DSDKCONFIG={build_dir}/sdkconfig", f"-DTABLE_BIN={table_bin}"]
+    if s3:
+        b_arg += [f"-DPROJECT_VER={compute_version.compute('local', '')}+{build_id()}", f"-DMM_MIGRATE_VARIANT={variant}"]
+    else:
+        b_arg.append(f"-DMOONBASE_BIN={moonbase_bin}")
+    fragments = [project / "sdkconfig.defaults"]
     if pause:
         # The pause rides in a defaults file of its own, layered after the project's, so the shipped image never carries it.
         extra = build_dir.with_suffix(".defaults")
         extra.write_text(f"CONFIG_MM_MIGRATE_PAUSE_S={pause}\n")
-        b_arg.append(f"-DSDKCONFIG_DEFAULTS={project / 'sdkconfig.defaults'};{extra}")
+        fragments.append(extra)
+    b_arg.append("-DSDKCONFIG_DEFAULTS=" + ";".join(str(path) for path in fragments))
+    digest = sdkconfig_fragments.refresh(cmd + b_arg, build_dir, fragments, project, env)
     if not (build_dir / "CMakeCache.txt").exists():
         print(f"Setting migrate target to {chip}...")
         r = subprocess.run(cmd + b_arg + ["set-target", chip], cwd=project, env=env)
@@ -87,3 +107,10 @@ def build_migrate(cmd: list[str], env: dict, chip: str, app_build_dir: Path, pau
     r = subprocess.run(cmd + b_arg + ["build"], cwd=project, env=env)
     if r.returncode != 0:
         sys.exit(r.returncode)
+    sdkconfig_fragments.record(build_dir, digest)
+    if s3:
+        try:
+            size = check_s3_migrate_size(build_dir / S3_MIGRATE_BIN)
+        except (OSError, ValueError) as failure:
+            sys.exit(str(failure))
+        print(f"S3 migration image for {variant}: {size} bytes; {WLED_S3_UPLOAD_LIMIT - size} bytes below WLED's upload limit")

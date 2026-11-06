@@ -1,0 +1,6 @@
+menu "MoonLight S3 migration"
+    config MM_MIGRATE_PAUSE_S
+        int "Pause seconds at recoverable migration boundaries"
+        default 0
+        range 0 3600
+endmenu
