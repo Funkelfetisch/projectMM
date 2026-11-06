@@ -1,9 +1,11 @@
 /// @module BatteryService
-/// @also BatteryChannel
+/// @also BatteryChannel, HttpServerModule
 
 #include "doctest.h"
 #include "core/services/BatteryService.h"
 #include "core/module/StateDocument.h"
+#include "core/system/HttpServerModule.h"
+#include "http_loopback.h"
 #include "platform/platform.h"
 
 #include <cstdint>
@@ -570,4 +572,43 @@ TEST_CASE("battery gate: a late worker cannot disable a new owner's divider") {
     worker.join();
     CHECK_FALSE(lateWrite.load());
     CHECK(output.load());
+}
+
+namespace {
+/// The `battery` member of a GET /api/system reply from `scheduler`'s device.
+std::string systemBattery(mm::Scheduler& scheduler, uint16_t port) {
+    mm::HttpServerModule http; http.setScheduler(&scheduler); http.port = port; http.setup();
+    mm::platform::TcpConnection client;
+    REQUIRE(http_loopback::connectAndAccept(http, client, port));
+    const std::string request = "GET /api/system HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n";
+    REQUIRE(client.write(reinterpret_cast<const uint8_t*>(request.data()), request.size()));
+    const std::string reply = http_loopback::readUntilClosed(http, client);
+    client.close(); http.release();
+    const auto at = reply.find("\"battery\":");
+    REQUIRE(at != std::string::npos);
+    return reply.substr(at + 10, reply.size() - at - 10 - 1);   // up to the closing brace of the reply
+}
+}
+
+TEST_CASE("Wi-Fi reads the battery as BLE does: /api/system carries the battery operation's document") {
+    RestoreBatteryInputs restore;
+    {
+        // No battery service, as on today's product firmware: no packs.
+        mm::Scheduler scheduler; scheduler.setup();
+        CHECK(systemBattery(scheduler, 18131) == R"({"sampling":false,"packs":[]})");
+        scheduler.release();
+    }
+    mm::platform::setTestAdcMv(1, 1800);
+    mm::Scheduler scheduler;
+    auto* service = new mm::BatteryService(); service->setName("Battery"); service->setTypeName("BatteryService");
+    auto* channel = new mm::BatteryChannel(); configure(*channel, 1, 1);
+    REQUIRE(service->addChild(channel)); scheduler.addModule(service); scheduler.setup();
+    drain(*service);
+    mm::platform::setTestNowMs(mm::platform::millis());   // one clock for both documents
+    char expected[512]; mm::JsonSink sink(expected, sizeof(expected));
+    mm::BatteryService::writeDiscovered(sink, &scheduler, mm::platform::millis());
+    REQUIRE_FALSE(sink.overflowed());
+    CHECK(std::string(expected).find("\"packs\":[{\"id\":1") != std::string::npos);
+    CHECK(systemBattery(scheduler, 18132) == expected);
+    scheduler.release();
 }

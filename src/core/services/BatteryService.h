@@ -179,6 +179,14 @@ public:
         if (ambiguous) *ambiguous = multiple;
         return multiple ? nullptr : result;
     }
+    /// The battery document BLE `battery` and HTTP `/api/system` both answer: the one battery service's packs, an invalid configuration when several claim the role, and no packs without one.
+    static void writeDiscovered(JsonSink& sink, Scheduler* scheduler, uint32_t now) {
+        bool ambiguous = false;
+        BatteryService* battery = scheduler ? discover(*scheduler, &ambiguous) : nullptr;
+        if (battery) battery->writeJson(sink, now);
+        else if (ambiguous) sink.append("{\"sampling\":false,\"packs\":[],\"error\":\"invalid-configuration\"}");
+        else sink.append("{\"sampling\":false,\"packs\":[]}");
+    }
     /// Declare standard service identities before radio startup, without reading or driving hardware.
     platform::BleBatteryConfig batteryConfig() {
         platform::BleBatteryConfig config;

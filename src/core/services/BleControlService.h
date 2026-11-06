@@ -846,11 +846,7 @@ private:
     }
     void battery(uint16_t id) {
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr); sink.append(",\"battery\":");
-        bool ambiguous = false;
-        auto* battery = scheduler_ ? BatteryService::discover(*scheduler_, &ambiguous) : nullptr;
-        if (battery) battery->writeJson(sink, platform::millis());
-        else if (ambiguous) sink.append("{\"sampling\":false,\"packs\":[],\"error\":\"invalid-configuration\"}");
-        else sink.append("{\"sampling\":false,\"packs\":[]}");
+        BatteryService::writeDiscovered(sink, scheduler_, platform::millis());
         end(sink, id);
     }
     void profile(uint16_t id) {

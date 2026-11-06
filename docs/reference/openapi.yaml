@@ -82,7 +82,7 @@ paths:
     get:
       tags: [System]
       operationId: getSystem
-      summary: Frame rate, tick time, memory, uptime and per-module timing.
+      summary: Frame rate, tick time, memory, uptime, per-module timing and the battery.
       responses:
         "200":
           description: The device's live metrics.
@@ -751,6 +751,30 @@ components:
               heap: { type: integer }
               status: { type: string }
               severity: { type: string, enum: [status, warning, error] }
+        ui: { type: string, description: The product dashboard runtime version; empty on a generic build. }
+        battery:
+          type: object
+          description: The document the BLE `battery` operation answers, so a client reads the battery alike over either radio.
+          properties:
+            sampling: { type: boolean, description: A measurement is under way. }
+            packs:
+              type: array
+              description: The configured packs, none without a battery service.
+              items:
+                type: object
+                properties:
+                  id: { type: integer, enum: [1, 2] }
+                  sample:
+                    type: object
+                    properties:
+                      presence: { type: string, enum: [unknown, present, absent] }
+                      state: { type: string, enum: [unknown, fresh, stale] }
+                      voltageMv: { type: [integer, "null"] }
+                      percent: { type: [integer, "null"] }
+                      ageMs: { type: [integer, "null"] }
+                      estimate: { type: string }
+                  charging: { type: string, enum: [unknown] }
+            error: { type: string, enum: [invalid-configuration] }
     TypeInfo:
       type: object
       properties:

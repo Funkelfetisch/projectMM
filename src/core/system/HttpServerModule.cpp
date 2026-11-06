@@ -6,6 +6,7 @@
 
 #include "core/module/Scheduler.h"
 #include "core/module/StateDocument.h"   // PATCH /api/state applies a document through it
+#include "core/services/BatteryService.h"   // /api/system answers the battery as BLE does
 #include "core/util/hex.h"
 #include "core/util/ModuleFactory.h"
 #include "core/util/JsonUtil.h"
@@ -1664,6 +1665,9 @@ void HttpServerModule::serveSystem(platform::TcpConnection& conn) {
     sink.append("],\"ui\":");
     const bool product = kProductFirmware;
     sink.writeJsonString(product ? ui::kProductRuntimeVersion : "");
+    // The same document the BLE `battery` operation answers, so a client reads the battery alike over either radio.
+    sink.append(",\"battery\":");
+    BatteryService::writeDiscovered(sink, scheduler_, platform::millis());
     sink.append("}");
     sink.flush();
 }
