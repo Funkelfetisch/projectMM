@@ -381,6 +381,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
 
     // Drivers finds the top-level Effects itself when it prepares. Output drivers are added per board through the catalog, with the fixture-profile library and the preview wired in: @xref{why-output-drivers-are-not-boot-wired}.
     auto* drivers = static_cast<mm::Drivers*>(top("Drivers"));
+    mm::helio::applyLightDefaults(*drivers, mm::kFirmwareName);
     if (helioProduct) {
         auto* strip = createOrDie<mm::RmtLedDriver>("RmtLedDriver");
         strip->setDefaultCorrection("RGBW", mm::WhiteMode::Accurate);

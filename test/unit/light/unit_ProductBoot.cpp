@@ -4,6 +4,8 @@
 /// What a product firmware sets before any module starts, through the same calls boot makes: each board's unclaimed pins, and a garment's radio defaults.
 #include "doctest.h"
 #include "helio/ProductBoot.h"
+#include "core/module/Scheduler.h"
+#include "core/module/StateDocument.h"
 
 #include <cstring>
 
@@ -59,4 +61,26 @@ TEST_CASE("every NEBULITE garment boots with Wi-Fi off, and HELIO keeps it on") 
     CHECK_FALSE(wifiDefault("nebulite-esp32"));
     CHECK_FALSE(wifiDefault("nebulite-s3"));
     CHECK(wifiDefault("helio1"));
+}
+
+TEST_CASE("every product starts at full master brightness, a generic build stays low, and a saved brightness still wins") {
+    for (const char* firmware : {"nebulite-esp32", "nebulite-s3", "helio1"}) {
+        mm::Drivers drivers;
+        mm::helio::applyLightDefaults(drivers, firmware);
+        CHECK(drivers.brightness == 255);
+    }
+    {
+        mm::Drivers drivers;
+        const uint8_t generic = drivers.brightness;
+        mm::helio::applyLightDefaults(drivers, "esp32");
+        CHECK(drivers.brightness == generic);
+    }
+    // Boot sets the default before the load phase, so the saved file overlays it.
+    mm::Scheduler scheduler;
+    auto* drivers = new mm::Drivers(); drivers->setName("Drivers"); drivers->setTypeName("Drivers"); drivers->defineControls();
+    scheduler.addModule(drivers);
+    mm::helio::applyLightDefaults(*drivers, "nebulite-s3");
+    REQUIRE(mm::applyStateDocument(scheduler, R"({"Drivers":{"brightness":20}})", mm::StateSource::Boot).ok);
+    CHECK(drivers->brightness == 20);
+    scheduler.release();
 }

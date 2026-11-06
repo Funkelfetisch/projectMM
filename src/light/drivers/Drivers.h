@@ -144,7 +144,7 @@ public:
     }
 
     /// Global output brightness, multiplied with each driver's `localBrightness`.
-    /// @guide It starts low, so a fresh device on USB 5 V never browns out at full white.
+    /// @guide It starts low, so a fresh device on USB 5 V never browns out at full white; a NEBULITE or HELIO firmware starts it at full.
     uint8_t brightness = 20;
     /// The brightness the drivers below multiply into their own.
     uint8_t masterBrightness() const override { return brightness; }

@@ -3,6 +3,7 @@
 #include "core/system/NetworkModule.h"
 #include "core/util/build_info.h"
 #include "helio/NebuliteS3Power.h"
+#include "light/drivers/Drivers.h"
 #include "platform/platform.h"
 
 #include <cstdint>
@@ -50,6 +51,11 @@ inline void applyNetworkDefaults(NetworkModule& network, const char* firmware) {
     if (!isNebuliteFirmware(firmware)) return;
     network.setWifiDefaultEnabled(false);
     network.setWifiPowerSaveDefault(true);
+}
+
+/// Every product starts at full master brightness, the level the app's controls start at; the products ran so in WLED, with no current limit. Set before the load phase, so a saved brightness overlays it, and a generic build keeps Drivers' low start.
+inline void applyLightDefaults(Drivers& drivers, const char* firmware) {
+    if (isNebuliteFirmware(firmware) || std::strcmp(firmware, "helio1") == 0) drivers.brightness = 255;
 }
 
 } // namespace mm::helio
