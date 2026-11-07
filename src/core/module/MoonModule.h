@@ -137,6 +137,7 @@ public:
         const uint32_t before = schemaSignature();
         clearControlsRecursive();
         defineControls();
+        shrinkControlsRecursive();
         if (schemaChangedHook_ && schemaSignature() != before) schemaChangedHook_();
     }
 
@@ -198,6 +199,11 @@ public:
     void clearControlsRecursive() {
         controls_.clear();
         for (uint8_t i = 0; i < childCount_; i++) children_[i]->clearControlsRecursive();
+    }
+    /// Size every control array in the subtree to its controls, once a rebuild has declared them.
+    void shrinkControlsRecursive() {
+        controls_.shrinkToFit();
+        for (uint8_t i = 0; i < childCount_; i++) children_[i]->shrinkControlsRecursive();
     }
 
     /// Build this node's derived state for the current controls, the acquire half of the lifecycle.

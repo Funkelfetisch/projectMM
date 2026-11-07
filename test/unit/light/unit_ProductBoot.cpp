@@ -63,6 +63,14 @@ TEST_CASE("every NEBULITE garment boots with Wi-Fi off, and HELIO keeps it on") 
     CHECK(wifiDefault("helio1"));
 }
 
+TEST_CASE("the classic NEBULITE board renders its output on one core, and every other build keeps the split") {
+    for (const char* firmware : {"nebulite-esp32", "nebulite-s3", "helio1", "esp32"}) {
+        mm::Drivers drivers;
+        mm::helio::applyLightDefaults(drivers, firmware);
+        CHECK(drivers.multicore == (std::strcmp(firmware, "nebulite-esp32") != 0));
+    }
+}
+
 TEST_CASE("every product starts at full master brightness, a generic build stays low, and a saved brightness still wins") {
     for (const char* firmware : {"nebulite-esp32", "nebulite-s3", "helio1"}) {
         mm::Drivers drivers;

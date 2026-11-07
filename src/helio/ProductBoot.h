@@ -53,9 +53,11 @@ inline void applyNetworkDefaults(NetworkModule& network, const char* firmware) {
     network.setWifiPowerSaveDefault(true);
 }
 
-/// Every product starts at full master brightness, the level the app's controls start at; the products ran so in WLED, with no current limit. Set before the load phase, so a saved brightness overlays it, and a generic build keeps Drivers' low start.
+/// Products start at full brightness, as in WLED, and the classic NEBULITE board on one core; set before the load phase, so a saved value overlays either.
 inline void applyLightDefaults(Drivers& drivers, const char* firmware) {
     if (isNebuliteFirmware(firmware) || std::strcmp(firmware, "helio1") == 0) drivers.brightness = 255;
+    // With WiFi and BLE both up the classic board has no RAM to spare, and a garment's few dozen lights gain nothing from the split's task and second frame buffer.
+    if (std::strcmp(firmware, "nebulite-esp32") == 0) drivers.multicore = false;
 }
 
 } // namespace mm::helio
