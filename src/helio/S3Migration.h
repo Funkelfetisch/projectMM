@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 /// The S3 migration's decisions, pure so a host test drives them; moonbase/migrate-s3 runs them on the board.
 ///
@@ -76,6 +77,12 @@ inline BatteryVerdict batteryVerdict(uint32_t batteryMv) {
     if (batteryMv < 3000 || batteryMv > 4500) return BatteryVerdict::Unknown;
     return batteryMv < kMinimumBatteryMv ? BatteryVerdict::Low : BatteryVerdict::Allows;
 }
+
+/// The station SSID WLED writes until one is configured; WLED reads it as no network (WLED_WIFI_CONFIGURED), and a migrator joining it would scan forever and take its access point off channel.
+inline constexpr std::string_view kWledPlaceholderSsid = "Your_Network";
+
+/// Whether WLED's saved station SSID names a real network, by WLED's own rule.
+inline bool wledStationConfigured(std::string_view ssid) { return !ssid.empty() && ssid != kWledPlaceholderSsid; }
 
 /// What an upload chunk at `offset` does against the bytes already `received` of a `size`-byte image.
 enum class ChunkVerdict : uint8_t { Write, Duplicate, Offset, Length };

@@ -224,8 +224,9 @@ bool captureNetwork() {
     if (esp_vfs_littlefs_register(&config) != ESP_OK) return false;
     cJSON* settings = loadJson("/wled/cfg.json");
     cJSON* secrets = loadJson("/wled/wsec.json");
-    // A station network needs its password from wsec.json, since taking a missing one for an open network loses the board; a WLED that only ever ran its access point has neither.
+    // A station network needs its password from wsec.json, since taking a missing one for an open network loses the board; a WLED that only ever ran its access point has WLED's placeholder SSID and no password.
     bool ok = settings && copyString(firstNetwork(settings), "ssid", journal.ssid);
+    if (ok && !wledStationConfigured(journal.ssid)) journal.ssid[0] = 0;
     if (ok && journal.ssid[0]) ok = secrets && copyString(firstNetwork(secrets), "psk", journal.password);
     if (ok) {
         const auto ap = cJSON_GetObjectItemCaseSensitive(settings, "ap");

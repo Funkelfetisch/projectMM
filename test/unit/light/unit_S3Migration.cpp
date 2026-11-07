@@ -335,4 +335,10 @@ TEST_CASE("S3 migration writes the next contiguous chunk, answers a retried one,
     CHECK(migration::chunkVerdict(3 * chunk, 3 * chunk, 200, size, chunk) == ChunkVerdict::Length); // past the end
     CHECK(migration::chunkVerdict(0, 0xfffff000u, chunk, size, chunk) == ChunkVerdict::Offset);   // no wrap-around
 }
+
+TEST_CASE("S3 migration joins WLED's station network only when WLED counts it as configured") {
+    CHECK(migration::wledStationConfigured("MM-8200"));
+    CHECK_FALSE(migration::wledStationConfigured("Your_Network"));
+    CHECK_FALSE(migration::wledStationConfigured(""));
+}
 } // namespace mm
