@@ -138,7 +138,7 @@ async function run(sequence, expectedPoints, expectedRevision){
  // this says nothing about whether the app understands or authorizes OTA.
  controller.info=controller.parseInfo({...info,experimentalUpdateProbe:true});
  if(!controller.supportsConfiguredPixelMap)throw Error('unknown info field broke existing capability');
- console.log('Actual firmware profile selects the App jacket preview; 31 ordered points and stale-map restart match.');
+ console.log('Actual firmware profile selects the App jacket preview; 30 ordered points and stale-map restart match.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
 

@@ -188,7 +188,7 @@ async function main(firstModel:string,secondModel:string){
  } finally { a.stop();b.stop(); }
 }
 async function threeProducts(){
- const specifications=[{code:1,model:'HELIO 1',count:222,channels:4},{code:2,model:'HELIO MINI80',count:MINI_COUNT,channels:MINI_CHANNELS},{code:22,model:'NEBULITE Jacket S3',count:31,channels:4}];
+ const specifications=[{code:1,model:'HELIO 1',count:222,channels:4},{code:2,model:'HELIO MINI80',count:MINI_COUNT,channels:MINI_CHANNELS},{code:22,model:'NEBULITE Jacket S3',count:30,channels:3}];
  const peers=specifications.map(p=>new Firmware(p.code));
  try {
   const controllers=await Promise.all(peers.map(async (rpc,i)=>{

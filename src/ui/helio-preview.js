@@ -38,7 +38,7 @@ export function clampByte(v) {
 }
 
 // A linear effect preview, not a reconstruction of the garment's LED geometry.
-export function drawNebuliteStripPreview(canvas, time, sampler, count, excluded = []) {
+export function drawNebuliteStripPreview(canvas, time, sampler, count) {
     const context = canvas?.getContext?.("2d");
     const width = canvas?.width || 0, height = canvas?.height || 0;
     if (!context || !width || !height || typeof sampler !== "function") return false;
@@ -47,45 +47,15 @@ export function drawNebuliteStripPreview(canvas, time, sampler, count, excluded 
     context.fillRect(0, 0, width, height);
     const left = Math.round(width * 0.08), top = Math.round(height * 0.38);
     const stripWidth = Math.round(width * 0.84), stripHeight = Math.round(height * 0.24);
-    const visible = Array.from({ length: lights }, (_, i) => i).filter(i => !excluded.includes(i));
-    for (let j = 0; j < visible.length; j++) {
-        const i = visible[j];
+    for (let i = 0; i < lights; i++) {
         const color = sampler((i + 0.5) / lights, 0.5, time) || [];
         context.fillStyle = `rgb(${clampByte(color[0])}, ${clampByte(color[1])}, ${clampByte(color[2])})`;
-        const x = left + Math.round(stripWidth * j / visible.length);
-        const next = left + Math.round(stripWidth * (j + 1) / visible.length);
+        const x = left + Math.round(stripWidth * i / lights);
+        const next = left + Math.round(stripWidth * (i + 1) / lights);
         if (next > x) context.fillRect(x, top, next - x, stripHeight);
     }
     canvas.dataset.previewRenderer = "nebulite-strip-simulation";
-    canvas.setAttribute("aria-label", "Approximate animation preview on a linear RGB LED strip" +
-        (visible.length < lights ? "; separate white output not shown" : ""));
-    return true;
-}
-
-// Output rows show logical wiring, not positions on the garment.
-export function drawNebuliteOutputPreview(canvas, time, sampler, count, outputs) {
-    const context = canvas?.getContext?.('2d');
-    const width = canvas?.width || 0, height = canvas?.height || 0;
-    if (!context || !width || !height || typeof sampler !== 'function' || !Number.isInteger(count) || count < 1 ||
-        !Array.isArray(outputs) || !outputs.length || outputs.some(o => !Number.isInteger(o.start) ||
-        !Number.isInteger(o.count) || o.start < 0 || o.count < 1 || o.start + o.count > count)) return false;
-    context.fillStyle = '#05070d';
-    context.fillRect(0, 0, width, height);
-    const left = Math.round(width * 0.08), stripWidth = Math.round(width * 0.84);
-    const rowHeight = height * 0.60 / outputs.length;
-    outputs.forEach((output, row) => {
-        const top = Math.round(height * 0.20 + row * rowHeight);
-        const stripHeight = Math.max(1, Math.round(rowHeight * 0.65));
-        for (let j = 0; j < output.count; j++) {
-            const color = sampler((output.start + j + 0.5) / count, 0.5, time) || [];
-            context.fillStyle = `rgb(${clampByte(color[0])}, ${clampByte(color[1])}, ${clampByte(color[2])})`;
-            const x = left + Math.round(stripWidth * j / output.count);
-            const next = left + Math.round(stripWidth * (j + 1) / output.count);
-            if (next > x) context.fillRect(x, top, Math.max(1, next - x - 1), stripHeight);
-        }
-    });
-    canvas.dataset.previewRenderer = 'nebulite-output-simulation';
-    canvas.setAttribute('aria-label', 'Approximate animation preview of separate RGB outputs; garment geometry and separate white output not shown');
+    canvas.setAttribute("aria-label", "Approximate animation preview on a linear RGB LED strip");
     return true;
 }
 

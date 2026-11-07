@@ -58,10 +58,9 @@ test('virtual 2D setup preserves output wiring and confirms its exact chosen ras
         const virtual = productProjectionProfile(base, 'virtual2d');
         const patch = productProfilePatch(virtual, identity);
         assert.equal(patch.Layouts.ProductStrip.type, 'PixelMapLayout');
-        assert.equal(patch.Layouts.ProductStrip.points.split(';').length, name === 'NEBULITE Croptop S3' ? 9 : 31);
+        assert.equal(patch.Layouts.ProductStrip.points.split(';').length, name === 'NEBULITE Croptop S3' ? 8 : 30);
         assert.deepEqual(patch.Drivers.RGB1, productProfilePatch(base, identity).Drivers.RGB1);
-        assert.deepEqual(patch.Drivers.Accent, productProfilePatch(base, identity).Drivers.Accent);
-        if (name === 'NEBULITE Jacket S3') { assert.equal(patch.Drivers.RGB3, undefined); assert.equal(patch.Drivers.RGB4, undefined); }
+        assert.deepEqual(patch.Drivers, productProfilePatch(base, identity).Drivers);
         assert.equal(productProjection(base, modulesFor(virtual)), 'virtual2d');
         assert.equal(productProfileMatches(base, modulesFor(virtual)), true);
         assert.equal(productProfileMatches(virtual, modulesFor(base)), false);
@@ -72,13 +71,12 @@ test('virtual 2D setup preserves output wiring and confirms its exact chosen ras
 test('the provisional jacket map follows the stated bottom, top, hood and sleeves sequence', () => {
     const base = profiles.find(p => p.name === 'NEBULITE Jacket S3');
     const {points} = productProjectionPoints(base);
-    assert.equal(points.length, 31);
+    assert.equal(points.length, 30);
     assert(points.slice(0,6).every(([,y]) => y === 14));
     assert(points.slice(6,12).every(([,y]) => y === 6));
     assert(points.slice(12,18).every(([,y]) => y <= 2));
     assert(points.slice(18,24).every(([x]) => x <= 3));
     assert(points.slice(24,30).every(([x]) => x >= 17));
-    assert.deepEqual(points[30], [10,10]); // independent PWM output
 });
 test('edited point maps remain recognized but never satisfy exact setup verification', () => {
     const base = profiles.find(p=>p.name==='NEBULITE Jacket S3');
@@ -237,7 +235,7 @@ test('setup applies and verifies the selected virtual 2D profile once', async ()
     projection.value = 'virtual2d'; await projection.fire('change');
     await elements(view, 'button')[0].fire('click');
     assert.equal(written.Layouts.ProductStrip.type, 'PixelMapLayout');
-    assert.equal(written.Layouts.ProductStrip.points.split(';').length, 9);
+    assert.equal(written.Layouts.ProductStrip.points.split(';').length, 8);
     assert.equal(checked.projection, 'virtual2d');
     assert.equal(elements(view, 'button')[0].textContent, 'Setup saved');
 });

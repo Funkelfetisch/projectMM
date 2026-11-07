@@ -105,7 +105,10 @@ def main():
     models=json.loads((ROOT/'mooninstaller/deviceModels.json').read_text())
     jacket=next(model for model in models if model['name']=='NEBULITE Jacket S3')['state']['Drivers']
     assert jacket['RGB1']['type']=='RmtLedDriver' and jacket['RGB1']['start']==0 and jacket['RGB1'].get('count',0)==0 and jacket['RGB1']['fixture']=='RGB'
-    assert jacket['Accent']['type']=='PwmLightDriver' and jacket['Accent']['start']==30 and jacket['Accent']['count']==1 and jacket['Accent']['fixture']=='White'
+    # One 30-pixel string on every LED pad; the onboard LED on GPIO46 is the status LED, no output.
+    strips=[driver for name,driver in jacket.items() if name!='$patch']
+    assert all(d['type']=='RmtLedDriver' and d['start']==0 and d['ledsPerPin']=='30' and d['fixture']=='RGB' for d in strips)
+    assert sorted(d['pins'] for d in strips)==['34','35','36','48']
     code=JS
     for key,path in paths.items(): code=code.replace(key,json.dumps(str(path)),1)
     with tempfile.TemporaryDirectory(prefix='app-outputs-') as tmp:

@@ -32,6 +32,12 @@ For a device still on old firmware (no Backup button yet), the [installer page](
 
 ## v7.0.0
 
+### The S3 garments light one strip on every pad, and GPIO46 shows the connection
+
+**Action: *re-run product setup* on a Croptop S3 or a Jacket S3.** The Jacket S3 profile is now its 30-pixel string repeated on GPIO36, 35, 48 and 34 instead of three separate 30-pixel outputs, so it reports 30 lights instead of 91. Both S3 garments leave the onboard LED on GPIO46 out of the scene: the Croptop S3 reports 8 lights instead of 9. A board set up before keeps its old outputs until setup runs again.
+
+The `nebulite-s3` firmware drives GPIO46 as the Status LED service: steady while a phone or a network reaches the controller, a slow blink while it waits, a fast blink while it updates. An app that matches a garment photo by light count needs the counts 8 and 30.
+
 ### BLE `ambient` reads the light sensor, and `get` leaves it out
 
 **Action: *read `ambient`* in a BLE client that showed the automatic brightness switch.** The `ambient` operation answers the sensor's switch, its lux reading, the target brightness and the response curve. `get` carries `on`, `brightness`, `palette` and `wifiEnabled`. An app build that reads `ambientTarget` or `ambient` from `get` shows no automatic brightness switch over BLE. A BLE `patch` reaches the sensor's switch and curve; its bus, pins, address and `enabled` answer `scope`.

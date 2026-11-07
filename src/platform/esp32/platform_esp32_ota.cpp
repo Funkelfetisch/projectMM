@@ -323,7 +323,7 @@ void otaTask(void* arg) {
 
 }  // anonymous namespace
 
-bool otaBusy() { return updateGate.busy(); }
+bool otaBusy() MM_NONBLOCKING { return updateGate.busy(); }
 
 bool http_fetch_to_ota(const char* url,
                        char* statusBuf, size_t statusBufLen,

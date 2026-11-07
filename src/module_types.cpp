@@ -205,6 +205,7 @@
 #include "core/system/PinsModule.h"
 #include "core/services/AnalogService.h"
 #include "core/services/ButtonService.h"
+#include "core/services/StatusLedService.h"
 #include "core/services/GamepadService.h"
 #include "core/services/MidiService.h"
 #include "core/services/InfraredService.h"
@@ -431,6 +432,7 @@ void mm::registerModuleTypes() {
     mm::ModuleFactory::registerType<mm::TasksModule>("TasksModule", "core/system.md#tasks");
     mm::ModuleFactory::registerType<mm::PinsModule>("PinsModule", "core/system.md#pins");
     mm::ModuleFactory::registerType<mm::ButtonService>("ButtonService", "core/services.md#button");
+    mm::ModuleFactory::registerType<mm::StatusLedService>("StatusLedService", "core/services.md#status-led");
     mm::ModuleFactory::registerType<mm::GamepadService>("GamepadService", "core/services.md#gamepad");
     mm::ModuleFactory::registerType<mm::MidiService>("MidiService", "core/services.md#midi");
     mm::ModuleFactory::registerType<mm::AnalogService>("AnalogService", "core/services.md#analog");

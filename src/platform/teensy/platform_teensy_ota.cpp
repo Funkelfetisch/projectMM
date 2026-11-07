@@ -137,7 +137,7 @@ bool stageFill(Image& img) {
 }  // namespace
 
 // One board, one image: the writer is the static above, so a second begin restarts it.
-bool otaBusy() { return false; }
+bool otaBusy() MM_NONBLOCKING { return false; }
 bool otaBegin(OtaWrite& w, OtaTarget target, size_t contentLen, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut) {
     if (!statusBuf || statusBufLen == 0 || !bytesOut) return false;
     // One image and no recovery image beside it.

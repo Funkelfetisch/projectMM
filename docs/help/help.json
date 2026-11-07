@@ -90,7 +90,7 @@
     },
     "brightness": {
      "line": "Global output brightness, multiplied with each driver's `localBrightness`.",
-     "more": "It starts low, so a fresh device on USB 5 V never browns out at full white.",
+     "more": "It starts low, so a fresh device on USB 5 V never browns out at full white; a NEBULITE or HELIO firmware starts it at full.",
      "tests": [
       {
        "title": "Control a palette preset changes only the palette",
@@ -5118,6 +5118,32 @@
    "doc": "core/services.md#button",
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/ButtonService.h",
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#buttonservice"
+  },
+  "StatusLedService": {
+   "line": "One LED on a GPIO that shows whether the device is reachable: steady while a phone or a network reaches it, slow blink while it waits, fast blink while it updates.",
+   "guide": [
+    {
+     "title": "What it shows",
+     "text": "Steady while a phone holds a Bluetooth connection, the WiFi station or Ethernet is up, or a client is on the access point. A slow blink, once a second, while none is. A fast blink while a firmware update installs. Switching the lights off leaves it showing."
+    }
+   ],
+   "image": "https://moonmodules.org/MoonLight/assets/core/StatusLedService.png",
+   "controls": {
+    "pin": {
+     "line": "The GPIO of the LED; -1 drives none."
+    },
+    "level": {
+     "line": "How bright the LED is when lit."
+    },
+    "showing": {
+     "line": "What the LED shows now: connected, waiting or updating."
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#status-led",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/StatusLedService.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#statusledservice"
   },
   "GamepadService": {
    "line": "A gamepad's buttons and sticks, each driving a control through the same rows every input service uses.",

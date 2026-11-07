@@ -155,6 +155,7 @@
 #include "helio/HelioAudioMigration.h"
 #include "helio/ProductBoot.h"   // a product board's unclaimed pins and a garment's radio defaults
 #include "core/services/BleControlService.h"
+#include "core/services/StatusLedService.h"
 #include "helio/BleSceneCatalog.h"
 #include "helio/BleProductProfiles.h"
 #include "helio/BlePixelMapPage.h"
@@ -305,6 +306,15 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         ble->setFirmwareRelease(mm::kFirmwarePublisherKey, mm::kFirmwareSecurityVersion);
         ble->markWiredByCode();
         servicesModule->addChild(ble);
+
+        // The S3 controller's onboard LED shows whether the phone or a network reaches the garment; a saved pin or level overlays this one.
+        if (std::strcmp(mm::kFirmwareName, "nebulite-s3") == 0) {
+            auto* status = createOrDie<mm::StatusLedService>("StatusLedService");
+            status->setName("Status LED");
+            status->pin = mm::helio::NebuliteS3Board::kStatusLedGpio;
+            status->markWiredByCode();
+            servicesModule->addChild(status);
+        }
 
         auto* remote = createOrDie<mm::HelioRemoteService>("HelioRemoteService");
         remote->setName("Remote");

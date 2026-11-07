@@ -8,7 +8,6 @@ import {
     audioBand,
     clampByte,
     controlValue,
-    drawNebuliteOutputPreview,
     drawNebuliteStripPreview,
     hash01,
     helioScenePreviewColor,
@@ -40,7 +39,7 @@ import { helioSceneControlMetadata } from "./helio-scene-controls.js";
 import { createPresetClient } from "./helio-presets.js";
 import { HelioPresetCards } from "./helio-preset-cards.js";
 import { NEBULITE_SETUP_PROFILES } from "./nebulite-profile-data.js";
-import { nebuliteProductArt, productProfileMatches, productProjection, productProjectionPoints, productProjectionProfile, renderProductSetup } from "./nebulite-setup.js";
+import { nebuliteProductArt, productProfileMatches, productProjection, productProjectionPoints, renderProductSetup } from "./nebulite-setup.js";
 import { drawHistoricalCroptop, whenHistoricalCroptopReady } from "./nebulite-croptop-preview.js";
 import { drawJacketPreview, whenJacketPreviewReady } from "./nebulite-jacket-preview.js";
 import { nebuliteLiveSampler } from "./nebulite-live-preview.js";
@@ -2099,7 +2098,7 @@ function requestNebulitePreviewMetadata() {
 }
 
 function refreshHistoricalCroptopPreviews() {
-    document.querySelectorAll('.helio-mode-preview[data-preview-renderer="nebulite-strip-simulation"], .helio-mode-preview[data-preview-renderer="nebulite-output-simulation"], .helio-mode-preview[data-preview-renderer="historical-croptop-simulation"], .helio-mode-preview[data-preview-renderer="jacket-30-simulation"]').forEach(canvas => {
+    document.querySelectorAll('.helio-mode-preview[data-preview-renderer="nebulite-strip-simulation"], .helio-mode-preview[data-preview-renderer="historical-croptop-simulation"], .helio-mode-preview[data-preview-renderer="jacket-30-simulation"]').forEach(canvas => {
         clearHelioPreviewRenderState(canvas);
     });
     startHelioModePreviews();
@@ -2132,11 +2131,7 @@ function drawHelioCardTracePreview(canvas, t, sampler, ledCount = helioCurrentCo
         const model = controlValue(findModule("System"), "deviceModel", "");
         const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
         if (model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" || model === "NEBULITE Jacket S3") requestNebulitePreviewMetadata();
-        const accent = profile && productProfileMatches(profile, state?.modules || [])
-            ? profile.state.Drivers?.Accent : null;
-        const whiteSlot = accent?.type === "PwmLightDriver" && accent.fixture === "White" &&
-            accent.count === 1 && Number.isInteger(accent.start) && accent.start >= 0 && accent.start < ledCount
-            ? [accent.start] : [];
+        const matches = profile && productProfileMatches(profile, state?.modules || []);
         const projection = productProjection(profile, state?.modules || []) === "virtual2d"
             ? productProjectionPoints(profile, state?.modules || []) : null;
         // The simulator consumes output order; spatial effects sample the
@@ -2147,30 +2142,21 @@ function drawHelioCardTracePreview(canvas, t, sampler, ledCount = helioCurrentCo
             const [px, py] = projection.points[i];
             return sampler((px + .5) / projection.width, (py + .5) / projection.height, time);
         } : sampler;
-        if ((model === "NEBULITE Croptop S3" && whiteSlot.length && ledCount === 9) ||
-            (model === "NEBULITE Croptop ESP32" && profile && productProfileMatches(profile, state?.modules || []) && ledCount === 8)) {
+        if ((model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32") && matches && ledCount === 8) {
             if (drawHistoricalCroptop(canvas, t, garmentSampler, ledCount)) {
                 setHelioPreviewKind(canvas, "Historical crop-top simulation");
                 return;
             }
             whenHistoricalCroptopReady(refreshHistoricalCroptopPreviews);
         }
-        if (model === "NEBULITE Jacket S3" && whiteSlot.length && (ledCount === 91 || ledCount === 31)) {
-            if (ledCount === 31 && projection && drawJacketPreview(canvas, t, garmentSampler, productProjectionPoints(profile))) {
+        if (model === "NEBULITE Jacket S3" && matches && ledCount === 30) {
+            if (drawJacketPreview(canvas, t, garmentSampler, productProjectionPoints(profile))) {
                 setHelioPreviewKind(canvas, "Approximate 30 LED jacket simulation");
                 return;
             }
-            if (ledCount === 31 && projection) whenJacketPreviewReady(refreshHistoricalCroptopPreviews);
-            const configuredProfile = ledCount === 31 ? productProjectionProfile(profile, "virtual2d") : profile;
-            const outputs = Object.values(configuredProfile.state.Drivers).filter(driver => driver?.type === 'RmtLedDriver' && driver.fixture === 'RGB')
-                .map(driver => ({ start: driver.start, count: Number(driver.ledsPerPin) }))
-                .sort((a, b) => a.start - b.start);
-            if (drawNebuliteOutputPreview(canvas, t, garmentSampler, ledCount, outputs)) {
-                setHelioPreviewKind(canvas, "RGB output diagram · not garment layout");
-                return;
-            }
+            whenJacketPreviewReady(refreshHistoricalCroptopPreviews);
         }
-        drawNebuliteStripPreview(canvas, t, garmentSampler, ledCount, whiteSlot);
+        drawNebuliteStripPreview(canvas, t, garmentSampler, ledCount);
         setHelioPreviewKind(canvas, "RGB strip simulation");
         return;
     }
@@ -2658,26 +2644,21 @@ function drawNebuliteLiveStage() {
     const model = controlValue(findModule("System"), "deviceModel", "");
     const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
     const projection = productProjection(profile, state?.modules || []);
-    const count = model === "NEBULITE Croptop S3" ? 9 : model === "NEBULITE Croptop ESP32" ? 8 : model === "NEBULITE Jacket S3" ? (projection === "virtual2d" ? 31 : 91) : 0;
+    const count = model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" ? 8 : model === "NEBULITE Jacket S3" ? 30 : 0;
     const sourceCoordinates = projection === "virtual2d" ? productProjectionPoints(profile, state?.modules || [])?.points : count;
     const sampler = count && profile && productProfileMatches(profile, state?.modules || []) && helioLivePreviewFresh()
         && sourceCoordinates ? nebuliteLiveSampler(nebuliteLiveFrame, count, sourceCoordinates) : null;
     let drawn = false;
-    if (sampler && (count === 8 || count === 9)) {
+    if (sampler && count === 8) {
         drawn = drawHistoricalCroptop(canvas, 0, sampler, count);
         if (!drawn) whenHistoricalCroptopReady(drawNebuliteLiveStage);
-    } else if (sampler && count === 31) {
+    } else if (sampler && count === 30) {
         drawn = drawJacketPreview(canvas, 0, sampler, productProjectionPoints(profile));
         if (!drawn) whenJacketPreviewReady(drawNebuliteLiveStage);
-    } else if (sampler && count === 91) {
-        const configuredProfile = count === 31 ? productProjectionProfile(profile, "virtual2d") : profile;
-        const outputs = Object.values(configuredProfile.state.Drivers).filter(driver => driver?.type === "RmtLedDriver" && driver.fixture === "RGB")
-            .map(driver => ({ start: driver.start, count: Number(driver.ledsPerPin) })).sort((a, b) => a.start - b.start);
-        drawn = drawNebuliteOutputPreview(canvas, 0, sampler, count, outputs);
     }
     canvas.hidden = !drawn;
     if (image) image.hidden = drawn;
-    label.textContent = drawn ? (count === 8 || count === 9 ? "Live source · historical crop-top illustration" : count === 31 ? "Live source · approximate 30 LED jacket" : "Live source · RGB output diagram") + (count === 8 ? "" : " · white output not shown")
+    label.textContent = drawn ? (count === 30 ? "Live source · approximate 30 LED jacket" : "Live source · historical crop-top illustration")
         : profile ? "Waiting for a matching live source preview" : "NEBULITE · Choose your product in Setup";
 }
 
@@ -2979,7 +2960,7 @@ function renderHelioSceneCard(mode, status, active, audioReady) {
     const jacketDiagram = isNebuliteFirmware() && model === "NEBULITE Jacket S3" &&
         profile && productProfileMatches(profile, state?.modules || []);
     meta.textContent = (needsAudio ? "Audio setup" : mode.meta) +
-        (isNebuliteFirmware() ? (historicalCrop ? " · Historical crop-top simulation" : jacketDiagram ? " · RGB output diagram" : " · RGB strip simulation") : "");
+        (isNebuliteFirmware() ? (historicalCrop ? " · Historical crop-top simulation" : jacketDiagram ? " · Approximate 30 LED jacket simulation" : " · RGB strip simulation") : "");
     btn.append(canvas, label, meta);
     btn.addEventListener("pointerenter", startHelioModePreviews);
     btn.addEventListener("focus", startHelioModePreviews);

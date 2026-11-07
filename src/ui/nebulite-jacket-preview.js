@@ -28,14 +28,14 @@ const byte = value => Math.max(0, Math.min(255, Math.round(Number(value) || 0)))
 export function drawJacketPreview(canvas, time, sampler, projection, art = images()) {
     const ctx = canvas?.getContext?.('2d'), w = canvas?.width || 0, h = canvas?.height || 0;
     const points = projection?.points;
-    if (!ctx || !w || !h || typeof sampler !== 'function' || !Array.isArray(points) || points.length !== 31 ||
+    if (!ctx || !w || !h || typeof sampler !== 'function' || !Array.isArray(points) || points.length !== 30 ||
         !ready(art?.texture) || !ready(art?.garment)) return false;
     ctx.fillStyle = '#05070d'; ctx.fillRect(0, 0, w, h);
     const side = Math.min(w, h);
     ctx.save(); ctx.translate((w - side) / 2, (h - side) / 2); ctx.scale(side / 200, side / 200);
     // The point coordinates also feed the controller's PixelMapLayout. The
     // transform positions that same schematic on the front-view illustration.
-    for (let i = 0; i < 30; ++i) {
+    for (let i = 0; i < points.length; ++i) {
         const [x, y] = points[i];
         const c = sampler((i + .5) / points.length, .5, time) || [];
         const colour = `${byte(c[0])}, ${byte(c[1])}, ${byte(c[2])}`;
@@ -50,6 +50,6 @@ export function drawJacketPreview(canvas, time, sampler, projection, art = image
     ctx.globalCompositeOperation = 'source-over'; ctx.drawImage(art.garment, 0, 0, 200, 200);
     ctx.restore();
     canvas.dataset.previewRenderer = 'jacket-30-simulation';
-    canvas.setAttribute('aria-label', 'Approximate 30 LED jacket animation; independent white output not shown');
+    canvas.setAttribute('aria-label', 'Approximate 30 LED jacket animation');
     return true;
 }

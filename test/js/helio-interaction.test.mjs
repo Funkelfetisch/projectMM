@@ -55,33 +55,31 @@ function tree() {
     return { old, target, modules: [{ name: 'Effects', children: [{ name: 'Layer', children: [old, target] }] }] };
 }
 
-test('NEBULITE previews skip the actual separate white output only after profile readback', async () => {
+test('the jacket illustration requires matching live setup and its 30 mirrored lights', async () => {
     const load = file => import('data:text/javascript;base64,' + Buffer.from(readFileSync(new URL(file, import.meta.url), 'utf8')).toString('base64'));
     const { NEBULITE_SETUP_PROFILES } = await load('../../src/ui/nebulite-profile-data.js');
     const { productProfileMatches } = await load('../../src/ui/nebulite-setup.js');
-    for (const [model, count, whiteSlot] of [['NEBULITE Croptop S3', 9, 8], ['NEBULITE Jacket S3', 91, 30]]) {
-        const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
-        const system = { name: 'System', controls: [{ name: 'deviceModel', value: model }] };
-        const modules = [system, ...['Drivers', 'Layouts'].map(name => ({ name,
-            children: Object.entries(profile.state[name]).filter(([, item]) => item?.type).map(([name, item]) => ({
-                name, type: item.type, role: 'driver', controls: Object.entries(item)
-                    .filter(([key]) => !['type', '$patch'].includes(key)).map(([name, value]) => ({ name, value })),
-            })) }))];
-        const calls = [];
-        const context = contextFor(['drawHelioCardTracePreview'], { state: { modules }, NEBULITE_SETUP_PROFILES,
-            isNebuliteFirmware: () => true, findModule: () => system, controlValue: module => module.controls[0].value,
-            productProfileMatches, requestNebulitePreviewMetadata() {}, setHelioPreviewKind() {}, drawHistoricalCroptop: () => false, whenHistoricalCroptopReady() {}, refreshHistoricalCroptopPreviews() {}, drawNebuliteOutputPreview: (...args) => { calls.push(args); return true; }, drawNebuliteStripPreview: (...args) => calls.push(args) });
-        context.drawHelioCardTracePreview({}, 0, () => [], count);
-        assert.deepEqual(plain(calls[0][4]), model === 'NEBULITE Jacket S3'
-            ? [{ start: 0, count: 30 }, { start: 31, count: 30 }, { start: 61, count: 30 }] : [whiteSlot]);
-        // A moved pin is still the product; a different light count is custom wiring.
-        modules[1].children[0].controls.find(item => item.name === 'pins').value = '34';
-        context.drawHelioCardTracePreview({}, 0, () => [], count);
-        assert.deepEqual(plain(calls[1][4]), plain(calls[0][4]), 'a moved pin keeps the profile');
-        modules[1].children[0].controls.find(item => item.name === 'ledsPerPin').value = '9';
-        context.drawHelioCardTracePreview({}, 0, () => [], count);
-        assert.deepEqual(plain(calls[2][4]), [], 'an unverified custom wiring must not inherit the profile assumption');
-    }
+    const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === 'NEBULITE Jacket S3');
+    const system = { name: 'System', controls: [{ name: 'deviceModel', value: profile.name }] };
+    const modules = [system, ...['Drivers', 'Layouts'].map(name => ({ name,
+        children: Object.entries(profile.state[name]).filter(([, item]) => item?.type).map(([name, item]) => ({
+            name, type: item.type, role: 'driver', controls: Object.entries(item)
+                .filter(([key]) => !['type', '$patch'].includes(key)).map(([name, value]) => ({ name, value })),
+        })) }))];
+    const calls = [];
+    const context = contextFor(['drawHelioCardTracePreview'], { state: { modules }, NEBULITE_SETUP_PROFILES,
+        isNebuliteFirmware: () => true, findModule: () => system, controlValue: module => module.controls[0].value,
+        productProfileMatches, productProjection: () => 'strip', productProjectionPoints: () => ({ points: [], width: 1, height: 1 }),
+        requestNebulitePreviewMetadata() {}, setHelioPreviewKind() {}, whenJacketPreviewReady() {}, refreshHistoricalCroptopPreviews() {},
+        drawJacketPreview: () => { calls.push('jacket'); return true; },
+        drawNebuliteStripPreview: () => calls.push('strip') });
+    context.drawHelioCardTracePreview({}, 0, () => [], 30);
+    // A string moved to another pad is still the jacket; a different light count is custom wiring.
+    modules[1].children[0].controls.find(item => item.name === 'pins').value = '34';
+    context.drawHelioCardTracePreview({}, 0, () => [], 30);
+    modules[1].children[0].controls.find(item => item.name === 'ledsPerPin').value = '31';
+    context.drawHelioCardTracePreview({}, 0, () => [], 30);
+    assert.deepEqual(calls, ['jacket', 'jacket', 'strip']);
 });
 
 test('historical crop-top geometry requires matching live setup and complete logical length', async () => {
@@ -100,14 +98,14 @@ test('historical crop-top geometry requires matching live setup and complete log
         isNebuliteFirmware: () => true, findModule: () => system, controlValue: module => module.controls[0].value,
         productProfileMatches, requestNebulitePreviewMetadata() {}, setHelioPreviewKind() {}, drawHistoricalCroptop: () => { calls.push('historical'); return true; },
         drawNebuliteStripPreview: () => calls.push('strip') });
-    context.drawHelioCardTracePreview({}, 0, () => [], 9);
-    assert.deepEqual(calls, ['historical']);
     context.drawHelioCardTracePreview({}, 0, () => [], 8);
+    assert.deepEqual(calls, ['historical']);
+    context.drawHelioCardTracePreview({}, 0, () => [], 9);
     // The bench case: the strip moved to the pad at GPIO34 still shows the crop-top.
     modules[1].children[0].controls.find(item => item.name === 'pins').value = '34';
-    context.drawHelioCardTracePreview({}, 0, () => [], 9);
+    context.drawHelioCardTracePreview({}, 0, () => [], 8);
     modules[1].children[0].controls.find(item => item.name === 'ledsPerPin').value = '9';
-    context.drawHelioCardTracePreview({}, 0, () => [], 9);
+    context.drawHelioCardTracePreview({}, 0, () => [], 8);
     assert.deepEqual(calls, ['historical', 'strip', 'historical', 'strip']);
 });
 
@@ -127,11 +125,11 @@ test('a 2D scene is sampled at each output cell before the garment simulator use
     const context = contextFor(['drawHelioCardTracePreview'], { state:{modules}, NEBULITE_SETUP_PROFILES,
         isNebuliteFirmware:()=>true, findModule:()=>system, controlValue:module=>module.controls[0].value,
         productProfileMatches, productProjection, productProjectionPoints, requestNebulitePreviewMetadata(){}, setHelioPreviewKind(){},
-        drawHistoricalCroptop:(_canvas,t,sample)=>{ for(let i=0;i<8;i++)sample((i+.5)/9,.5,t);return true; } });
-    context.drawHelioCardTracePreview({}, 0, (x,y)=>{points.push([x,y]);return [0,0,0];}, 9, {effect:{type:'PlasmaEffect'}});
+        drawHistoricalCroptop:(_canvas,t,sample)=>{ for(let i=0;i<8;i++)sample((i+.5)/8,.5,t);return true; } });
+    context.drawHelioCardTracePreview({}, 0, (x,y)=>{points.push([x,y]);return [0,0,0];}, 8, {effect:{type:'PlasmaEffect'}});
     assert.equal(points.length,8);
     const expected = productProjectionPoints(base);
-    assert.deepEqual(points.map(([x,y])=>[Math.round(x*expected.width-.5),Math.round(y*expected.height-.5)]),expected.points.slice(0,8));
+    assert.deepEqual(points.map(([x,y])=>[Math.round(x*expected.width-.5),Math.round(y*expected.height-.5)]),expected.points);
 });
 
 test('classic crop-top samples all eight configured 2D positions in output order', async () => {
@@ -170,11 +168,11 @@ test('the 30 LED jacket simulator receives the 2D field in physical output order
         isNebuliteFirmware:()=>true,findModule:()=>system,controlValue:module=>module.controls[0].value,
         productProfileMatches,productProjection,productProjectionPoints,productProjectionProfile,
         requestNebulitePreviewMetadata(){},setHelioPreviewKind(){},
-        drawJacketPreview:(_canvas,t,sampler,projection)=>{rendered++;assert.deepEqual(projection.points[0],[5,14]);for(let i=0;i<30;i++)sampler((i+.5)/31,.5,t);return projection.points.length===31;}});
-    context.drawHelioCardTracePreview({},0,(x,y)=>{sampled.push([x,y]);return [0,0,0];},31,{effect:{type:'PlasmaEffect'}});
+        drawJacketPreview:(_canvas,t,sampler,projection)=>{rendered++;assert.deepEqual(projection.points[0],[5,14]);for(let i=0;i<30;i++)sampler((i+.5)/30,.5,t);return projection.points.length===30;}});
+    context.drawHelioCardTracePreview({},0,(x,y)=>{sampled.push([x,y]);return [0,0,0];},30,{effect:{type:'PlasmaEffect'}});
     const p=productProjectionPoints(base,modules);
     assert.equal(rendered,1);
-    assert.deepEqual(sampled.map(([x,y])=>[Math.round(x*p.width-.5),Math.round(y*p.height-.5)]),p.points.slice(0,30));
+    assert.deepEqual(sampled.map(([x,y])=>[Math.round(x*p.width-.5),Math.round(y*p.height-.5)]),p.points);
 });
 
 test('crop-top preview loads missing driver metadata once and repaints after readback', async () => {
@@ -229,7 +227,7 @@ test('the live garment stage hides a stale or unverified source rather than show
     });
     context.drawNebuliteLiveStage();
     assert.equal(canvas.hidden, false); assert.equal(image.hidden, true);
-    assert.match(label.textContent, /Live source.*white output not shown/);
+    assert.equal(label.textContent, 'Live source · historical crop-top illustration');
     fresh = false; context.drawNebuliteLiveStage();
     assert.equal(canvas.hidden, true); assert.equal(image.hidden, false);
     fresh = true; matches = false; context.drawNebuliteLiveStage();
@@ -246,7 +244,7 @@ test('garment preview refresh clears old historical and fallback renderers', () 
     context.refreshHistoricalCroptopPreviews();
     assert.match(selector, /historical-croptop-simulation/);
     assert.match(selector, /nebulite-strip-simulation/);
-    assert.match(selector, /nebulite-output-simulation/);
+    assert.match(selector, /jacket-30-simulation/);
     assert.deepEqual(cleared, ['old-canvas']);
     assert.equal(restarts, 1);
 });

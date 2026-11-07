@@ -317,6 +317,15 @@ public:
         }
         return dflt;
     }
+    /// Read a text control by name, editable or read-only, or the given default where it is absent.
+    const char* readText(const char* name, const char* dflt) const {
+        for (uint8_t i = 0; i < controls_.count(); i++) {
+            const ControlDescriptor& c = controls_[i];
+            if (c.ptr && std::strcmp(c.name, name) == 0 && (c.type == ControlType::Text || c.type == ControlType::ReadOnly))
+                return static_cast<const char*>(c.ptr);
+        }
+        return dflt;
+    }
 
     /// Role for type identification (no RTTI needed).
     virtual ModuleRole role() const MM_NONBLOCKING { return ModuleRole::Generic; }

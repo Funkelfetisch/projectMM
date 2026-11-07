@@ -9,7 +9,7 @@ const scenes = readFileSync(new URL('../../src/ui/helio-scenes.js', import.meta.
     .replaceAll('"./helio-scene-data.js"', JSON.stringify(moduleUrl(data)));
 const source = readFileSync(new URL('../../src/ui/helio-preview.js', import.meta.url), 'utf8')
     .replace('"./helio-scenes.js"', JSON.stringify(moduleUrl(scenes)));
-const { helioScenePreviewColor, helioPresetPreviewColor, drawNebuliteStripPreview, drawNebuliteOutputPreview } = await import(moduleUrl(source));
+const { helioScenePreviewColor, helioPresetPreviewColor, drawNebuliteStripPreview } = await import(moduleUrl(source));
 
 test('Noisefire preview matches 120 native frames with identical simulated audio', () => {
     const effect = {type:'NebuliteNoisefireEffect', controls:[{name:'segment stop',value:31}]};
@@ -246,22 +246,6 @@ test('wearable solid preview keeps RGBW, brightness and segment independent', ()
     assert.notDeepEqual(sample(0, false), sample(0, true));
 });
 
-test('jacket output diagram samples all 90 RGB positions and skips the independent white slot', () => {
-    const samples = [], rectangles = [], attributes = {};
-    const canvas = { width: 384, height: 384, dataset: {}, getContext: () => ({
-        set fillStyle(_value) {}, fillRect(...args) { rectangles.push(args); },
-    }), setAttribute: (key, value) => { attributes[key] = value; } };
-    const outputs = [{ start: 0, count: 30 }, { start: 31, count: 30 }, { start: 61, count: 30 }];
-    assert.equal(drawNebuliteOutputPreview(canvas, 2, x => { samples.push(x); return [255, 0, 0]; }, 91, outputs), true);
-    assert.equal(samples.length, 90);
-    assert.equal(samples[29], 29.5 / 91);
-    assert.equal(samples[30], 31.5 / 91);
-    assert.equal(samples[89], 90.5 / 91);
-    assert.equal(rectangles.length, 91);
-    assert.match(attributes['aria-label'], /garment geometry and separate white output not shown/);
-    assert.equal(drawNebuliteOutputPreview(canvas, 0, () => [], 91, [{ start: 90, count: 2 }]), false);
-});
-
 test('NEBULITE scene preview samples the ordered strip without claiming garment geometry', () => {
     const rectangles = [], samples = [], attributes = {};
     const context = { fillStyle: '', fillRect(...args) { rectangles.push({ color: this.fillStyle, args }); } };
@@ -278,13 +262,13 @@ test('NEBULITE scene preview samples the ordered strip without claiming garment 
     assert.equal(drawNebuliteStripPreview({ getContext: () => null }, 0, () => [], 4), false);
 });
 
-test('white PWM slot is excluded while RGB sampling preserves logical positions', () => {
+test('the strip preview samples every logical position in order', () => {
     const samples = [], attributes = {}, canvas = { width: 100, height: 50, dataset: {},
         getContext: () => ({ fillRect() {}, set fillStyle(_value) {} }),
         setAttribute: (key, value) => { attributes[key] = value; } };
-    drawNebuliteStripPreview(canvas, 0, x => { samples.push(x); return [0, 0, 0]; }, 4, [1]);
-    assert.deepEqual(samples, [0.125, 0.625, 0.875]);
-    assert.match(attributes['aria-label'], /white output not shown/);
+    drawNebuliteStripPreview(canvas, 0, x => { samples.push(x); return [0, 0, 0]; }, 4);
+    assert.deepEqual(samples, [0.125, 0.375, 0.625, 0.875]);
+    assert.equal(attributes['aria-label'], 'Approximate animation preview on a linear RGB LED strip');
 });
 
 test('garment RGB strip preview does not add the independent white output to RGB pixels', () => {

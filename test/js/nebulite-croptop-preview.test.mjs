@@ -21,28 +21,21 @@ function fixture() {
         sample(x, y, t) { samples.push([x, y, t]); return [x * 255, 0, 0]; } };
 }
 
-test('historical crop-top renders eight RGB source positions and excludes the white output', () => {
-    const f = fixture();
-    assert.equal(drawHistoricalCroptop(f.canvas, 2, f.sample, 9, f.assets), true);
-    assert.deepEqual(f.samples.map(([x]) => x), Array.from({ length: 8 }, (_, i) => (i + 0.5) / 9));
-    assert.equal(f.calls.filter(x => x === 'polygon').length, 6);
-    assert.deepEqual(f.calls.slice(-2), ['texture', 'garment']);
-    assert.equal(f.canvas.dataset.previewRenderer, 'historical-croptop-simulation');
-    assert.match(f.attributes['aria-label'], /historical.*white output not shown/);
-});
-
 test('unready artwork and incompatible logical lengths fall back without sampling', () => {
     const f = fixture();
     f.assets.garment.complete = false;
-    assert.equal(drawHistoricalCroptop(f.canvas, 0, f.sample, 9, f.assets), false);
+    assert.equal(drawHistoricalCroptop(f.canvas, 0, f.sample, 8, f.assets), false);
     f.assets.garment.complete = true;
-    assert.equal(drawHistoricalCroptop(f.canvas, 0, f.sample, 91, f.assets), false);
+    assert.equal(drawHistoricalCroptop(f.canvas, 0, f.sample, 9, f.assets), false);
     assert.deepEqual(f.samples, []);
 });
 
-test('classic crop-top samples its eight outputs without a fictitious white slot', () => {
+test('the crop-top illustration samples its eight outputs in order', () => {
     const f = fixture();
     assert.equal(drawHistoricalCroptop(f.canvas, 0, f.sample, 8, f.assets), true);
     assert.deepEqual(f.samples.map(([x]) => x), Array.from({length: 8}, (_, i) => (i + 0.5) / 8));
-    assert.doesNotMatch(f.attributes['aria-label'], /white output/);
+    assert.equal(f.calls.filter(x => x === 'polygon').length, 6);
+    assert.deepEqual(f.calls.slice(-2), ['texture', 'garment']);
+    assert.equal(f.canvas.dataset.previewRenderer, 'historical-croptop-simulation');
+    assert.equal(f.attributes['aria-label'], 'Approximate historical crop-top animation simulation');
 });

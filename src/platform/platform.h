@@ -787,7 +787,7 @@ bool wifiApConnected();
 /// Tear the SoftAP down.
 void wifiApStop();
 /// Stations associated with our SoftAP, 0 when it is down or empty.
-uint32_t wifiApClientCount();
+uint32_t wifiApClientCount() MM_NONBLOCKING;
 
 /// True when a socket is safe to open: the stack is initialized and an interface holds an IP.
 bool networkReady();
@@ -842,7 +842,7 @@ bool http_fetch_to_ota(const char* url,
 /// An image written as its bytes arrive, which whoever receives it pushes a chunk at a time.
 struct OtaWrite { void* impl = nullptr; };
 /// Whether a platform update reservation is currently held, independent of status text.
-bool otaBusy();
+bool otaBusy() MM_NONBLOCKING;
 #ifndef ESP_PLATFORM
 /// Desktop test seam for the platform reservation status.
 void setTestOtaBusy(bool busy);

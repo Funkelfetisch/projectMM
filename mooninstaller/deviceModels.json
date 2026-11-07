@@ -2271,23 +2271,13 @@
           "curve": "linear",
           "whiteMode": "None",
           "ledsPerPin": "8"
-        },
-        "Accent": {
-          "type": "PwmLightDriver",
-          "pins": "46",
-          "fixture": "White",
-          "start": 8,
-          "count": 1,
-          "curve": "linear",
-          "whiteMode": "None",
-          "bits": 12
         }
       },
       "Layouts": {
         "$patch": "replace",
         "ProductStrip": {
           "type": "GridLayout",
-          "width": 9,
+          "width": 8,
           "height": 1,
           "depth": 1
         }
@@ -2314,7 +2304,7 @@
     "firmwares": [
       "nebulite-s3"
     ],
-    "description": "Source-derived bench profile; battery protection, buttons, output and update recovery require physical qualification.",
+    "description": "Source-derived bench profile: the jacket's 30-pixel string is mirrored on GPIO36, 35, 48 and 34, every LED pad of the controller, so it lights on whichever one it is wired to. Battery protection, buttons, output and update recovery require physical qualification.",
     "supported": [
       "LEDs",
       "WiFi",
@@ -2338,29 +2328,27 @@
           "curve": "linear",
           "ledsPerPin": "30"
         },
-        "Accent": {
-          "type": "PwmLightDriver",
-          "pins": "46",
-          "fixture": "White",
-          "start": 30,
-          "bits": 12,
-          "count": 1,
-          "curve": "linear",
-          "whiteMode": "None"
-        },
-        "RGB3": {
+        "RGB2": {
           "type": "RmtLedDriver",
           "pins": "35",
           "fixture": "RGB",
-          "start": 31,
+          "start": 0,
+          "curve": "linear",
+          "ledsPerPin": "30"
+        },
+        "RGB3": {
+          "type": "RmtLedDriver",
+          "pins": "48",
+          "fixture": "RGB",
+          "start": 0,
           "curve": "linear",
           "ledsPerPin": "30"
         },
         "RGB4": {
           "type": "RmtLedDriver",
-          "pins": "48",
+          "pins": "34",
           "fixture": "RGB",
-          "start": 61,
+          "start": 0,
           "curve": "linear",
           "ledsPerPin": "30"
         }
@@ -2369,7 +2357,7 @@
         "$patch": "replace",
         "ProductStrip": {
           "type": "GridLayout",
-          "width": 91,
+          "width": 30,
           "height": 1,
           "depth": 1
         }

@@ -12,6 +12,8 @@ PROFILES = [
     ('croptop', 'NEBULITE Croptop S3', 9, [(0, 8, 36), (8, 1, 46)]),
     ('jacket', 'NEBULITE Jacket S3', 91, [(0, 30, 36), (30, 1, 46), (31, 30, 35), (61, 30, 48)]),
 ]
+# The S3 controller's onboard LED, which shows the connection rather than a scene.
+STATUS_LED = 46
 
 # The LED data lines each controller drives: the S3 garment board's four sockets, the classic board's two (rev1 leaves GPIO17 unconnected, so driving it there is harmless).
 SOCKETS = {'ESP32-S3': {34, 35, 36, 48}, 'ESP32': {17, 26}}
@@ -42,42 +44,26 @@ def test_nebulite_profile_source_is_pinned_without_claiming_physical_qualificati
 
 
 @pytest.mark.parametrize('historical,name,count,mapping', PROFILES)
-def test_nebulite_profile_preserves_historical_gpio_counts_and_manual_white(historical, name, count, mapping):
+def test_an_s3_garment_keeps_its_first_historical_strip_on_every_pad_and_leaves_the_onboard_led_to_the_status(historical, name, count, mapping):
     source = SOURCE['profiles'][historical]
     profile = next(item for item in CATALOG if item['name'] == name)
     assert profile['chip'] == 'ESP32-S3'
     assert profile['firmwares'] == ['nebulite-s3']
     assert source['ledCount'] == count
     assert [(item['start'], item['len'], item['pin'][0]) for item in source['outputs']] == mapping
-    every = [item for item in profile['state']['Drivers'].values() if isinstance(item, dict)]
-    shape = lambda item: (item['start'], int(item.get('ledsPerPin', item.get('count', 0))), int(item['pins']))
-    # Every historical output is kept; a single-strand product also repeats its strip on the controller's other LED pads.
-    drivers = [item for item in every if shape(item) in mapping]
-    assert sorted(shape(item) for item in drivers) == mapping
-    mirrors = [shape(item) for item in every if shape(item) not in mapping]
-    assert all((start, length) == mapping[0][:2] for start, length, _ in mirrors)
-    assert sorted(pin for *_, pin in mirrors) == ([34, 35, 48] if historical == 'croptop' else [])
-    assert all(item['fixture'] == 'RGB' and item['curve'] == 'linear' for item in every if shape(item) in mirrors)
-    # WLED const.h: order 1 is RGB, type 22 is WS2812 RGB, type 41 is single-channel PWM.
-    # Match output roles as well as pin/count; equal ranges alone cannot catch swapped channels.
+    strips = windows(profile)
+    first = mapping[0]
+    # The historical first strip, repeated on every LED pad so the garment lights on whichever one it is wired to.
+    assert first in strips
+    assert {(start, length) for start, length, _ in strips} == {first[:2]}
+    assert {pin for *_, pin in strips} == SOCKETS['ESP32-S3']
+    assert profile['state']['Layouts']['ProductStrip']['width'] == first[1]
+    drivers = [item for item in profile['state']['Drivers'].values() if isinstance(item, dict)]
+    assert all(str(STATUS_LED) not in item['pins'].split(',') for item in drivers)
+    assert all(item['fixture'] == 'RGB' and item['curve'] == 'linear' for item in drivers)
+    # WLED const.h: order 1 is RGB, type 22 is WS2812 RGB, type 41 is single-channel PWM: the strip the garment keeps is a WS2812 RGB output.
     assert all(item['order'] == 1 for item in source['outputs'])
-    assert [item['type'] for item in source['outputs']] == [
-        41 if item['fixture'] == 'White' else 22
-        for item in sorted(drivers, key=lambda item: item['start'])
-    ]
-    assert all(item['fixture'] == 'RGB' for item in drivers if item['type'] == 'RmtLedDriver')
-    # Setup establishes the same explicit policy on every output even when
-    # matching module names already held a different inherited correction.
-    # This is not an optical match to WLED's separate color-gamma setting.
-    assert all(item['curve'] == 'linear' for item in drivers)
-    accent = profile['state']['Drivers']['Accent']
-    assert accent['type'] == 'PwmLightDriver'
-    assert accent['fixture'] == 'White'
-    assert accent['pins'] == '46'
-    assert accent['whiteMode'] == 'None'
-    assert accent['count'] == 1
-    assert accent['bits'] == 12
-    assert profile['state']['Layouts']['ProductStrip']['width'] == count
+    assert source['outputs'][0]['type'] == 22
     audio = profile['state']['Services']['Audio']
     assert [audio['sdPin'], audio['wsPin'], audio['sckPin']] == source['microphone']['pin'][:3] == [39, 38, 40]
 

@@ -8,7 +8,7 @@ const frame = count => ({ count, stride: 1, rgb: Uint8Array.from({ length: count
     coords: Float32Array.from({ length: count * 3 }, (_, i) => i % 3 ? 0 : Math.floor(i / 3) / count) });
 
 test('a complete ordered live source maps the crop-top and jacket logical positions', () => {
-    for (const count of [9, 91]) {
+    for (const count of [9, 30]) {
         const f = frame(count), sample = nebuliteLiveSampler(f, count);
         assert.ok(sample);
         for (const i of [0, Math.floor(count / 2), count - 1])

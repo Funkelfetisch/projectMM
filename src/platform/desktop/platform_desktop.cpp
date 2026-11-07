@@ -1987,7 +1987,7 @@ bool wifiApInit(const WifiApConfig& cfg) {
 }
 bool wifiApConnected() { return testApUp_; }
 void wifiApStop() { if (testMdnsStackLive_) testWifiStopHadLiveMdns_ = true; testApUp_ = false; }
-uint32_t wifiApClientCount() { return testApUp_ ? testApClients_ : 0; }
+uint32_t wifiApClientCount() MM_NONBLOCKING { return testApUp_ ? testApClients_ : 0; }
 
 // Host sockets work whatever the link predicates above say, and there is no initialization race, so this is always safe.
 bool networkReady() { return true; }
@@ -2055,7 +2055,7 @@ bool http_fetch_to_ota(const char* /*url*/,
 // No OTA partition on desktop, call sites guard with `if constexpr (mm::platform::hasOta)`.
 static bool testOtaBusy_ = false;
 void setTestOtaBusy(bool busy) { testOtaBusy_ = busy; }
-bool otaBusy() { return testOtaBusy_; }
+bool otaBusy() MM_NONBLOCKING { return testOtaBusy_; }
 bool otaBegin(OtaWrite&, OtaTarget, size_t, char* statusBuf, size_t statusBufLen, uint32_t* bytesOut) {
     if (statusBuf && statusBufLen > 0) std::snprintf(statusBuf, statusBufLen, "unsupported on desktop");
     if (bytesOut) *bytesOut = 0;

@@ -30,10 +30,9 @@ const byte = value => Math.max(0, Math.min(255, Math.round(Number(value) || 0)))
 const rgb = color => `rgb(${byte(color?.[0])}, ${byte(color?.[1])}, ${byte(color?.[2])})`;
 
 // The original WLED overlay blends adjacent RGB pixels into illustrated fabric.
-// The independent white PWM slot is not part of this historical geometry.
 export function drawHistoricalCroptop(canvas, time, sampler, logicalCount, assets = images()) {
     const ctx = canvas?.getContext?.("2d"), w = canvas?.width || 0, h = canvas?.height || 0;
-    if (!ctx || !w || !h || typeof sampler !== "function" || (logicalCount !== 8 && logicalCount !== 9) ||
+    if (!ctx || !w || !h || typeof sampler !== "function" || logicalCount !== 8 ||
         !ready(assets?.texture) || !ready(assets?.garment)) return false;
     const colors = Array.from({ length: 8 }, (_, i) => rgb(sampler((i + 0.5) / logicalCount, 0.5, time)));
     ctx.fillStyle = "#000";
@@ -60,6 +59,6 @@ export function drawHistoricalCroptop(canvas, time, sampler, logicalCount, asset
     ctx.restore();
     canvas.dataset.previewRenderer = "historical-croptop-simulation";
     canvas.dataset.previewSource = "historical-simulation";
-    canvas.setAttribute("aria-label", "Approximate historical crop-top animation simulation" + (logicalCount === 9 ? "; separate white output not shown" : ""));
+    canvas.setAttribute("aria-label", "Approximate historical crop-top animation simulation");
     return true;
 }

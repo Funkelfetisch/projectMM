@@ -25,6 +25,12 @@ struct NebuliteClassicBoard {
     }
 };
 
+/// The NEBULITE S3 controller's onboard LED, which shows the connection on every garment.
+struct NebuliteS3Board {
+    /// The onboard LED, pulsed by PWM.
+    static constexpr uint8_t kStatusLedGpio = 46;
+};
+
 /// The pins a product firmware settled, which boot reports as they read back.
 struct BoardPins {
     /// The settled GPIOs, the first `count` of them.

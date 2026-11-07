@@ -21,11 +21,10 @@ export function compatibleProductProfiles(profiles, identity) {
 }
 
 // Coordinates are approximate samples of the archived crop-top illustration.
-// The ninth position is the separate PWM white output, not a garment RGB LED.
-const CROPTOP_POINTS = '1,8;12,8;10,3;16,2;4,0;5,8;13,4;16,8;8,4';
-// Provisional output order: bottom, top, hood, first sleeve, second sleeve,
-// then the separate PWM white slot. Parallel Y branches need a different map.
-const JACKET_POINTS = '5,14;7,14;9,14;11,14;13,14;15,14;5,6;7,6;9,6;11,6;13,6;15,6;7,2;8,1;9,1;11,1;12,1;13,2;0,5;1,6;2,7;1,9;2,10;3,11;20,5;19,6;18,7;19,9;18,10;17,11;10,10';
+const CROPTOP_POINTS = '1,8;12,8;10,3;16,2;4,0;5,8;13,4;16,8';
+// Provisional output order: bottom, top, hood, first sleeve, second sleeve.
+// Parallel Y branches need a different map.
+const JACKET_POINTS = '5,14;7,14;9,14;11,14;13,14;15,14;5,6;7,6;9,6;11,6;13,6;15,6;7,2;8,1;9,1;11,1;12,1;13,2;0,5;1,6;2,7;1,9;2,10;3,11;20,5;19,6;18,7;19,9;18,10;17,11';
 export function productProjectionProfile(profile, projection = "strip") {
     if (projection === "strip") return { ...profile, projection: "strip" };
     // A product whose own layout is a point map, such as the necklace's ring, is already two-dimensional.
@@ -35,14 +34,7 @@ export function productProjectionProfile(profile, projection = "strip") {
     if (projection !== "virtual2d" || !dimensions) throw new Error("This product has no virtual 2D layout.");
     const state = JSON.parse(JSON.stringify(profile.state));
     state.Layouts = { $patch: "replace", ProductStrip: {type: "PixelMapLayout",
-        points: profile.name === "NEBULITE Croptop S3" ? CROPTOP_POINTS :
-            profile.name === "NEBULITE Croptop ESP32" ? CROPTOP_POINTS.split(';').slice(0, 8).join(';') : JACKET_POINTS} };
-    if (profile.name === "NEBULITE Jacket S3") {
-        // The archived profile has three 30-slot outputs; this candidate uses
-        // the first one only, subject to a physical wiring check.
-        delete state.Drivers.RGB3;
-        delete state.Drivers.RGB4;
-    }
+        points: profile.name === "NEBULITE Jacket S3" ? JACKET_POINTS : CROPTOP_POINTS} };
     return { ...profile, state, projection: "virtual2d" };
 }
 

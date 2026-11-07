@@ -1523,7 +1523,7 @@ bool wifiApConnected() {
     return wifiApActive_;
 }
 
-uint32_t wifiApClientCount() { return apClients_.load(std::memory_order_relaxed); }
+uint32_t wifiApClientCount() MM_NONBLOCKING { return apClients_.load(std::memory_order_relaxed); }
 
 void wifiApStop() {
     RadioLock lock(radioMutex_);
@@ -1589,7 +1589,7 @@ int wifiStaChannel() { return 0; }
 bool wifiApInit(const WifiApConfig&) { return false; }
 bool wifiApConnected() { return false; }
 void wifiApStop() {}
-uint32_t wifiApClientCount() { return 0; }
+uint32_t wifiApClientCount() MM_NONBLOCKING { return 0; }
 int wifiTxPower() { return 0; }
 // Match the API contract: 0 is a successful no-op even when WiFi isn't compiled in. Any non-zero value (actual cap attempt) returns false because there's no radio to set.
 bool wifiSetTxPower(int8_t quarterDbm) { return quarterDbm == 0; }
