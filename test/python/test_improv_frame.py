@@ -113,6 +113,19 @@ def test_a_document_is_one_frame_when_it_fits_and_chunks_in_order_when_it_does_n
     assert json.loads(body) == big
 
 
+def test_every_catalog_document_fits_the_firmwares_one_operation_buffer():
+    import json, re
+    root = Path(__file__).resolve().parents[2]
+    header = (root / "src" / "core" / "system" / "ImprovProvisioningModule.h").read_text()
+    capacity = int(re.search(r"char pendingOp_\[(\d+)\]", header).group(1))
+    catalog = json.loads((root / "mooninstaller" / "deviceModels.json").read_text())
+    for entry in catalog:
+        for doc in state_documents(entry):
+            size = len(json.dumps(doc, separators=(",", ":")).encode("utf-8"))
+            # One byte of the buffer is the NUL, so a document of the full capacity is refused on the device.
+            assert size < capacity, f"{entry.get('name')}: {next(iter(doc))} is {size} B, the device holds {capacity - 1}"
+
+
 def test_the_script_no_longer_sends_a_vendor_rpc_the_firmware_does_not_have():
     src = (Path(__file__).resolve().parents[2] / "moondeck" / "build" / "improv_provision.py").read_text()
     assert "0xFE" not in src and "SET_DEVICE_MODEL" not in src

@@ -131,7 +131,7 @@ private:
     uint8_t pendingTxPower_ = 0;             ///< the cap, in whole dBm
     std::atomic<bool> pendingTxPowerReady_{false};  ///< set when it is ready
 
-    char pendingOp_[512] = {};               ///< one operation, sized for the longest
+    char pendingOp_[1024] = {};              ///< one operation; test_improv_frame.py pins that every deviceModels.json document fits, the Croptop S3's Drivers being the longest
     std::atomic<bool> pendingOpReady_{false};       ///< set when it is reassembled
 };
 
