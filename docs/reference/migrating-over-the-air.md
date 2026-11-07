@@ -48,7 +48,7 @@ A device that needs a cable may have to be opened, which can void its warranty.
 The S3 image carries no MoonLight of its own: the phone that installed it posts the product's signed release to it in chunks and then commits. Schema `nebulite-migrate/1`, for an app that drives the migration:
 
 - **Finding it.** After WLED installs the image and restarts, the image answers where WLED answered:
-  - it joins WLED's network under WLED's mDNS name, announcing `_http._tcp` and `_nebulite-migrate._tcp` on port 80, and the router usually gives it WLED's address again;
+  - it joins WLED's network when WLED has one configured (WLED's placeholder `Your_Network` counts as none), under WLED's mDNS name, announcing `_http._tcp` and `_nebulite-migrate._tcp` on port 80, and the router usually gives it WLED's address again;
   - it always opens WLED's access point, with WLED's name and password, at `4.3.2.1`.
 - **`GET /migrate`** answers the status:
   - `schema`, `build`, `chip` (`esp32s3`), `flashBytes`, and `mac`, the Wi-Fi station MAC as WLED's `/json/info` reports it;

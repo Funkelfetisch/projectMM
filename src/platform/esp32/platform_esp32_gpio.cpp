@@ -205,8 +205,7 @@ bool gpioPreloadLowOutput(uint8_t gpio) { return gpioPreloadOutput(gpio, false);
 bool gpioHold(uint8_t gpio) {
     // The same refusals as gpioWrite: only a pin it may drive is held.
     if (!GPIO_IS_VALID_OUTPUT_GPIO(gpio) || gpioCapability(gpio).reserved) return false;
-    // The pad hold lives in the RTC domain, so a software, panic or watchdog reset keeps it; only a power loss or an EN reset clears it.
-    // A hold from an earlier image (the S3 migrator's output-only pads) freezes that image's pad config, input enable included, so the caller's config would never reach the pad. Released first, the pad takes the configuration and level already in the registers, then is held again: no glitch, since both name the same level.
+    // An earlier image's hold freezes its pad config (input enable too); released, the pad takes the registers' config and level, the same level, then holds again.
     const auto pad = static_cast<gpio_num_t>(gpio);
     return gpio_hold_dis(pad) == ESP_OK && gpio_hold_en(pad) == ESP_OK;
 }

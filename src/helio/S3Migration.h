@@ -100,6 +100,7 @@ inline ChunkVerdict chunkVerdict(uint32_t received, uint32_t offset, uint32_t le
 /// The writes and checks the migration runs, supplied by the board's adapter or by a simulated flash in a test.
 class Storage {
 public:
+    /// Destroyed through the interface, by the board's adapter or a test's simulated flash.
     virtual ~Storage() = default;
     /// The network journal, captured from WLED's filesystem, is committed in NVS and reads back the same.
     virtual bool journalDurable() = 0;
@@ -122,7 +123,7 @@ public:
 /// Where a run of the migration ends.
 enum class Result : uint8_t { Refused, AwaitUpload, Failed, RebootRecovery, BootPayload };
 
-/// Run every remaining step in order, re-reading the flash rather than trusting progress flags. Under WLED's table it ends by writing MoonLight's and rebooting the migrator, so the bootloader and IDF load the new table; under MoonLight's it selects MoonLight.
+/// Run every remaining step, re-reading the flash rather than trusting progress flags. Under WLED's table it writes MoonLight's and reboots, so the bootloader and IDF load it; under MoonLight's it selects MoonLight.
 inline Result finish(Storage& storage, bool targetTableLoaded) {
     if (!storage.journalDurable()) return Result::Refused;
     if (!storage.payloadValid()) return Result::AwaitUpload;

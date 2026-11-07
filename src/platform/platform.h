@@ -1618,7 +1618,7 @@ bool gpioRead(uint8_t gpio);
 /// Drive one GPIO as a push-pull output, configuring it on first use; false where it has no driver.
 bool gpioWrite(uint8_t gpio, bool high);
 
-/// Latch a driven output at its level and configuration until the power goes, through every software reset; later writes leave it. A hold an earlier image left is replaced, so the pad carries this image's configuration. False where the chip cannot hold that pad.
+/// Latch a driven output at its level and config until the power goes, through every software reset; later writes leave it. An earlier image's hold is replaced. False where the chip cannot hold that pad.
 bool gpioHold(uint8_t gpio);
 
 /// Set the output latch before enabling output; the caller must first detach any peripheral from this pin, and this does not prove the external wire level.
