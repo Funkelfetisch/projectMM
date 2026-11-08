@@ -79,9 +79,13 @@ public:
         syncTxPower();   // now if the radio is up, else on the next start
     }
 
-    /// Remember a network at the top of the known list and drive a clean transition into joining it.
+    /// Remember a network at the top of the known list and drive a clean transition into joining it; provisioning asks for the network, so a switched-off radio is switched on and stays on.
     void setWifiCredentials(const char* ssid, const char* password) {
         if (!ssid || !wifi_ || !wifi_->remember(ssid, password)) return;
+        if (wifiToggle_ && !wifiEnabled_) {
+            wifiEnabled_ = wifiAppliedEnabled_ = true;
+            markDirty();
+        }
         // Ethernet outranks WiFi, so while the cable carries the device the network is only remembered, as a join from the card is.
         if (state_ == State::WaitingEth || state_ == State::ConnectedEth) return;
         if constexpr (platform::hasWiFi) {

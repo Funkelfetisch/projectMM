@@ -234,6 +234,25 @@ test('the live garment stage hides a stale or unverified source rather than show
     assert.equal(canvas.hidden, true); assert.equal(drawn, 1);
 });
 
+test('a set-up product without an illustration shows its live strip at the layout\'s light count', () => {
+    const canvas = { hidden: true }, image = { hidden: false }, label = { textContent: '' };
+    const strips = [];
+    const model = { name: 'NEBULITE Jacket ESP32' };
+    const context = contextFor(['drawNebuliteLiveStage'], {
+        document: { getElementById: () => canvas, querySelector: selector =>
+            selector === '.nebulite-product-image' ? image : label },
+        state: { modules: [] }, NEBULITE_SETUP_PROFILES: [model],
+        findModule: () => ({}), controlValue: () => model.name, helioCurrentCount: () => 50,
+        productProfileMatches: () => true, helioLivePreviewFresh: () => true,
+        nebuliteLiveFrame: {}, nebuliteLiveSampler: (_frame, count) => { strips.push(['sampler', count]); return () => [0, 0, 0]; },
+        drawNebuliteStripPreview: (_canvas, _t, _sampler, count) => { strips.push(['strip', count]); return true; },
+    });
+    context.drawNebuliteLiveStage();
+    assert.deepEqual(strips, [['sampler', 50], ['strip', 50]]);
+    assert.equal(canvas.hidden, false); assert.equal(image.hidden, true);
+    assert.equal(label.textContent, 'Live source · 50 LED strip');
+});
+
 test('garment preview refresh clears old historical and fallback renderers', () => {
     let selector = '', restarts = 0; const cleared = [];
     const context = contextFor(['refreshHistoricalCroptopPreviews'], {

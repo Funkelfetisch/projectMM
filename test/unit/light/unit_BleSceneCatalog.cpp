@@ -562,3 +562,14 @@ TEST_CASE("BLE scan scenes: a changed non-exposed solid baseline produces custom
     scan = {}; mm::BleSceneCatalog::advertisement(scan, tree.scheduler);
     CHECK(scan.animation == 0); CHECK_FALSE(scan.rgbKnown); CHECK_FALSE(scan.whiteKnown);
 }
+
+TEST_CASE("The NEBULITE boot effect, a Rainbow at its defaults, reads back as the catalog's Rainbow scene") {
+    SceneTree tree;
+    auto* rainbow = mm::ModuleFactory::create("NebuliteRainbowEffect");
+    REQUIRE(rainbow != nullptr);
+    rainbow->setName("Rainbow");
+    tree.layer->addChild(rainbow);
+    tree.layer->rebuildControls();
+    tree.scheduler.setup();
+    CHECK(tree.state().find("\"id\":\"nebulite-rainbow\"") != std::string::npos);
+}

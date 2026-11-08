@@ -57,7 +57,7 @@
 /// A device-model catalog entry can REPLACE it through `"$patch":"replace"` on the Layer, with its own effects and modifiers, the way the testbench swaps in AudioSpectrum plus RandomMap.
 /// Pulse is the one because a first boot has to answer three questions at once: the lights work, the device runs, and it hears the room.
 /// A sparse shell answers all three, where a dense field answers only the first since every light is already lit.
-/// HELIO starts with the same RingsEffect used by its native Ripple scene, on its physical ring layout.
+/// A product starts on its own catalog's scene, so the app can draw it: HELIO on Ripple's RingsEffect, a NEBULITE garment on Rainbow.
 ///
 /// ## Why output drivers are not boot-wired
 ///
@@ -385,6 +385,10 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         ripple->speed = 42;
         ripple->thickness = 5;
         layer->addChild(ripple);
+    } else if (nebuliteProduct) {
+        auto* rainbow = createOrDie<mm::MoonModule>("NebuliteRainbowEffect");
+        rainbow->setName("Rainbow");
+        layer->addChild(rainbow);
     } else {
         layer->addChild(createOrDie<mm::MoonModule>("PulseEffect"));
     }

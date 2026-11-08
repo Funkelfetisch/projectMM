@@ -2644,21 +2644,25 @@ function drawNebuliteLiveStage() {
     const model = controlValue(findModule("System"), "deviceModel", "");
     const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
     const projection = productProjection(profile, state?.modules || []);
-    const count = model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" ? 8 : model === "NEBULITE Jacket S3" ? 30 : 0;
+    // A product with an illustration has its own light count; any other set-up product shows its strip at the layout's count.
+    const art = model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" ? "croptop" : model === "NEBULITE Jacket S3" ? "jacket" : null;
+    const count = art === "croptop" ? 8 : art === "jacket" ? 30 : helioCurrentCount();
     const sourceCoordinates = projection === "virtual2d" ? productProjectionPoints(profile, state?.modules || [])?.points : count;
     const sampler = count && profile && productProfileMatches(profile, state?.modules || []) && helioLivePreviewFresh()
         && sourceCoordinates ? nebuliteLiveSampler(nebuliteLiveFrame, count, sourceCoordinates) : null;
     let drawn = false;
-    if (sampler && count === 8) {
+    if (sampler && art === "croptop") {
         drawn = drawHistoricalCroptop(canvas, 0, sampler, count);
         if (!drawn) whenHistoricalCroptopReady(drawNebuliteLiveStage);
-    } else if (sampler && count === 30) {
+    } else if (sampler && art === "jacket") {
         drawn = drawJacketPreview(canvas, 0, sampler, productProjectionPoints(profile));
         if (!drawn) whenJacketPreviewReady(drawNebuliteLiveStage);
+    } else if (sampler) {
+        drawn = drawNebuliteStripPreview(canvas, 0, sampler, count);
     }
     canvas.hidden = !drawn;
     if (image) image.hidden = drawn;
-    label.textContent = drawn ? (count === 30 ? "Live source · approximate 30 LED jacket" : "Live source · historical crop-top illustration")
+    label.textContent = drawn ? (art === "jacket" ? "Live source · approximate 30 LED jacket" : art === "croptop" ? "Live source · historical crop-top illustration" : `Live source · ${count} LED strip`)
         : profile ? "Waiting for a matching live source preview" : "NEBULITE · Choose your product in Setup";
 }
 

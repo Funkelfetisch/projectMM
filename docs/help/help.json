@@ -5133,7 +5133,7 @@
      "line": "The GPIO of the LED; -1 drives none."
     },
     "level": {
-     "line": "How bright the LED is when lit."
+     "line": "How bright the LED is when lit, so it can sit dim beside a garment's strip."
     },
     "showing": {
      "line": "What the LED shows now: connected, waiting or updating."

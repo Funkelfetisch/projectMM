@@ -18,10 +18,6 @@ namespace mm {
 /// ## What it shows
 ///
 /// Steady while a phone holds a Bluetooth connection, the WiFi station or Ethernet is up, or a client is on the access point. A slow blink, once a second, while none is. A fast blink while a firmware update installs. Switching the lights off leaves it showing.
-///
-/// @technical
-///
-/// The state is sampled once a second, the rate the BLE service refreshes its `connection` readout; the blink runs at 50 Hz. The LED is pulsed by the chip's PWM at `level`, so a bright indicator LED can sit dim beside a garment's strip.
 class StatusLedService : public MoonModule {
 public:
     /// What the LED is showing.
@@ -32,7 +28,7 @@ public:
 
     /// The GPIO of the LED; -1 drives none.
     int8_t pin = -1;
-    /// How bright the LED is when lit.
+    /// How bright the LED is when lit, so it can sit dim beside a garment's strip.
     uint8_t level = 64;
 
     /// The pin, the brightness and what it shows.
@@ -61,7 +57,7 @@ public:
         if (enabled) open(); else close();
     }
 
-    /// Sample what to show.
+    /// Sample what to show, once a second: the rate the BLE service refreshes its `connection` readout.
     void tick1s() MM_NONBLOCKING override {
         showing_ = showingNow(Scheduler::instance());
         std::snprintf(showingText_, sizeof(showingText_), "%s", name(showing_));

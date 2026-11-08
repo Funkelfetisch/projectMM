@@ -269,6 +269,26 @@ TEST_CASE("a garment boots with its radio down, and a saved choice still outrank
     mm::platform::setTestMdnsAvailable(false);
 }
 
+TEST_CASE("provisioning a network switches a switched-off radio on and joins it") {
+    FrozenClock clock;
+    mm::platform::setTestWifiStaAvailable(true);
+    {
+        WiFiNetwork w;
+        w.net.allowWifiToggle(true);
+        w.net.setWifiDefaultEnabled(false);
+        w.net.defineControls();
+        w.net.setup();
+        w.net.tick1s();
+        CHECK(std::string(mm::platform::testLastStaSsid()) != "venue");
+        w.net.setWifiCredentials("venue", "provisioned");
+        CHECK(std::string(mm::platform::testLastStaSsid()) == "venue");
+        CHECK(w.net.readBool("wifiEnabled", false));
+        CHECK(w.net.dirty());
+        w.net.release();
+    }
+    mm::platform::setTestWifiStaAvailable(false);
+}
+
 TEST_CASE("the station tries each known network in priority order before the access point") {
     FrozenClock clock;
     mm::platform::setTestWifiStaAvailable(true);
