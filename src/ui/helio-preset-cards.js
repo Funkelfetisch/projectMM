@@ -1,5 +1,4 @@
 import { PresetEditor } from "./helio-presets.js";
-import { prepareLegacyImport, commitLegacyImport } from "./nebulite-legacy-import.js";
 
 function suggestedPresetName(label) {
     const candidate = String(label || 'Animation').replace(/^[♪♫]\s*/, 'Music - ');
@@ -10,15 +9,14 @@ function suggestedPresetName(label) {
 // Each card owns one native preset document and its conditional-save revision.
 // The playing selection is a deliberate action, separate from editing a file.
 export class HelioPresetCards {
-    constructor({ client, makeControls, onSelect, onApply, onPreview, onControls, legacyProduct, showLegacyImport }) {
+    constructor({ client, makeControls, onSelect, onApply, onPreview, onControls, isMusic }) {
         this.client = client;
         this.makeControls = makeControls;
         this.onSelect = onSelect;
         this.onApply = onApply;
         this.onPreview = onPreview;
         this.onControls = onControls;
-        this.legacyProduct = legacyProduct;
-        this.showLegacyImport = showLegacyImport;
+        this.isMusic = isMusic;
         this.records = new Map();
         this.selected = null;
         this.pending = null;
@@ -44,11 +42,10 @@ export class HelioPresetCards {
         this.grid = document.createElement("div");
         this.grid.className = "helio-native-preset-grid";
         const forms = [this.addForm()];
-        if (this.showLegacyImport?.()) forms.push(this.legacyImportForm());
         host.replaceChildren(heading, this.grid, ...forms);
         // A remount, as after a scene change rebuilds the page, shows the cards it knows while the listing refreshes, so the section never empties and the page keeps its scroll position.
         if (this.records.size) {
-            this.grid.replaceChildren(...[...this.records.values()].map(record => this.card(record)));
+            this.showCards([...this.records.values()].map(record => this.card(record)));
             this.onPreview?.();
         } else this.status.textContent = "Loading presets…";
         try {
@@ -77,11 +74,25 @@ export class HelioPresetCards {
                     removed.push(record);
                 }
             }
-            this.grid.replaceChildren(...cards);
+            this.showCards(cards);
             for (const record of removed) record.status.textContent = "Preset removed elsewhere. Your draft is retained; save a copy.";
             this.status.textContent = this.notice || (names.size ? "Changes save automatically" : "Add an animation to begin");
             this.onPreview?.();
         } catch (error) { this.status.textContent = error.message; }
+    }
+
+    /// Fill the grid, under a Static and a Music heading where this product tells them apart.
+    showCards(cards) {
+        if (!this.isMusic) { this.grid.replaceChildren(...cards); return; }
+        const music = card => this.isMusic(this.records.get(card.dataset.presetName)?.item);
+        const group = (title, members) => {
+            if (!members.length) return [];
+            const heading = document.createElement("h3");
+            heading.className = "helio-native-preset-group";
+            heading.textContent = title;
+            return [heading, ...members];
+        };
+        this.grid.replaceChildren(...group("Static", cards.filter(card => !music(card))), ...group("Music", cards.filter(music)));
     }
 
     card(record) {
@@ -455,61 +466,5 @@ export class HelioPresetCards {
             finally { create.disabled = false; }
         });
         return details;
-    }
-
-    legacyImportForm() {
-        const details = document.createElement('details'); details.className = 'helio-add-preset helio-legacy-import';
-        const summary = document.createElement('summary'); summary.textContent = 'Import historical WLED looks';
-        const form = document.createElement('form');
-        const help = document.createElement('p'); help.textContent = 'Choose a prepared review file for this product. Existing looks are never replaced. Historical recordings show old settings; colors and wiring may differ.';
-        const label = document.createElement('label'); label.textContent = 'Prepared JSON file';
-        const file = document.createElement('input'); file.type = 'file'; file.accept = '.json,application/json'; file.required = true; label.append(file);
-        const reviewButton = document.createElement('button'); reviewButton.type = 'submit'; reviewButton.className = 'helio-secondary-action'; reviewButton.textContent = 'Review file';
-        const commit = document.createElement('button'); commit.type = 'button'; commit.className = 'helio-primary-action'; commit.textContent = 'Import reviewed looks'; commit.disabled = true;
-        const status = document.createElement('p'); status.setAttribute('role', 'status');
-        const list = document.createElement('ul');
-        let reviewed = null, generation = 0;
-        file.addEventListener('change', () => { generation++; reviewed = null; this.notice = null; commit.disabled = true; list.replaceChildren(); status.textContent = ''; });
-        form.addEventListener('submit', async event => {
-            event.preventDefault(); const current = ++generation; reviewed = null; commit.disabled = true; list.replaceChildren();
-            const selected = file.files?.[0];
-            if (!selected || selected.size > 1048576) { status.textContent = 'Select a valid file for the configured product.'; return; }
-            reviewButton.disabled = true; status.textContent = 'Checking file and controller templates…';
-            try {
-                const product = await this.legacyProduct?.();
-                if (generation !== current) return;
-                if (!product) throw new Error('Configure a matching product setup before importing.');
-                const result = await prepareLegacyImport(await selected.text(), product, this.client);
-                if (generation !== current) return;
-                if (await this.legacyProduct?.() !== product) throw new Error('Product configuration changed; review again');
-                if (generation !== current) return;
-                for (const entry of result.ready) {
-                    const row = document.createElement('li');
-                    const label = entry.sourceName !== entry.name ? `${entry.sourceName} → ${entry.name}` : entry.name;
-                    row.textContent = `${label}: ready${entry.warnings.length ? ' · ' + entry.warnings.join(' ') : ''}`;
-                    list.append(row);
-                }
-                for (const entry of result.skipped) { const row = document.createElement('li'); row.textContent = `${entry.name}: ${entry.reason}`; list.append(row); }
-                reviewed = { ...result, product }; commit.disabled = !result.ready.length;
-                status.textContent = `${result.ready.length} ready · ${result.skipped.length} skipped. Review before importing.`;
-            } catch (error) { if (generation === current) status.textContent = error.message; }
-            finally { reviewButton.disabled = false; }
-        });
-        commit.addEventListener('click', async () => {
-            if (!reviewed) return;
-            const selected = reviewed; reviewed = null; commit.disabled = true; reviewButton.disabled = true; file.disabled = true;
-            try {
-                if (await this.legacyProduct?.() !== selected.product) throw new Error('Product configuration changed; review again.');
-                const result = await commitLegacyImport(selected, this.client, (done, total) => { status.textContent = `Importing ${done} of ${total}…`; });
-                const message = result.failed
-                    ? `${result.saved.length} saved. ${result.failed} could not be confirmed; check the list before retrying.`
-                    : `${result.saved.length} historical looks imported.`;
-                this.notice = message;
-                await this.mount(this.host);
-                this.status.textContent = message;
-            } catch (error) { status.textContent = error.message; }
-            finally { reviewButton.disabled = false; file.disabled = false; }
-        });
-        form.append(help, label, reviewButton, commit, status, list); details.append(summary, form); return details;
     }
 }

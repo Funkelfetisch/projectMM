@@ -68,6 +68,16 @@ test('virtual 2D setup preserves output wiring and confirms its exact chosen ras
         assert.equal(base.state.Layouts.ProductStrip.height, 1);
     }
 });
+test('setup offers the 2D layout even on a board running its strip, and the 2021 jacket has one for its 50 outputs', () => {
+    const classic = { firmware: 'nebulite-esp32', chip: 'ESP32 (rev 3)' };
+    const base = profiles.find(p => p.name === 'NEBULITE Jacket ESP32');
+    const virtual = productProjectionProfile(base, 'virtual2d');
+    assert.equal(virtual.state.Layouts.ProductStrip.type, 'PixelMapLayout');
+    assert.equal(productProjectionPoints(base).points.length, 50);
+    assert.deepEqual(virtual.state.Drivers, base.state.Drivers);
+    const [, projection] = elements(mount({ identity: classic, modules: modulesFor(base) }), 'select');
+    assert.equal(projection.value, 'virtual2d');
+});
 test('the provisional jacket map follows the stated bottom, top, hood and sleeves sequence', () => {
     const base = profiles.find(p => p.name === 'NEBULITE Jacket S3');
     const {points} = productProjectionPoints(base);

@@ -1277,3 +1277,21 @@ test('runtime metadata refresh ignores closed and unloaded early card editors', 
     await Promise.resolve(); await Promise.resolve();
     assert.equal(called, 0);
 });
+
+test('NEBULITE cards stand under a Static and a Music heading, and a group with no card has no heading', async () => {
+    const source = readFileSync(new URL('../../src/ui/helio-preset-cards.js', import.meta.url), 'utf8').replace(/^import .*$/gm, '');
+    globalThis.document = { createElement: () => ({ className: '', textContent: '' }) };
+    const { HelioPresetCards } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+    const card = name => ({ dataset: { presetName: name } });
+    const records = new Map(['Lake', 'Equalizer'].map(name => [name, { item: { originScene: name === 'Equalizer' ? 'geq' : 'lake' } }]));
+    let shown;
+    const grid = { replaceChildren: (...children) => { shown = children; } };
+    const cards = [card('Equalizer'), card('Lake')];
+    const fake = { grid, records, isMusic: item => item?.originScene === 'geq' };
+    HelioPresetCards.prototype.showCards.call(fake, cards);
+    assert.deepEqual(shown.map(child => child.textContent || child.dataset.presetName), ['Static', 'Lake', 'Music', 'Equalizer']);
+    HelioPresetCards.prototype.showCards.call(fake, [cards[1]]);
+    assert.deepEqual(shown.map(child => child.textContent || child.dataset.presetName), ['Static', 'Lake']);
+    HelioPresetCards.prototype.showCards.call({ grid, records }, cards);
+    assert.deepEqual(shown, cards, 'a product without the distinction keeps one list');
+});

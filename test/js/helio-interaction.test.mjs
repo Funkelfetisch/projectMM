@@ -237,7 +237,7 @@ test('the live garment stage hides a stale or unverified source rather than show
 test('a set-up product without an illustration shows its live strip at the layout\'s light count', () => {
     const canvas = { hidden: true }, image = { hidden: false }, label = { textContent: '' };
     const strips = [];
-    const model = { name: 'NEBULITE Jacket ESP32' };
+    const model = { name: 'NEBULITE Fanny pack ESP32' };
     const context = contextFor(['drawNebuliteLiveStage'], {
         document: { getElementById: () => canvas, querySelector: selector =>
             selector === '.nebulite-product-image' ? image : label },

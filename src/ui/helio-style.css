@@ -1276,14 +1276,6 @@ body[data-brand="helio"] .helio-setup-panel.is-collapsed {
 .helio-add-preset label { display: grid; gap: 8px; }
 .helio-add-preset input,
 .helio-add-preset select { width: 100%; min-width: 0; box-sizing: border-box; }
-.helio-legacy-import form { min-width: 0; }
-.helio-legacy-import p { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
-.helio-legacy-import input[type="file"] { color: var(--fg); font: inherit; }
-.helio-legacy-import input[type="file"]::file-selector-button {
-    min-height: 40px; padding: 0 12px; margin-right: 10px; color: var(--fg);
-    background: var(--card-bg-1); border: 1px solid var(--border); border-radius: 6px; font: inherit; cursor: pointer;
-}
-.helio-legacy-import ul { margin: 0; padding-left: 1.25rem; line-height: 1.5; overflow-wrap: anywhere; }
 
 .helio-controls-trigger {
     margin-top: auto;
@@ -1550,3 +1542,17 @@ body[data-product="nebulite"] .workspace.helio-product #main { max-width: 1500px
 body[data-product="nebulite"] .workspace:not(.helio-device) .preview-pane { display: none; }
 /* With the sidebar gone the stage is wide: the garment keeps to one screen height. */
 .nebulite-product-shell > img, .nebulite-product-shell > canvas { max-height: calc(100vh - 170px); }
+/* The NEBULITE logo stands where the name was, in the accent token; the text stays for screen readers. */
+body[data-product="nebulite"] #status-bar .brand {
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 112px;
+    height: 14px;
+    color: transparent;
+    font-size: 0;
+    background: var(--accent);
+    -webkit-mask: url(nebulite-logo.svg) center / contain no-repeat;
+    mask: url(nebulite-logo.svg) center / contain no-repeat;
+}
+.helio-native-preset-group { grid-column: 1 / -1; margin: 8px 0 0; font-size: 1rem; font-weight: 600; color: var(--fg-muted); }
+.helio-native-preset-group:first-child { margin-top: 0; }

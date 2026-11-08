@@ -11,6 +11,7 @@ const PRODUCT_ART = {
     "NEBULITE Croptop S3": { src: "/products/croptop_top.png", label: "Crop-top illustration" },
     "NEBULITE Croptop ESP32": { src: "/products/croptop_top.png", label: "Crop-top illustration" },
     "NEBULITE Jacket S3": { src: "/products/jacket_leds.png", label: "Jacket illustration; this setup also supports the vest" },
+    "NEBULITE Jacket ESP32": { src: "/products/jacket_leds.png", label: "Jacket illustration" },
 };
 
 export function nebuliteProductArt(model) { return PRODUCT_ART[model] || null; }
@@ -25,16 +26,18 @@ const CROPTOP_POINTS = '1,8;12,8;10,3;16,2;4,0;5,8;13,4;16,8';
 // Provisional output order: bottom, top, hood, first sleeve, second sleeve.
 // Parallel Y branches need a different map.
 const JACKET_POINTS = '5,14;7,14;9,14;11,14;13,14;15,14;5,6;7,6;9,6;11,6;13,6;15,6;7,2;8,1;9,1;11,1;12,1;13,2;0,5;1,6;2,7;1,9;2,10;3,11;20,5;19,6;18,7;19,9;18,10;17,11';
+// The 2021 jacket's 50 outputs where the front view shows them, from the NEBULITE app's overlay (funkelapp-jacket.json), on an 8-unit grid of its 200-unit artwork.
+const JACKET_ESP32_POINTS = '14,12;13,11;11,9;12,16;12,22;11,22;9,11;11,10;11,10;11,10;12,22;12,16;12,13;14,7;14,7;14,7;15,15;15,23;12,8;14,13;15,14;18,17;6,17;6,22;6,22;8,11;7,10;7,10;6,10;6,10;16,8;6,17;16,7;15,7;15,7;2,21;2,22;1,20;8,11;7,10;5,5;13,5;9,4;9,4;9,4;9,4;9,4;9,5;13,4;18,3';
 export function productProjectionProfile(profile, projection = "strip") {
     if (projection === "strip") return { ...profile, projection: "strip" };
     // A product whose own layout is a point map, such as the necklace's ring, is already two-dimensional.
     if (projection === "virtual2d" && profile?.state?.Layouts?.ProductStrip?.type === "PixelMapLayout") return { ...profile, projection };
     const dimensions = profile?.name === "NEBULITE Croptop S3" || profile?.name === "NEBULITE Croptop ESP32" ? [3, 3] :
-        profile?.name === "NEBULITE Jacket S3" ? [7, 13] : null;
+        profile?.name === "NEBULITE Jacket S3" ? [7, 13] : profile?.name === "NEBULITE Jacket ESP32" ? [19, 24] : null;
     if (projection !== "virtual2d" || !dimensions) throw new Error("This product has no virtual 2D layout.");
     const state = JSON.parse(JSON.stringify(profile.state));
     state.Layouts = { $patch: "replace", ProductStrip: {type: "PixelMapLayout",
-        points: profile.name === "NEBULITE Jacket S3" ? JACKET_POINTS : CROPTOP_POINTS} };
+        points: profile.name === "NEBULITE Jacket S3" ? JACKET_POINTS : profile.name === "NEBULITE Jacket ESP32" ? JACKET_ESP32_POINTS : CROPTOP_POINTS} };
     return { ...profile, state, projection: "virtual2d" };
 }
 
@@ -139,11 +142,10 @@ function setupProfile(profile, projection) {
     catch { return productProjectionProfile(profile, "strip"); }
 }
 
-/// The layout a setup offers: the board's own when it is set up, otherwise the 2D layout, which a product without one applies as its strip.
-function setupProjection(current, modules) {
-    if (current) return productProjection(current, modules) || "strip";
-    return "virtual2d";
-}
+/// The layout a setup offers: the 2D layout, which a product without one applies as its strip.
+const SETUP_PROJECTION = "virtual2d";
+/// The layout the board runs.
+function boardProjection(current, modules) { return productProjection(current, modules) || "strip"; }
 
 export function productProjection(profile, modules) {
     if (!profile) return null;
@@ -192,11 +194,11 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
     const attempt = session.attempt ||= {
         profileName: current?.name || "", busy: false, written: false,
         confirmed: false, message: "", phase: "", touched: false,
-        projection: setupProjection(current, modules),
+        projection: SETUP_PROJECTION,
     };
-    attempt.projection ||= setupProjection(current, modules);
+    attempt.projection ||= SETUP_PROJECTION;
     if (metadataReady && attempt.confirmed && (current?.name !== attempt.profileName ||
-        setupProjection(current, modules) !== attempt.projection)) {
+        boardProjection(current, modules) !== attempt.projection)) {
         attempt.confirmed = false;
         attempt.message = "The controller setup has changed. Check its current setup.";
     }
@@ -242,7 +244,7 @@ export function renderProductSetup({ profiles, identity, modules, apply, verify,
         current = choices.find(profile => productProfileMatches(profile, latestModules));
         if (metadataReady && !metadataFailed && !attempt.touched && !attempt.busy && !attempt.written && !attempt.confirmed && current) {
             attempt.profileName = current.name;
-            attempt.projection = setupProjection(current, latestModules);
+            attempt.projection = SETUP_PROJECTION;
         }
         selected.textContent = metadataFailed ? "Setup unknown" : !metadataReady ? "Checking setup…" :
             current ? displayName(current) : (hasPhysicalOutput(latestModules) ? "Custom setup" : "Choose your NEBULITE");

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = yaml.safe_load((ROOT / "docs" / "reference" / "openapi.yaml").read_text())
 SERVER = (ROOT / "src" / "core" / "system" / "HttpServerModule.cpp").read_text()
 METHODS = ("get", "post", "patch", "delete")
-STATIC = {"/", "/modules"}   # UI entry points, not API operations
+STATIC = {"/", "/modules", "/firmware.js"}   # what the page itself loads, not API operations
 
 
 def server_routes():
