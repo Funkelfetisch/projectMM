@@ -2662,8 +2662,8 @@ function drawNebuliteLiveStage() {
     }
     canvas.hidden = !drawn;
     if (image) image.hidden = drawn;
-    label.textContent = drawn ? (art === "jacket" ? "Live source · approximate 30 LED jacket" : art === "croptop" ? "Live source · historical crop-top illustration" : `Live source · ${count} LED strip`)
-        : profile ? "Waiting for a matching live source preview" : "NEBULITE · Choose your product in Setup";
+    label.textContent = drawn ? (art === "jacket" ? "Live on the 30 LED jacket illustration" : art === "croptop" ? "Live on the crop-top illustration" : `Live on a ${count} LED strip`)
+        : profile ? "Connecting to the live preview" : "Choose your product in Setup";
 }
 
 function drawHelioLivePreviewFrame(now, force = false) {
@@ -2916,7 +2916,7 @@ function hydrateHelioHome(wrap, presets) {
         const label = document.createElement("p");
         label.className = "helio-helper-text";
         label.dataset.nebuliteLiveLabel = "";
-        label.textContent = artwork ? model + " · Historical product illustration" : "NEBULITE · Choose your product in Setup";
+        label.textContent = artwork ? artwork.label : "Choose your product in Setup";
         canvasWrap.append(label);
     } else canvasWrap.append(canvas, previewOverlays);
     stage.append(info, canvasWrap);
@@ -7541,7 +7541,8 @@ function openNavDrawer() {
 function applyTheme(t) {
     document.body.dataset.theme = t;
     const btn = document.getElementById("theme-toggle");
-    if (btn) btn.textContent = (t === "dark") ? "☀" : "🌙";
+    // Line icons drawn in the button's own colour, where an emoji would bring its own palette.
+    if (btn) btn.innerHTML = (t === "dark") ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>' : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
 }
 
 
@@ -7570,6 +7571,9 @@ function applyBranding() {
     const helio = isHelioFirmware(info);
     preview.setProductInfo(info);
     document.body.dataset.brand = helio ? "helio" : "projectmm";
+    // NEBULITE shares HELIO's product layout and wears its own app's palette (helio-style.css).
+    if (isNebuliteFirmware(info)) document.body.dataset.product = "nebulite";
+    else delete document.body.dataset.product;
     applyFavicon(helio);
     const brand = document.querySelector("#status-bar .brand");
     if (brand) brand.textContent = helio ? productLabel(info) : "MoonLight";

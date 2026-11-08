@@ -1,3 +1,9 @@
+/* Hallmark · shape: app screen · genre: modern-minimal · theme: brand (NEBULITE app ui/theme.ts: paper #07070B, accent #A58BFF, action #7048D9) · redesign: polish · scope: app · built: the project · v2.0.0 */
+/* Hallmark · polish: NEBULITE wears its app's palette through tokens; HELIO keeps its own values in the same tokens; the eyebrow is a plain label; glow, sheen and glass off for NEBULITE; disabled shows in fill, ink and cursor */
+/* Hallmark · waive 48 · the base and brand palettes are token blocks on body[data-theme] and body[data-product], the project's theme mechanism, not :root; the remaining literals are in the generic MoonLight UI, outside this polish */
+/* Hallmark · waive 76 · #brand-logo gets its source from applyBranding and stays hidden until then */
+/* Hallmark · waive 67 · .surface-popup-caption and .mooncloud-chart-title are generic MoonLight cards, not the NEBULITE home */
+/* Hallmark · reworded the live stage labels: "Live source · historical crop-top illustration" to "Live on the crop-top illustration", "Live source · approximate 30 LED jacket" to "Live on the 30 LED jacket illustration", "Waiting for a matching live source preview" to "Connecting to the live preview", "NEBULITE · Choose your product in Setup" to "Choose your product in Setup" · 63 names the dot-joined strings */
 .workspace.helio-product {
     display: block;
 }
@@ -233,18 +239,21 @@
 
 .helio-scene-card.active {
     border-color: var(--helio-gold);
-    box-shadow: inset 0 0 0 1px rgba(251,191,36,0.4);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--helio-gold) 40%, transparent);
 }
 
+/* Disabled shows in fill, ink and cursor, never in opacity alone. */
 .helio-scene-card:disabled .helio-scene-label,
 .helio-scene-card:disabled .helio-scene-meta,
 .helio-playlist-section.needs-audio .preset-name,
 .helio-playlist-section.needs-audio .preset-meta {
-    opacity: 0.58;
+    color: var(--fg-subtle);
 }
 
 .helio-scene-card:disabled {
     cursor: not-allowed;
+    background: var(--card-bg-0);
+    border-style: dashed;
 }
 
 .helio-mode-preview {
@@ -885,6 +894,62 @@ body[data-brand="helio"] .helio-home {
     --helio-magenta: #e879f9;
     --helio-indigo: #818cf8;
     --helio-panel: rgba(8, 13, 24, 0.86);
+    /* The product surfaces, one token each, so a product brand restyles them without a rule of its own. */
+    --brand-stage-bg:
+        linear-gradient(115deg, rgba(245, 158, 11, 0.18), transparent 26%),
+        linear-gradient(300deg, rgba(34, 211, 238, 0.16), transparent 30%),
+        repeating-linear-gradient(135deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 18px),
+        #06080e;
+    --brand-stage-line: rgba(251, 191, 36, 0.34);
+    --brand-stage-shadow: 0 24px 70px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.08);
+    --brand-stage-sheen:
+        linear-gradient(90deg, rgba(255,255,255,0.10), transparent 18% 82%, rgba(255,255,255,0.08)),
+        linear-gradient(0deg, transparent 0 70%, rgba(245,158,11,0.09));
+    --brand-panel-bg: linear-gradient(145deg, rgba(255,255,255,0.075), rgba(255,255,255,0.025)), rgba(7, 10, 18, 0.86);
+    --brand-line: rgba(255,255,255,0.16);
+    --brand-action-bg: linear-gradient(135deg, #fbbf24, #fb7185);
+    --brand-action-line: rgba(251, 191, 36, 0.75);
+    --brand-on-action: #05070d;
+    --brand-action-glow: 0 0 24px rgba(245, 158, 11, 0.22);
+    --brand-control-bg: linear-gradient(145deg, rgba(255,255,255,0.07), rgba(255,255,255,0.025));
+    --brand-hover-glow: 0 0 18px rgba(34, 211, 238, 0.09);
+    --brand-trace-bg: #03050a;
+}
+
+/* NEBULITE wears the app's brand (NEBULITE app ui/theme.ts): violet on near-black, solid surfaces, no glow. */
+body[data-brand="helio"][data-product="nebulite"] .helio-home {
+    --helio-amber: #7048D9;
+    --helio-gold: #A58BFF;
+    --helio-cyan: #C9B8FF;
+    --helio-magenta: #A58BFF;
+    --helio-indigo: #A58BFF;
+    --helio-panel: #12121A;
+    --brand-stage-bg: #07070B;
+    --brand-stage-line: #262633;
+    --brand-stage-shadow: none;
+    --brand-stage-sheen: none;
+    --brand-panel-bg: #12121A;
+    --brand-line: #262633;
+    --brand-action-bg: #7048D9;
+    --brand-action-line: #7048D9;
+    --brand-on-action: #FFFFFF;
+    --brand-action-glow: none;
+    --brand-control-bg: #1B1B26;
+    --brand-hover-glow: none;
+    --brand-trace-bg: #07070B;
+}
+body[data-brand="helio"][data-product="nebulite"][data-theme="light"] .helio-home {
+    --helio-gold: #6336BD;
+    --helio-cyan: #6336BD;
+    --helio-magenta: #6336BD;
+    --helio-indigo: #6336BD;
+    --helio-panel: #FFFFFF;
+    --brand-stage-bg: #FFFFFF;
+    --brand-stage-line: #E3E3EC;
+    --brand-panel-bg: #FFFFFF;
+    --brand-line: #E3E3EC;
+    --brand-control-bg: #ECECF4;
+    --brand-trace-bg: #FFFFFF;
 }
 
 body[data-brand="helio"] .helio-stage {
@@ -893,13 +958,9 @@ body[data-brand="helio"] .helio-stage {
     grid-template-columns: minmax(150px, 190px) minmax(520px, 1fr);
     gap: 28px;
     padding: clamp(20px, 2.2vw, 34px);
-    border-color: rgba(251, 191, 36, 0.34);
-    background:
-        linear-gradient(115deg, rgba(245, 158, 11, 0.18), transparent 26%),
-        linear-gradient(300deg, rgba(34, 211, 238, 0.16), transparent 30%),
-        repeating-linear-gradient(135deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 18px),
-        #06080e;
-    box-shadow: 0 24px 70px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.08);
+    border-color: var(--brand-stage-line);
+    background: var(--brand-stage-bg);
+    box-shadow: var(--brand-stage-shadow);
 }
 
 body[data-brand="helio"] .helio-stage::before {
@@ -907,9 +968,7 @@ body[data-brand="helio"] .helio-stage::before {
     position: absolute;
     inset: 0;
     pointer-events: none;
-    background:
-        linear-gradient(90deg, rgba(255,255,255,0.10), transparent 18% 82%, rgba(255,255,255,0.08)),
-        linear-gradient(0deg, transparent 0 70%, rgba(245,158,11,0.09));
+    background: var(--brand-stage-sheen);
     mix-blend-mode: screen;
 }
 
@@ -918,31 +977,24 @@ body[data-brand="helio"] .helio-stage-info {
     z-index: 1;
 }
 
+/* A plain label above the actions, in the body face and sentence case. */
 body[data-brand="helio"] .helio-eyebrow {
-    width: max-content;
-    padding: 4px 9px;
-    border: 1px solid rgba(34, 211, 238, 0.45);
     color: var(--helio-cyan);
-    background: rgba(34, 211, 238, 0.08);
-    text-transform: uppercase;
-    letter-spacing: 0;
+    font-weight: 600;
 }
 
 body[data-brand="helio"] .helio-panel,
 body[data-brand="helio"] .helio-presets,
 body[data-brand="helio"] .helio-dashboard-menu {
-    background:
-        linear-gradient(145deg, rgba(255,255,255,0.075), rgba(255,255,255,0.025)),
-        rgba(7, 10, 18, 0.86);
-    border-color: rgba(255,255,255,0.16);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    background: var(--brand-panel-bg);
+    border-color: var(--brand-line);
 }
 
 body[data-brand="helio"] .helio-primary-action {
-    background: linear-gradient(135deg, #fbbf24, #fb7185);
-    border-color: rgba(251, 191, 36, 0.75);
-    color: #05070d;
-    box-shadow: 0 0 24px rgba(245, 158, 11, 0.22);
+    background: var(--brand-action-bg);
+    border-color: var(--brand-action-line);
+    color: var(--brand-on-action);
+    box-shadow: var(--brand-action-glow);
 }
 
 body[data-brand="helio"] .helio-secondary-action,
@@ -950,8 +1002,8 @@ body[data-brand="helio"] .helio-size-grid button,
 body[data-brand="helio"] .helio-start-grid button,
 body[data-brand="helio"] .helio-scene-card,
 body[data-brand="helio"] .preset-tool {
-    background: linear-gradient(145deg, rgba(255,255,255,0.07), rgba(255,255,255,0.025));
-    border-color: rgba(255,255,255,0.16);
+    background: var(--brand-control-bg);
+    border-color: var(--brand-line);
 }
 
 body[data-brand="helio"] .helio-secondary-action:hover,
@@ -959,14 +1011,13 @@ body[data-brand="helio"] .helio-size-grid button:hover,
 body[data-brand="helio"] .helio-start-grid button:hover,
 body[data-brand="helio"] .helio-scene-card:hover {
     border-color: var(--helio-cyan);
-    box-shadow: 0 0 18px rgba(34, 211, 238, 0.09);
+    box-shadow: var(--brand-hover-glow);
 }
 
 body[data-brand="helio"] .helio-trace-shell {
     min-height: 0;
-    background: #03050a;
-    border: 1px solid rgba(255,255,255,0.018);
-    box-shadow: 0 14px 34px rgba(0,0,0,0.24);
+    background: var(--brand-trace-bg);
+    border: 1px solid var(--brand-line);
 }
 
 body[data-brand="helio"] #helio-trace {
@@ -978,7 +1029,7 @@ body[data-brand="helio"] #helio-trace {
     right: 16px;
     bottom: 16px;
     z-index: 90;
-    width: min(420px, calc(100vw - 32px));
+    width: min(420px, calc(100% - 32px));   /* a fixed box's 100% is the viewport without its scrollbar */
     background: #03050a;
     border: 1px solid rgba(34, 211, 238, 0.24);
     border-radius: 8px;
@@ -1426,4 +1477,38 @@ body[data-brand="helio"] .helio-setup-panel.is-collapsed {
 @media (max-width: 640px) {
     .nebulite-setup-panel { grid-template-columns: minmax(0, 1fr); }
     .nebulite-setup-panel > button { width: 100%; }
+}
+
+/* NEBULITE takes the app's palette for the whole UI, dark and light (NEBULITE app ui/theme.ts). */
+body[data-product="nebulite"][data-theme="dark"] {
+    --bg-0: #07070B;
+    --bg-1: #12121A;
+    --fg: #F5F5FA;
+    --fg-muted: #A7A7BC;
+    --fg-subtle: #9D9DB2;
+    --accent: #A58BFF;
+    --accent-soft: #2A2148;
+    --card-bg-0: #12121A;
+    --card-bg-1: #1B1B26;
+    --card-bg-2: #262633;
+    --border: #2E2E3E;
+    --green: #3DD68C;
+    --red: #FF737D;
+    --yellow: #FFB020;
+}
+body[data-product="nebulite"][data-theme="light"] {
+    --bg-0: #EEEEF4;
+    --bg-1: #FFFFFF;
+    --fg: #171721;
+    --fg-muted: #505064;
+    --fg-subtle: #606075;
+    --accent: #6336BD;
+    --accent-soft: #EEE7FF;
+    --card-bg-0: #FFFFFF;
+    --card-bg-1: #ECECF4;
+    --card-bg-2: #E3E3EC;
+    --border: #D5D5E0;
+    --green: #146C43;
+    --red: #B42332;
+    --yellow: #805000;
 }

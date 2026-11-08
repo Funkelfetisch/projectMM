@@ -39,6 +39,9 @@ body[data-theme="light"] {
 
 * { box-sizing: border-box; }
 
+/* A wide child never scrolls the page sideways; clip, unlike hidden, keeps sticky children working. */
+html, body { overflow-x: clip; }
+
 body {
     margin: 0;
     background: var(--bg-0);
@@ -132,6 +135,7 @@ a { color: var(--accent); }
     line-height: 1;
 }
 .header-btn:hover { color: var(--fg); border-color: var(--accent); }
+.header-btn svg { display: block; margin: auto; }
 .header-btn[data-crashed="true"] {
     border-color: var(--red);
     color: var(--red);

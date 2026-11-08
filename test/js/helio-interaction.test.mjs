@@ -227,7 +227,7 @@ test('the live garment stage hides a stale or unverified source rather than show
     });
     context.drawNebuliteLiveStage();
     assert.equal(canvas.hidden, false); assert.equal(image.hidden, true);
-    assert.equal(label.textContent, 'Live source · historical crop-top illustration');
+    assert.equal(label.textContent, 'Live on the crop-top illustration');
     fresh = false; context.drawNebuliteLiveStage();
     assert.equal(canvas.hidden, true); assert.equal(image.hidden, false);
     fresh = true; matches = false; context.drawNebuliteLiveStage();
@@ -250,7 +250,7 @@ test('a set-up product without an illustration shows its live strip at the layou
     context.drawNebuliteLiveStage();
     assert.deepEqual(strips, [['sampler', 50], ['strip', 50]]);
     assert.equal(canvas.hidden, false); assert.equal(image.hidden, true);
-    assert.equal(label.textContent, 'Live source · 50 LED strip');
+    assert.equal(label.textContent, 'Live on a 50 LED strip');
 });
 
 test('garment preview refresh clears old historical and fallback renderers', () => {

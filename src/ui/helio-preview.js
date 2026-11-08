@@ -52,7 +52,8 @@ export function drawNebuliteStripPreview(canvas, time, sampler, count) {
         context.fillStyle = `rgb(${clampByte(color[0])}, ${clampByte(color[1])}, ${clampByte(color[2])})`;
         const x = left + Math.round(stripWidth * i / lights);
         const next = left + Math.round(stripWidth * (i + 1) / lights);
-        if (next > x) context.fillRect(x, top, next - x, stripHeight);
+        // A one-pixel gap where each light is wide enough, so a solid colour still reads as separate LEDs.
+        if (next > x) context.fillRect(x, top, next - x > 3 ? next - x - 1 : next - x, stripHeight);
     }
     canvas.dataset.previewRenderer = "nebulite-strip-simulation";
     canvas.setAttribute("aria-label", "Approximate animation preview on a linear RGB LED strip");
