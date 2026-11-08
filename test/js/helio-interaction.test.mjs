@@ -501,6 +501,35 @@ function previewFixture() {
     return { context, canvases, clocks };
 }
 
+test('every visible NEBULITE card plays by itself, and none plays for a viewer who asked for less motion', () => {
+    const { context } = previewFixture();
+    let reduced = false;
+    context.isNebuliteFirmware = () => true;
+    context.window = { innerHeight: 800, matchMedia: () => ({ matches: reduced }) };
+    const names = () => plain(context.helioPreviewItems(false, { animateOnly: true }).map(item => item.canvas.name));
+    assert.deepEqual(names(), ['static', 'active', 'hover', 'focus', 'new', 'preset-static', 'preset-hover', 'preset-new']);
+    reduced = true;
+    assert.deepEqual(names(), []);
+});
+
+test('the page takes the firmware\'s brand and the saved theme before its first paint', () => {
+    const page = readFileSync(new URL('../../src/ui/index.html', import.meta.url), 'utf8');
+    assert.ok(page.indexOf('src="firmware.js"') < page.indexOf('<header'), 'the firmware name arrives before anything can paint');
+    const inline = page.match(/<\/header>\s*<script>([\s\S]*?)<\/script>/)[1];
+    const run = (mmFirmware, saved = null) => {
+        const body = { dataset: { theme: 'dark' } }, brand = { textContent: 'MoonLight' };
+        const context = vm.createContext({ mmFirmware, document: { body, title: 'MoonLight', querySelector: () => brand }, localStorage: { getItem: () => saved } });
+        context.globalThis = context;
+        vm.runInContext(inline, context);
+        return { ...plain(body.dataset), title: context.document.title, label: brand.textContent };
+    };
+    assert.deepEqual(run('nebulite-s3', 'light'), { theme: 'light', brand: 'helio', product: 'nebulite', title: 'NEBULITE', label: 'NEBULITE' });
+    assert.deepEqual(run('nebulite-esp32'), { theme: 'dark', brand: 'helio', product: 'nebulite', title: 'NEBULITE', label: 'NEBULITE' });
+    assert.deepEqual(run('helio1'), { theme: 'dark', brand: 'helio', title: 'HELIO', label: 'HELIO' });
+    assert.deepEqual(run('esp32'), { theme: 'dark', title: 'MoonLight', label: 'MoonLight' });
+    assert.deepEqual(run(undefined), { theme: 'dark', title: 'MoonLight', label: 'MoonLight' }, 'a failed firmware.js leaves the plain page');
+});
+
 test('steady preview animation includes active, hover and focus cards plus missing snapshots, never static or offscreen cards', () => {
     const { context, canvases, clocks } = previewFixture();
     const names = context.helioPreviewItems(false, { animateOnly: true, includeMissing: true })

@@ -1,6 +1,6 @@
 # Product setup
 
-The NEBULITE dashboard offers product setup directly in its Setup section. Choices come from the same [device-model catalogue](../../mooninstaller/deviceModels.json) as the installer, filtered by the running firmware and reported chip family. A new unconfigured output opens the section; existing custom output wiring keeps it collapsed.
+The page reads the firmware's name from `/firmware.js` before its first paint, so a product shows its own brand from the start, and NEBULITE's sidebar stays closed until Advanced opens it. The NEBULITE dashboard offers product setup directly in its Setup section. Choices come from the same [device-model catalogue](../../mooninstaller/deviceModels.json) as the installer, filtered by the running firmware and reported chip family. A new unconfigured output opens the section; existing custom output wiring keeps it collapsed.
 
 The shared codebase currently has separate HELIO and NEBULITE firmware targets. This menu selects a compatible output profile; it does not switch firmware families or read PCB hardware-ID inputs. Automatic board identification is not implemented.
 

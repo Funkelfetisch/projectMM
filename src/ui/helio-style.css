@@ -1512,3 +1512,41 @@ body[data-product="nebulite"][data-theme="light"] {
     --red: #B42332;
     --yellow: #805000;
 }
+
+/* NEBULITE's sidebar is a drawer at every width: the home is the product, and Advanced opens the rest. */
+body[data-product="nebulite"] #nav {
+    position: fixed;
+    top: 60px;
+    left: 0;
+    bottom: 0;
+    height: auto;
+    margin: 0;
+    border-radius: 0;
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    visibility: hidden;   /* its links leave the tab order while it is closed */
+    transition: transform 0.2s ease, visibility 0.2s;
+    z-index: 90;
+}
+body[data-product="nebulite"].nav-open #nav {
+    transform: translateX(0);
+    visibility: visible;
+}
+body[data-product="nebulite"] #nav-overlay {
+    position: fixed;
+    top: 60px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 80;
+}
+body[data-product="nebulite"].nav-open #nav-overlay { display: block; }
+body[data-product="nebulite"] .workspace.helio-product #main { max-width: 1500px; }
+@media (prefers-reduced-motion: reduce) {
+    body[data-product="nebulite"] #nav { transition: none; }
+}
+/* Before the product workspace takes over, MoonLight's preview toolbar stays out of a NEBULITE page. */
+body[data-product="nebulite"] .workspace:not(.helio-device) .preview-pane { display: none; }
+/* With the sidebar gone the stage is wide: the garment keeps to one screen height. */
+.nebulite-product-shell > img, .nebulite-product-shell > canvas { max-height: calc(100vh - 170px); }

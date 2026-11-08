@@ -4081,6 +4081,8 @@ function paintHelioScenePreview(canvas, t) {
 function helioPreviewItems(force, opts = {}) {
     const items = [];
     const animated = canvas => {
+        // NEBULITE's cards are flat 2D canvases, so every visible one plays, as in the app; HELIO's WebGL trace plays one at a time.
+        if (isNebuliteFirmware()) return !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
         const card = canvas.closest(".helio-scene-card, .preset-card");
         return card?.classList.contains("active") || card?.matches(":hover, :focus-within");
     };

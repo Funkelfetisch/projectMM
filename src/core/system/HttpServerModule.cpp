@@ -585,6 +585,12 @@ void HttpServerModule::routeRequest(platform::TcpConnection& conn, char* req, si
         if (std::strcmp(path, "/") == 0 || std::strcmp(path, "/modules") == 0) serveFile(conn, *embeddedFile("index.html"), ifNoneMatch);
         // Every UI file at `/<name>`, from the one list embed_ui.cmake generates.
         else if (const ui::EmbeddedFile* file = embeddedFile(path + 1)) serveFile(conn, *file, ifNoneMatch);
+        // The page reads this before its first paint, so a product shows its own brand from the start.
+        else if (std::strcmp(path, "/firmware.js") == 0) {
+            char script[64];
+            mm::formatTo(script, sizeof(script), "globalThis.mmFirmware=\"%s\";", kFirmwareName);
+            sendResponse(conn, 200, "text/javascript", script);
+        }
         else if (std::strcmp(path, "/api/state") == 0) serveState(conn);
         else if (std::strcmp(path, "/api/system") == 0) serveSystem(conn);
         else if (std::strcmp(path, "/api/types") == 0) serveTypes(conn, ifNoneMatch);

@@ -9,6 +9,7 @@
 #include "core/system/HttpServerModule.h"
 #include "core/system/DevicesModule.h"   // the boards a hosts text names
 #include "core/system/WledPacket.h"      // a board announcing itself
+#include "core/util/build_info.h"
 #include "platform/platform.h"
 #include "http_loopback.h"
 
@@ -128,6 +129,14 @@ TEST_CASE("a module whose name holds a space is moved, replaced and deleted thro
 
     http.release();
     s.deleteTree(rack);
+}
+
+TEST_CASE("the page learns the firmware's name from a small script, before its first paint") {
+    RackServer server;
+    const std::string reply = request(server.http, "GET /firmware.js HTTP/1.1\r\n\r\n");
+    CHECK(reply.rfind("HTTP/1.1 200", 0) == 0);
+    CHECK(reply.find("Content-Type: text/javascript") != std::string::npos);
+    CHECK(reply.find(std::string("globalThis.mmFirmware=\"") + mm::kFirmwareName + "\";") != std::string::npos);
 }
 
 TEST_CASE("a firmware upload without a Content-Length is refused with 411, as every upload route refuses it") {
