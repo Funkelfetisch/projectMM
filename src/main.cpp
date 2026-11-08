@@ -414,7 +414,8 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         static constexpr mm::PresetTemplates templates{&mm::ProductPresets::writeIndex, &mm::ProductPresets::writeDocument};
         httpServer->setPresetTemplates(&templates);
     }
-    if (productFirmware) httpServer->setSendBudget(mm::platform::HEAP_RESERVE, 1024);
+    // Two full 1440-byte TCP segments a 20 ms tick: 1 KB loaded a page at 25 KB/s, and the reserve, not the chunk, guards the radio.
+    if (productFirmware) httpServer->setSendBudget(mm::platform::HEAP_RESERVE, 2880);
     // PreviewDriver pushes the coordinate table and per-frame RGB to the HTTP server's WS broadcaster.
     if (auto* preview = static_cast<mm::PreviewDriver*>(wired(drivers, "PreviewDriver"))) {
         preview->setBroadcaster(httpServer);

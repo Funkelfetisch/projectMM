@@ -48,13 +48,15 @@ struct HttpServerModule::PresetIndexSource {
     uint8_t next = 0;
     bool last = false;
 
-    PresetStore::Result writeFragment(JsonSink& sink) {
+    /// Write items until the fragment reaches `target` bytes, so a tick carries several presets instead of one.
+    PresetStore::Result writeFragment(JsonSink& sink, size_t target) {
         if (next == 0) sink.append("{\"items\":[");
-        if (next < snapshot.count) {
+        while (next < snapshot.count) {
             if (next) sink.append(",");
             const auto item = PresetStore::writeIndexItem(snapshot.names[next], sink);
             if (!item) return item;
             next++;
+            if (sink.size() >= target) break;
         }
         if (next == snapshot.count) {
             sink.appendf("],\"limit\":%u,\"active\":{\"effects\":", static_cast<unsigned>(PresetStore::kMaxPresets));
@@ -883,7 +885,7 @@ void HttpServerModule::servePresetIndex(platform::TcpConnection& conn) {
     PresetStore::Result first;
     {
         JsonSink fragment;
-        first = source->writeFragment(fragment);
+        first = source->writeFragment(fragment, fragmentBytes());
         if (first) {
             slot->bodyLeft = fragment.size();
             slot->owned = fragment.detach();
@@ -2747,7 +2749,7 @@ HttpServerModule::Refill HttpServerModule::refill(Send& s) {
         const uint8_t next = index->next;
         const bool last = index->last;
         JsonSink sink;
-        if (!index->writeFragment(sink)) return Refill::Failed;
+        if (!index->writeFragment(sink, fragmentBytes())) return Refill::Failed;
         if (sendRoom() == 0) {
             index->next = next;
             index->last = last;

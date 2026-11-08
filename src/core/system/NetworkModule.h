@@ -182,7 +182,9 @@ public:
                 std::snprintf(modeStr_, sizeof(modeStr_), "WiFi off");
                 std::snprintf(statusBuf_, sizeof(statusBuf_), "WiFi disabled");
                 setStatus(statusBuf_);
-                return;   // no station retries, AP fallback or provisioning while explicitly off
+                // No station retries or AP fallback while explicitly off, but the children still tick: provisioning switches the radio on.
+                MoonModule::tick1s();
+                return;
             }
         }
 

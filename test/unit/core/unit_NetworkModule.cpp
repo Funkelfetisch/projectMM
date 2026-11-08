@@ -269,6 +269,23 @@ TEST_CASE("a garment boots with its radio down, and a saved choice still outrank
     mm::platform::setTestMdnsAvailable(false);
 }
 
+TEST_CASE("the network card ticks its children while the radio is off, so serial provisioning can still hand over credentials") {
+    struct Counting : mm::MoonModule { int ticks = 0; void tick1s() MM_NONBLOCKING override { ++ticks; } };
+    FrozenClock clock;
+    WiFiNetwork w;
+    Counting provisioner;
+    w.net.addChild(&provisioner);
+    w.net.allowWifiToggle(true);
+    w.net.setWifiDefaultEnabled(false);
+    w.net.defineControls();
+    w.net.setup();
+    w.net.tick1s();
+    w.net.tick1s();
+    CHECK(provisioner.ticks == 2);
+    w.net.removeChild(&provisioner);
+    w.net.release();
+}
+
 TEST_CASE("provisioning a network switches a switched-off radio on and joins it") {
     FrozenClock clock;
     mm::platform::setTestWifiStaAvailable(true);
