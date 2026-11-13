@@ -601,6 +601,14 @@ private:
                     std::strcmp(doc.nodes[first].key, "wifiEnabled") || doc.nodes[first].type != json::JsonType::Bool) return false;
                 continue;
             }
+            // A sphere's size, set from the phone: the one System control, a whole number of centimetres, 0 for unset.
+            if (std::strcmp(key, "System") == 0) {
+                const auto& object = doc.nodes[child]; const int first = object.firstChild;
+                if (object.type != json::JsonType::Object || first < 0 || doc.nodes[first].next >= 0 || !doc.nodes[first].key ||
+                    std::strcmp(doc.nodes[first].key, "physicalDiameterCm") || doc.nodes[first].type != json::JsonType::Int ||
+                    doc.nodes[first].decimal || doc.nodes[first].intValue < 0 || doc.nodes[first].intValue > 255) return false;
+                continue;
+            }
             if (std::strcmp(key, "Drivers") == 0) { if (!driverControls(doc, &doc.nodes[child])) return false; continue; }
             if (std::strcmp(key, "Effects")) return false;
         }

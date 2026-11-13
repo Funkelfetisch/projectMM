@@ -352,6 +352,37 @@ TEST_CASE("BLE can disable and restore IP networking without admitting network s
     }
 }
 
+TEST_CASE("BLE sets a sphere's diameter as a saved System value, which the profile and the advertisement then carry") {
+    struct Model : mm::MoonModule {
+        uint8_t diameter = 0;
+        void defineControls() override { controls_.addControl("physicalDiameterCm", diameter); }
+    };
+    BleTree tree;
+    auto* model = new Model(); model->setName("System"); model->defineControls(); tree.scheduler.addModule(model);
+    tree.service.setAdvertisingProduct({1, 0});
+    tree.send(R"({"$v":1,"$id":1,"$op":"patch","$live":false,"System":{"physicalDiameterCm":50}})", 100);
+    CHECK(model->diameter == 50);
+    CHECK(model->dirty());   // a saved write, kept across a restart like any other setting
+    tree.send(R"({"$v":1,"$id":2,"$op":"profile"})", 101);
+    CHECK(tree.reply().find("\"diameterMm\":500") != std::string::npos);
+    CHECK(tree.service.advertisementSnapshot().product.diameterCm == 50);
+    tree.send(R"({"$v":1,"$id":3,"$op":"patch","$live":false,"System":{"physicalDiameterCm":0}})", 102);
+    CHECK(model->diameter == 0);
+    model->diameter = 30;
+    for (const char* request : {
+         R"({"$v":1,"$id":4,"$op":"patch","$live":false,"System":{"physicalDiameterCm":256}})",
+         R"({"$v":1,"$id":5,"$op":"patch","$live":false,"System":{"physicalDiameterCm":-1}})",
+         R"({"$v":1,"$id":6,"$op":"patch","$live":false,"System":{"physicalDiameterCm":"50"}})",
+         R"({"$v":1,"$id":7,"$op":"patch","$live":false,"System":{"physicalDiameterCm":50.5}})",
+         R"({"$v":1,"$id":8,"$op":"patch","$live":false,"System":{"physicalDiameterCm":50,"deviceName":"x"}})",
+         R"({"$v":1,"$id":9,"$op":"patch","$live":false,"System":{"deviceModel":"x"}})",
+         R"({"$v":1,"$id":10,"$op":"patch","$live":false,"System":null})"}) {
+        tree.send(request, 103);
+        CHECK(tree.reply().find("\"error\":\"scope\"") != std::string::npos);
+        CHECK(model->diameter == 30);
+    }
+}
+
 TEST_CASE("BLE telemetry remains valid JSON without a lighting tree") {
     mm::BleControlService service;
     service.handle(R"({"$v":1,"$id":1,"$op":"get"})", 100);
