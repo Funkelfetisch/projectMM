@@ -4,13 +4,15 @@ import json
 from pathlib import Path
 
 
-def test_the_catalog_revision_follows_the_code_of_its_schemas_not_their_comments():
+def test_the_catalog_revision_follows_the_code_of_its_schemas_not_their_comments_or_layout():
     root = Path(__file__).resolve().parents[2]
     specification = importlib.util.spec_from_file_location("product_scenes", root / "moondeck/build/gen_product_scenes.py")
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     source = 'int a = 1; // a note\n/// a doc line\nconst char* url = "http://x"; /* a block */ char c = \'/\';\n'
-    assert module.code(source) == 'int a = 1; \n\nconst char* url = "http://x";  char c = \'/\';\n'
+    assert module.code(source) == 'int a = 1; const char* url = "http://x"; char c = \'/\';'
+    assert module.code(source.replace("/// a doc line\n", "")) == module.code(source)   # a removed comment line
+    assert module.code(source.replace("int a", "int  a")) == module.code(source)
     assert module.code(source.replace("a note", "another note")) == module.code(source)
     assert module.code(source.replace("a = 1", "a = 2")) != module.code(source)
 
@@ -43,7 +45,7 @@ def test_product_scene_parameters_keep_original_labels_and_current_port_limitati
     assert scenes["colortwinkles"]["controlMetadata"]["speed"]["label"] == "Fade speed"
     assert "custom 2" not in scenes["geq"]["controls"]
     assert scenes["geq"]["controls"]["option 2"] is False
-    assert scenes["freqwave"]["controls"]["option 1"] is False
+    assert scenes["freqwave"]["controls"]["option 1"] is True  # pitch maps to hue logarithmically, as it is heard
     assert "logarithmically" in scenes["freqwave"]["controlMetadata"]["option 1"]["description"]
     assert scenes["ripple"]["type"] == "RingsEffect"
     assert scenes["ripple"]["controlMetadata"]["effect intensity"]["portVisible"]

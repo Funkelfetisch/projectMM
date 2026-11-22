@@ -106,6 +106,13 @@ public:
     uint32_t tickTimeUs() const { return tickTimeUs_; }
     /// Frames a second, derived from the tick time above.
     uint32_t fps() const { return tickTimeUs_ > 0 ? 1000000 / tickTimeUs_ : 0; }
+    /// The longest interval between two frame starts since the last call, and the module whose tick was slowest in the frame it ended; reading resets it, so each reader sees the stalls since its last look.
+    uint32_t takeWorstFrameUs(const char*& module) {
+        const uint32_t worst = worstFrameUs_;
+        module = worstModule_ ? worstModule_ : "";
+        worstFrameUs_ = 0; worstModule_ = nullptr;
+        return worst;
+    }
     /// How many top-level modules are registered.
     uint8_t moduleCount() const { return moduleCount_; }
     /// One top-level module by index, or null past the end.
@@ -192,7 +199,24 @@ private:
     uint32_t tickAccumUs_ = 0;
     uint32_t frameCount_ = 0;        ///< frames in the current window, which the average divides by
     uint32_t lastTimingUpdate_ = 0;  ///< when that window opened
+    uint32_t lastTickStartUs_ = 0;   ///< when the previous frame started
+    uint32_t worstFrameUs_ = 0;      ///< the longest frame-start interval since the last take
+    const char* worstModule_ = nullptr;   ///< the slowest module of the frame that ended in that interval
+    const char* slowestModule_ = nullptr; ///< the slowest module of the frame just finished
 };
+
+/// The first enabled effect under `module`, depth first: what a single-effect client such as a remote or the WLED shim calls the running effect.
+inline MoonModule* firstEffect(MoonModule* module) {
+    if (!module || !module->effectivelyEnabled()) return nullptr;
+    if (module->role() == ModuleRole::Effect) return module;
+    for (uint8_t i = 0; i < module->childCount(); ++i)
+        if (auto* found = firstEffect(module->child(i))) return found;
+    return nullptr;
+}
+/// The running effect, the first enabled one under Effects; null when none runs.
+inline MoonModule* runningEffect(Scheduler* s) {
+    return s ? firstEffect(s->firstByName("Effects")) : nullptr;
+}
 
 /// Whether the lights are on, defaulting to on where the control is absent; a Drivers master-state read, whose default lives here once per consumer.
 inline bool driversOn(Scheduler* s) {

@@ -151,6 +151,8 @@ public:
     virtual bool dimsByTime() const MM_NONBLOCKING { return false; }
     /// Global times local brightness, as last rebuilt, for a driver that dims by time.
     uint8_t effectiveBrightness() const { return effectiveBrightness_; }
+    /// This driver's own brightness, which it multiplies into the global one.
+    uint8_t localBrightness() const MM_NONBLOCKING { return localBrightness_; }
     /// Rebake only the brightness table for a level that moves every tick, the soft start, leaving the resolved profile as it is.
     void rampBrightness(uint8_t globalBrightness) MM_NONBLOCKING { correction_.rebuildBrightness(adoptBrightness(globalBrightness)); }
 

@@ -1346,6 +1346,9 @@ bool wifiStaInit(const char* ssid, const char* password) {
     if (password && password[0] != 0) {
         std::strncpy(reinterpret_cast<char*>(wifi_config.sta.password), password, sizeof(wifi_config.sta.password) - 1);
     }
+    // Every channel, then the strongest access point: a mesh broadcasts one name from several, and the default fast scan joins whichever it hears first.
+    wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
     // From here every call can fail for transient runtime reasons (mode conflict, driver-state mismatch, etc.). Log + clean up + return false so NetworkModule's state machine can fall back rather than panic.
     esp_err_t err;

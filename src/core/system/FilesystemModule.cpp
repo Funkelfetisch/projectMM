@@ -125,7 +125,27 @@ void FilesystemModule::tick1s() MM_NONBLOCKING {
     const uint32_t now = platform::millis();
     // Either saves: the debounce coalesces a burst of edits, and the ceiling bounds the wait because a control driven at 50 Hz never goes quiet.
     if (now - lastDirtyMs_ < DEBOUNCE_MS && now - firstDirtyMs_ < MAX_DEFER_MS) return;
-    flush();
+    // One file a second: a flash write stops the render loop while it runs, and several files written together showed as one long frozen frame.
+    saveNextDirty();
+}
+
+void FilesystemModule::saveNextDirty() {
+    bool remaining = false;
+    bool saved = false;
+    for (uint8_t i = 0; i < scheduler_->moduleCount(); i++) {
+        MoonModule* m = scheduler_->module(i);
+        if (!m || m == this || !subtreeDirty(m)) continue;
+        if (saved) { remaining = true; break; }
+        saved = true;
+        if (saveSubtree(m)) {
+            clearSubtreeDirty(m);
+            lastSaveMs_ = platform::millis();
+            everSaved_ = true;
+        } else {
+            remaining = true;   // kept dirty, so the next second retries it
+        }
+    }
+    dirtyPending_ = remaining;
 }
 
 // Refresh the "lastSaved" display string, "never" before the first save, otherwise how long ago the last successful write happened.

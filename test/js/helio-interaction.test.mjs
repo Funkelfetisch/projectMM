@@ -70,7 +70,7 @@ test('the jacket illustration requires matching live setup and its 30 mirrored l
     const context = contextFor(['drawHelioCardTracePreview'], { state: { modules }, NEBULITE_SETUP_PROFILES,
         isNebuliteFirmware: () => true, findModule: () => system, controlValue: module => module.controls[0].value,
         productProfileMatches, productProjection: () => 'strip', productProjectionPoints: () => ({ points: [], width: 1, height: 1 }),
-        requestNebulitePreviewMetadata() {}, setHelioPreviewKind() {}, whenJacketPreviewReady() {}, refreshHistoricalCroptopPreviews() {},
+        requestDriversPreviewMetadata() { return false; }, setHelioPreviewKind() {}, whenJacketPreviewReady() {}, refreshHistoricalCroptopPreviews() {},
         drawJacketPreview: () => { calls.push('jacket'); return true; },
         drawNebuliteStripPreview: () => calls.push('strip') });
     context.drawHelioCardTracePreview({}, 0, () => [], 30);
@@ -96,7 +96,7 @@ test('historical crop-top geometry requires matching live setup and complete log
     const calls = [];
     const context = contextFor(['drawHelioCardTracePreview'], { state: { modules }, NEBULITE_SETUP_PROFILES,
         isNebuliteFirmware: () => true, findModule: () => system, controlValue: module => module.controls[0].value,
-        productProfileMatches, requestNebulitePreviewMetadata() {}, setHelioPreviewKind() {}, drawHistoricalCroptop: () => { calls.push('historical'); return true; },
+        productProfileMatches, requestDriversPreviewMetadata() { return false; }, setHelioPreviewKind() {}, drawHistoricalCroptop: () => { calls.push('historical'); return true; },
         drawNebuliteStripPreview: () => calls.push('strip') });
     context.drawHelioCardTracePreview({}, 0, () => [], 8);
     assert.deepEqual(calls, ['historical']);
@@ -124,7 +124,7 @@ test('a 2D scene is sampled at each output cell before the garment simulator use
     const points = [];
     const context = contextFor(['drawHelioCardTracePreview'], { state:{modules}, NEBULITE_SETUP_PROFILES,
         isNebuliteFirmware:()=>true, findModule:()=>system, controlValue:module=>module.controls[0].value,
-        productProfileMatches, productProjection, productProjectionPoints, requestNebulitePreviewMetadata(){}, setHelioPreviewKind(){},
+        productProfileMatches, productProjection, productProjectionPoints, requestDriversPreviewMetadata(){ return false; }, setHelioPreviewKind(){},
         drawHistoricalCroptop:(_canvas,t,sample)=>{ for(let i=0;i<8;i++)sample((i+.5)/8,.5,t);return true; } });
     context.drawHelioCardTracePreview({}, 0, (x,y)=>{points.push([x,y]);return [0,0,0];}, 8, {effect:{type:'PlasmaEffect'}});
     assert.equal(points.length,8);
@@ -147,7 +147,7 @@ test('classic crop-top samples all eight configured 2D positions in output order
     const points = [];
     const context = contextFor(['drawHelioCardTracePreview'], { state: { modules }, NEBULITE_SETUP_PROFILES,
         isNebuliteFirmware:()=>true, findModule:()=>system, controlValue:module=>module.controls[0].value,
-        productProfileMatches, productProjection, productProjectionPoints, requestNebulitePreviewMetadata(){}, setHelioPreviewKind(){},
+        productProfileMatches, productProjection, productProjectionPoints, requestDriversPreviewMetadata(){ return false; }, setHelioPreviewKind(){},
         drawHistoricalCroptop:(_canvas,t,sample)=>{ for(let i=0;i<8;i++)sample((i+.5)/8,.5,t);return true; } });
     context.drawHelioCardTracePreview({}, 0, (x,y)=>{points.push([x,y]);return [0,0,0];}, 8, {effect:{type:'PlasmaEffect'}});
     const expected = productProjectionPoints(base);
@@ -167,7 +167,7 @@ test('the 30 LED jacket simulator receives the 2D field in physical output order
     const context=contextFor(['drawHelioCardTracePreview'],{state:{modules},NEBULITE_SETUP_PROFILES,
         isNebuliteFirmware:()=>true,findModule:()=>system,controlValue:module=>module.controls[0].value,
         productProfileMatches,productProjection,productProjectionPoints,productProjectionProfile,
-        requestNebulitePreviewMetadata(){},setHelioPreviewKind(){},
+        requestDriversPreviewMetadata(){ return false; },setHelioPreviewKind(){},
         drawJacketPreview:(_canvas,t,sampler,projection)=>{rendered++;assert.deepEqual(projection.points[0],[5,14]);for(let i=0;i<30;i++)sampler((i+.5)/30,.5,t);return projection.points.length===30;}});
     context.drawHelioCardTracePreview({},0,(x,y)=>{sampled.push([x,y]);return [0,0,0];},30,{effect:{type:'PlasmaEffect'}});
     const p=productProjectionPoints(base,modules);
@@ -175,18 +175,25 @@ test('the 30 LED jacket simulator receives the 2D field in physical output order
     assert.deepEqual(sampled.map(([x,y])=>[Math.round(x*p.width-.5),Math.round(y*p.height-.5)]),p.points);
 });
 
-test('crop-top preview loads missing driver metadata once and repaints after readback', async () => {
-    const pending = deferred(); let reads = 0, repaints = 0;
-    const context = contextFor(['requestNebulitePreviewMetadata'], {
-        nebulitePreviewMetadataPending: false, nebulitePreviewMetadataRetryAt: 0,
-        performance: { now: () => 100 }, helioNeedsModuleMetadata: name => name === 'Drivers',
-        ensureHelioModuleMetadata: () => { reads++; return pending.promise; },
+test('a preview waits once for missing driver metadata, repaints after readback, and draws with what it has after a failure', async () => {
+    let now = 100;
+    const reads = [deferred(), deferred()]; let read = 0, repaints = 0, missing = true;
+    const context = contextFor(['requestDriversPreviewMetadata'], {
+        driversPreviewMetadataPending: false, driversPreviewMetadataRetryAt: 0,
+        performance: { now: () => now }, helioNeedsModuleMetadata: name => name === 'Drivers' && missing,
+        ensureHelioModuleMetadata: () => reads[read++].promise,
         refreshHistoricalCroptopPreviews: () => { repaints++; },
     });
-    context.requestNebulitePreviewMetadata(); context.requestNebulitePreviewMetadata();
-    assert.equal(reads, 1); assert.equal(repaints, 0);
-    pending.resolve(true); await until(() => repaints === 1);
-    await until(() => context.nebulitePreviewMetadataPending === false);
+    assert.equal(context.requestDriversPreviewMetadata(), true, 'a preview waits while the palette list loads');
+    assert.equal(context.requestDriversPreviewMetadata(), true);
+    assert.equal(read, 1, 'one readback serves every waiting preview'); assert.equal(repaints, 0);
+    reads[0].resolve(false); await until(() => context.driversPreviewMetadataPending === false);
+    assert.equal(context.driversPreviewMetadataRetryAt, 5100);
+    assert.equal(context.requestDriversPreviewMetadata(), false, 'after a failed readback a preview draws with what it has');
+    now = 5200;
+    assert.equal(context.requestDriversPreviewMetadata(), true, 'and the readback is tried again later');
+    reads[1].resolve(true); missing = false; await until(() => repaints === 1);
+    assert.equal(context.requestDriversPreviewMetadata(), false, 'loaded metadata never holds a preview back');
 });
 
 test('live garment wiring changes invalidate previews only when their renderer can change', () => {
@@ -530,11 +537,12 @@ test('the page takes the firmware\'s brand and the saved theme before its first 
     assert.deepEqual(run(undefined), { theme: 'dark', title: 'MoonLight', label: 'MoonLight' }, 'a failed firmware.js leaves the plain page');
 });
 
-test('steady preview animation includes active, hover and focus cards plus missing snapshots, never static or offscreen cards', () => {
+test('every visible HELIO card plays, as in the app, and no offscreen card is painted or clocked', () => {
     const { context, canvases, clocks } = previewFixture();
+    context.isNebuliteFirmware = () => false;
     const names = context.helioPreviewItems(false, { animateOnly: true, includeMissing: true })
         .map(item => item.canvas.name);
-    assert.deepEqual(plain(names), ['active', 'hover', 'focus', 'new', 'preset-hover', 'preset-new']);
+    assert.deepEqual(plain(names), ['static', 'active', 'hover', 'focus', 'new', 'preset-static', 'preset-hover', 'preset-new']);
     const offscreen = canvases.find(item => item.name === 'offscreen');
     assert.equal(offscreen.dataset.previewRenderer, undefined);
     assert.equal(offscreen.dataset.previewMax, undefined);
@@ -548,7 +556,7 @@ test('missing preview snapshots render once while painted idle cards retain thei
     for (const item of missing) item.canvas.dataset.previewRenderer = 'painted';
     assert.equal(context.helioPreviewItems(false, { missingOnly: true }).length, 0);
     assert.deepEqual(plain(context.helioPreviewItems(false, { animateOnly: true, includeMissing: true })
-        .map(item => item.canvas.name)), ['active', 'hover', 'focus', 'preset-hover']);
+        .map(item => item.canvas.name)), ['static', 'active', 'hover', 'focus', 'new', 'preset-static', 'preset-hover', 'preset-new']);
 });
 
 test('preview frame budget yields after an expensive card and resumes at the next card without skips', () => {
@@ -585,6 +593,7 @@ test('background preset preview hydration cools down after failure and clears it
     const context = contextFor(['paintHelioScenePreview'], {
         performance: { now: () => now }, helioPresetCollection: collection,
         startHelioModePreviews: () => { ++restarted; }, helioPresetModule: () => ({ type: 'SolidEffect' }),
+        requestDriversPreviewMetadata: () => false,
         helioControl: () => ({}), helioChoiceIndex: () => 0, paletteByIndex: () => 'palette',
         makeHelioSampler: () => 'sampler', helioCurrentCount: () => 222,
         drawHelioCardTracePreview: (...args) => draws.push(args),
@@ -922,7 +931,7 @@ test('the dashboard distinguishes pending playback readback from a confirmed Off
 });
 
 test('the generic Effects view shows a read-only loading state and offers retry after readback failure', async () => {
-    const element = tagName => ({ tagName, isConnected: true, children: [], attributes: {}, listeners: {},
+    const element = tagName => ({ tagName, isConnected: true, children: [], attributes: {}, listeners: {}, dataset: {},
         set innerHTML(_value) { this.children = []; },
         setAttribute(name, value) { this.attributes[name] = value; },
         appendChild(child) { this.children.push(child); },
@@ -931,13 +940,14 @@ test('the generic Effects view shows a read-only loading state and offers retry 
     const first = deferred(), retry = deferred();
     const gates = [first, retry];
     let reads = 0;
-    const context = contextFor(['renderCards', 'findModule'], {
+    const context = contextFor(['renderCards', 'renderCardsInto', 'findModule'], {
         document: { getElementById: () => main, createElement: element },
         state: { modules: [{ name: 'Effects', controls: [], children: [] }] }, selectedModule: 'Effects',
         helioEffectsStale: true, HELIO_VIEW: '@helio', PRESETS_VIEW: '@presets', HELIO_PLAYLISTS_VIEW: '@playlists',
         isHelioFirmware: () => false, deviceFirmwareInfo: () => ({}), setHelioDeviceMode() {}, setHelioProductMode() {},
         helioTrace: { stop() {} }, closeHelioFloatingPreview() {},
         ensureHelioEffectsState: () => gates[reads++].promise,
+        window: { scrollX: 0, scrollY: 0, scrollTo() {} },
     });
     context.renderCards();
     assert.equal(main.attributes['aria-busy'], 'true');
@@ -1015,6 +1025,7 @@ function bootstrapFixture() {
         deviceFirmwareInfo: () => ({}), isHelioFirmware: () => true,
         applyBranding: () => renders.push('branding'), renderNav: () => renders.push('nav'),
         renderCards: () => renders.push('cards'), updateValues: () => renders.push('values'),
+        helioHomeOnScreen: () => null,
         requestAnimationFrame: callback => callback(),
         document: { documentElement: { classList: { remove(name) { assert.equal(name, 'ui-booting'); ++revealed; } } } },
     });
@@ -1250,7 +1261,7 @@ function earlyCardsFixture({ firmware = 'helio1', initialState = null, unloading
     ] };
     let context;
     context = contextFor(['acceptInitialPresetIndexResponse', 'takeInitialPresetIndexResponse', 'deviceFirmwareInfo',
-        'isNebuliteFirmware', 'isHelioFirmware', 'findModule', 'renderEarlyHelioHome', 'renderHelioConnectingStage',
+        'isNebuliteFirmware', 'isHelioFirmware', 'productLabel', 'findModule', 'renderEarlyHelioHome', 'renderHelioConnectingStage',
         'renderHelioHome', 'hydrateHelioHome', 'renderStateSnapshot', 'mountHelioPresetCards', 'helioPresetModule',
         'invalidateHelioEffects'], {
         state: initialState, wsUnloading: unloading, initialPresetIndex: null, initialFirmwareModule: null,
@@ -1431,4 +1442,24 @@ test('early palette metadata hooks complete false without creating a state waite
     } } });
     assert.equal(result, false); assert.equal(f.context.state, null); assert.equal(f.requests.length, before);
     assert.equal(f.mounts.length, 1);
+});
+
+test('drawing the view on screen again keeps the page where it was, and only a move to another view starts at the top', () => {
+    const main = { dataset: {}, scrollTop: 0 };
+    const window = { scrollX: 0, scrollY: 0, scrollTo(x, y) { this.scrollX = x; this.scrollY = y; } };
+    const context = contextFor(['renderCards'], {
+        document: { getElementById: () => main }, state: {}, selectedModule: '@helio', window,
+        // Emptying #main collapses the page, as the browser does when the content under the scroll position goes.
+        renderCardsInto: () => { window.scrollX = 0; window.scrollY = 0; main.scrollTop = 0; },
+    });
+    window.scrollY = 825;
+    context.renderCards();
+    assert.equal(window.scrollY, 825, 'the first rebuild after the early home is the same page');
+    window.scrollY = 900;
+    context.renderCards();
+    assert.equal(window.scrollY, 900, 'a scene switch rebuilding the home keeps the scroll position');
+    context.selectedModule = 'Drivers';
+    window.scrollY = 900;
+    context.renderCards();
+    assert.equal(window.scrollY, 0, 'another view starts at the top');
 });

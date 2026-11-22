@@ -152,6 +152,15 @@ public:
     /// @guide Off scales the output to black and keeps `brightness`, so switching on restores the level. The UI, infrared, the WLED app, Home Assistant and MQTT all drive it.
     bool on = true;
 
+    /// The most current the lights may draw from their supply, in mA; 0 does not limit.
+    /// @guide A long or thin cable, a slip ring or a power bank drops the voltage under load until the controller resets. The limit dims the whole frame just enough to stay under it, from what every LED is sent.
+    uint16_t maxCurrent = 0;
+    /// What one LED colour draws fully lit, in mA.
+    /// @guide 20 is the WS2812B's figure. For your own LEDs: measure a strip on full white, divide by its lights, then by its colours.
+    uint8_t channelCurrent = 20;
+    /// What a dark LED still draws, in mA: the FastLED figure for a WS2812B, which the limit keeps out of the lights' budget.
+    static constexpr uint32_t kDarkMilliamps = 1;
+
     /// GPIOs switching the LED power supply, closed while `on` and brightness is above 0.
     char relayPins[24] = "";
 
@@ -248,6 +257,9 @@ public:
     bool        dark_ = false;                  ///< safe mode: every driver sends black, so no LED holds a bright frame
     bool        softStartBegun_ = false;        ///< the first lit frame has started the rise
     const Buffer* source_ = nullptr;            ///< the frame the drivers read, which the rise waits to see lit
+    uint8_t     currentCap_ = 255;              ///< the highest level `maxCurrent` allows for the frame on show
+    uint32_t    currentMa_ = 0;                 ///< the estimated draw of the frame on show
+    char        currentText_[24] = "";          ///< the `current` readout
     uint32_t    softStartAt_ = 0;               ///< when they started rising
 
     /// The scripted palette's file, which `palette` picks.
@@ -273,6 +285,7 @@ public:
         if (!on || dark_) return 0;
         uint8_t target = brightness;
         Bh1750Service::automaticBrightness(target);
+        if (target > currentCap_) target = currentCap_;
         if (!softStarting_) return target;
         if (!softStartBegun_) return 0;   // dark until the first frame, where the rise starts
         const uint32_t up = platform::millis() - softStartAt_;
@@ -306,6 +319,11 @@ public:
         controls_.setAdvanced(controls_.count() - 1);   // wiring an installer sets once
         controls_.addControl("brightness", brightness, 0, 255);
         controls_.setPercent(controls_.count() - 1);
+        controls_.addControl("maxCurrent", maxCurrent, 0, 20000);
+        controls_.addControl("channelCurrent", channelCurrent, 1, 100);
+        controls_.setAdvanced(controls_.count() - 1);   // a property of the LEDs, set once
+        /// What the lights draw now, estimated from the frame; "limited" while `maxCurrent` holds them down.
+        controls_.addReadOnly("current", currentText_, sizeof(currentText_));
         // ONE picker for both kinds, so a `.mlp` is chosen exactly like a built-in; setup scans the folders and a file change rescans, never a brightness change.
         if (!live_.scanned) refreshLivePalettes();
         // Published here too, so a saved palette name resolves when the file is applied, before setup.
@@ -452,12 +470,22 @@ public:
                                               static_cast<unsigned>(renderWaitPeakUs_));
         else                    mm::formatTo(renderWaitStr_, sizeof(renderWaitStr_), "—");
         renderWaitPeakUs_ = 0;   // start a fresh window
+        if (!maxCurrent) currentText_[0] = '\0';
+        else mm::formatTo(currentText_, sizeof(currentText_), currentCap_ < 255 ? "%u mA, limited" : "%u mA",
+                          static_cast<unsigned>(currentMa_));
         updateMotionHold();
         MoonModule::tick1s();
     }
 
-    /// Rebake the brightness tables through the soft start, the last time at the set level.
+    /// Rebake the brightness tables through the soft start, the last time at the set level, and whenever the current limit moves.
     void tick20ms() MM_NONBLOCKING override {
+        const uint8_t before = effectiveBrightness();
+        limitCurrent();
+        if (!softStarting_ && effectiveBrightness() != before) {
+            const uint8_t level = effectiveBrightness();
+            for (uint8_t i = 0; i < childCount(); i++)
+                if (child(i)->role() == ModuleRole::Driver) static_cast<DriverBase*>(child(i))->rampBrightness(level);
+        }
         if (softStarting_) {
             // From the first frame with a light lit, so the whole rise is seen, or once the boot counts as good, so a dark show stops scanning.
             if (!softStartBegun_) {
@@ -472,6 +500,47 @@ public:
         }
         MoonModule::tick20ms();
     }
+
+    /// The highest global level at which a frame drawing `drawnMa` at table level `tableLevel` stays within `budgetMa`; the power-law curve `c` makes the draw scale with the level's curve alone.
+    static uint8_t currentCap(uint32_t drawnMa, uint32_t budgetMa, uint8_t tableLevel, uint8_t local, const Correction& c) MM_NONBLOCKING {
+        if (!drawnMa || !tableLevel) return 255;   // a dark frame, or nothing baked to scale from: no limit to find
+        const float fits = c.shape(tableLevel) * static_cast<float>(budgetMa) / static_cast<float>(drawnMa);
+        const auto at = [&](uint32_t level) { return c.shape(static_cast<float>(level * local) / 255.0f); };
+        if (at(255) <= fits) return 255;
+        uint32_t low = 0, high = 255;   // at(low) fits, at(high) does not
+        while (high - low > 1) {
+            const uint32_t mid = (low + high) / 2;
+            (at(mid) <= fits ? low : high) = mid;
+        }
+        return static_cast<uint8_t>(low);
+    }
+
+    /// Estimate the draw of the frame on show through the first LED driver's table, and cap the level at what `maxCurrent` allows: down at once, up in steps past a small margin, so a steady frame does not rebake every tick.
+    void limitCurrent() MM_NONBLOCKING {
+        if (!maxCurrent) { currentCap_ = 255; return; }
+        DriverBase* reference = nullptr;
+        for (uint8_t i = 0; i < childCount() && !reference; i++) {
+            if (child(i)->role() != ModuleRole::Driver || !child(i)->enabled()) continue;
+            auto* driver = static_cast<DriverBase*>(child(i));
+            if (!driver->dimsByTime()) reference = driver;
+        }
+        if (!reference || !source_ || !source_->data() || !source_->channelsPerLight()) return;
+        const uint8_t* d = source_->data();
+        const uint8_t cpl = source_->channelsPerLight();
+        const uint8_t colors = cpl < FixtureChannels::kMotionBase ? cpl : FixtureChannels::kMotionBase;
+        const uint8_t* table = reference->correction().briLut;
+        uint32_t sum = 0, lights = 0;
+        for (size_t at = 0; at + cpl <= source_->bytes(); at += cpl, lights++)
+            for (uint8_t c = 0; c < colors; c++) sum += table[d[at + c]];
+        const uint32_t dark = lights * kDarkMilliamps, lit = sum * channelCurrent / 255;
+        currentMa_ = dark + lit;
+        const uint32_t budget = maxCurrent > dark ? maxCurrent - dark : 0;
+        const uint8_t local = reference->localBrightness();
+        const uint8_t cap = currentCap(lit, budget, reference->effectiveBrightness(), local ? local : 1, reference->correction());
+        if (cap < currentCap_ || cap >= currentCap_ + kCurrentCapStep || cap == 255) currentCap_ = cap;
+    }
+    /// How far the cap must be able to rise before it does.
+    static constexpr uint8_t kCurrentCapStep = 4;
 
     /// Whether the frame the drivers read has any light on: its color slots, since an aim alone emits nothing.
     bool anyLit() const MM_NONBLOCKING {
@@ -607,7 +676,21 @@ public:
     /// Rebuild changed geometry and reconnect output detached during a structural mutation.
     void onTreePrepared() override {
         const auto shape = sourceShape();
-        if (effectivelyEnabled() && (shape != preparedShape_ || (shape.out && !source_))) applyState();
+        if (!effectivelyEnabled() || (shape == preparedShape_ && !(shape.out && !source_))) return;
+        // A look replaces its layer with one of the same geometry: the outputs keep their peripherals and only take the new source, since rebuilding them froze every scene switch for some 45 ms.
+        if (shape.out && preparedShape_.out && shape.sameGeometry(preparedShape_)) {
+            if (!quiesceEncode()) stopEncodeTask();   // core 1 finishes the frame it is encoding first
+            if (effects_) layer_ = effects_->activeLayer();
+            passBufferToDrivers();
+            // The mutation that deleted the old layer stopped the core-1 split; it resumes on the kept buffer, as prepare() would start it.
+            if (multicore && anyDriver() && shape.lights > 0 && outputBuffer_.data() && !renderSplitActive_) {
+                renderSplitActive_ = true;
+                startEncodeTask();
+            }
+            preparedShape_ = shape;
+            return;
+        }
+        applyState();
     }
 
     /// Composite the layers into the output buffer, then hand it to the drivers, on the encode core when the render is split.
@@ -787,6 +870,10 @@ private:
         nrOfLightsType count = 0;
         uint8_t channels = 0;
         bool operator==(const SourceShape&) const = default;
+        /// Everything but the layer's identity: what the outputs and the composition buffer are sized and mapped from.
+        bool sameGeometry(const SourceShape& o) const {
+            return layers == o.layers && mapped == o.mapped && lights == o.lights && count == o.count && channels == o.channels;
+        }
     };
     SourceShape preparedShape_;
     SourceShape sourceShape() const {

@@ -333,6 +333,25 @@ TEST_CASE("HttpServer: an embedded file carries its tag, and a request naming th
     http.release();
 }
 
+// Home Assistant's WLED polls got 503 on a sphere sitting near its send floor, though each answer was already built and a few hundred bytes.
+TEST_CASE("HttpServer: at the send floor a small built answer still goes out whole") {
+    struct Restore { ~Restore() { mm::platform::setTestFreeInternalHeap(0); } } restore;
+    mm::HttpServerModule http;
+    http.port = kTestPort;
+    http.setup();
+    mm::platform::TcpConnection client;
+    REQUIRE(connectAndAccept(http, client, kTestPort));
+    mm::platform::setTestFreeInternalHeap(mm::HttpServerModule::kSendFloor);   // no room above the floor
+    const std::string reply = getUntilClosed(http, client, "/json/info");
+    INFO(reply);
+    CHECK(reply.rfind("HTTP/1.1 200", 0) == 0);
+    const auto body = reply.find("\r\n\r\n");
+    REQUIRE(body != std::string::npos);
+    CHECK(reply.compare(body + 4, 8, "{\"name\":") == 0);
+    CHECK(reply.back() == '}');
+    http.release();
+}
+
 // A desktop running from a checkout loads the UI's own modules, which the embedded bundle holds inside app.js, from the folder; nothing outside it.
 TEST_CASE("HttpServer: a desktop serves a UI module from its folder, and no path out of it") {
     const std::string dir = (std::filesystem::temp_directory_path() / "mm_ui_disk").string();
@@ -835,9 +854,9 @@ TEST_CASE("HttpServer: a native preset GET transfers exact file bytes with a sub
     bool disconnect = false, refuse = false;
     SUBCASE("complete document") {}
     SUBCASE("client disconnects while the transferred file is retained") { disconnect = true; }
-    SUBCASE("fresh answer cannot retain a file at the send floor") { refuse = true; }
+    SUBCASE("fresh answer cannot retain a file at the small answers' floor") { refuse = true; }
     mm::platform::setTestAllocRefusedFrom(2048);
-    if (refuse) mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE);
+    if (refuse) mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE / 2);   // the small answers' floor
     const char* request = "GET /api/presets/QA HTTP/1.1\r\nHost: test\r\n\r\n";
     REQUIRE(client.write(reinterpret_cast<const uint8_t*>(request), std::strlen(request)));
     std::string reply = pumpUntil(http, client, 1);
@@ -1053,7 +1072,7 @@ TEST_CASE("HttpServer: short native preset documents and mutation replies progre
             std::string treeReply = pumpUntil(fixture.http, tree, 512);
             REQUIRE(treeReply.rfind("HTTP/1.1 200", 0) == 0);
             REQUIRE_FALSE(wholeJsonResponse(treeReply));
-            if (pauseAtFloor && mutation) mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE);
+            if (pauseAtFloor && mutation) mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE / 2);   // the small answers' floor
             mm::platform::TcpConnection small;
             REQUIRE(connectAndAccept(fixture.http, small, kTestPort));
             const std::string body = R"({"Effects":{}})";
@@ -1081,7 +1100,7 @@ TEST_CASE("HttpServer: short native preset documents and mutation replies progre
                     collect(tree, treeReply);
                     collect(small, smallReply);
                     REQUIRE(smallReply.rfind("HTTP/1.1 200", 0) == 0);
-                    mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE);
+                    mm::platform::setTestFreeInternalHeap(mm::platform::HEAP_RESERVE / 2);   // the small answers' floor
                 }
                 const auto before = treeReply.size();
                 const auto beforeSmallBody = bodyBytes(smallReply);

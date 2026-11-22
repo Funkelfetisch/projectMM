@@ -21,7 +21,7 @@ class BlePeerTable {
     using Registry = BleConnectionRegistry<Capacity>;
     using Token = typename Registry::Token;
     static constexpr size_t kInlinePeers = Capacity < 2 ? Capacity : 2;
-    struct Entry { Token token{}; BlePeerIo* io = nullptr; uint8_t subscriptions = 0; platform::BleLinkSecurity security{}; };
+    struct Entry { Token token{}; BlePeerIo* io = nullptr; uint8_t subscriptions = 0; platform::BleLinkSecurity security{}; uint32_t used = 0; };
 public:
     /// An empty table with no connection held.
     BlePeerTable() = default;
@@ -43,6 +43,7 @@ public:
             entry.subscriptions = 0;
             entry.security = platform::BleLinkSecurity::Open;
             entry.token = token;
+            entry.used = ++uses_;
             return true;
         }
         identities_.disconnect(token);
@@ -83,7 +84,9 @@ public:
     /// Feed a request fragment to the connection's framer and return its parse result; Invalid for an unknown handle.
     BleMessage::Result feed(uint16_t handle, const uint8_t* bytes, size_t length) {
         auto* entry = findHandle(handle);
-        return entry ? entry->io->feed(bytes, length) : BleMessage::Result::Invalid;
+        if (!entry) return BleMessage::Result::Invalid;
+        entry->used = ++uses_;
+        return entry->io->feed(bytes, length);
     }
     /// Copy the next at most `capacity` reply bytes waiting for `handle` into `out` and return how many; 0 when none wait or the handle is unknown.
     size_t pending(uint16_t handle, uint8_t* out, size_t capacity) {
@@ -128,6 +131,13 @@ public:
         for (const auto& entry : entries_) if (entry.token) return entry.token.handle;
         return UINT16_MAX;
     }
+    /// The held connection that connected or sent a request least recently, other than `except`; UINT16_MAX when none.
+    uint16_t leastRecent(uint16_t except) const {
+        const Entry* oldest = nullptr;
+        for (const auto& entry : entries_)
+            if (entry.token && entry.token.handle != except && (!oldest || entry.used < oldest->used)) oldest = &entry;
+        return oldest ? oldest->token.handle : UINT16_MAX;
+    }
     /// Copy up to `capacity` live connection generations into `out` and return how many.
     size_t generations(uint64_t* out, size_t capacity) const {
         if (!out) return 0;
@@ -165,5 +175,6 @@ private:
     std::array<BlePeerIo, kInlinePeers> inlinePeers_{};
     std::array<Entry, Capacity> entries_{};
     size_t next_ = 0;
+    uint32_t uses_ = 0;   ///< the use counter that orders connections, least recent first
 };
 } // namespace mm

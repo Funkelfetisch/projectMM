@@ -106,6 +106,17 @@
       }
      ]
     },
+    "maxCurrent": {
+     "line": "The most current the lights may draw from their supply, in mA; 0 does not limit.",
+     "more": "A long or thin cable, a slip ring or a power bank drops the voltage under load until the controller resets. The limit dims the whole frame just enough to stay under it, from what every LED is sent."
+    },
+    "channelCurrent": {
+     "line": "What one LED colour draws fully lit, in mA.",
+     "more": "20 is the WS2812B's figure. For your own LEDs: measure a strip on full white, divide by its lights, then by its colours."
+    },
+    "current": {
+     "line": "the `current` readout"
+    },
     "palette": {
      "line": "What effects sample from: a built-in palette or a scripted `.mlp` one.",
      "tests": [
@@ -2237,6 +2248,224 @@
    "role": "generic",
    "dim": 0,
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/HelioWledPresetsEffect.h"
+  },
+  "SphereMeridianEffect": {
+   "line": "A line through the middle of the sphere: two opposite lights turn as one, swaying like a compass needle, with tails as long as the line is fast.",
+   "summary": "Each end's reflections land by the other, so the pair reads as one line across the ball. The turning swells, slows and runs back a little once in 16 seconds, and the tails' end follows the line and catches up when it slows. The two ends take colors half the palette apart.",
+   "controls": {
+    "speed": {
+     "line": "How fast the line turns."
+    },
+    "tail": {
+     "line": "How long the tails are."
+    },
+    "size": {
+     "line": "How wide each end of the line is."
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereMeridianEffect.h"
+  },
+  "SphereAntipodeDropEffect": {
+   "line": "A drop falls on the ring and sends a wave each way round; the two meet straight across the sphere and flare, then run on and close where the drop fell.",
+   "summary": "Many drops can be under way at once, each in a color from the palette and each dimming steadily until it is gone. With music the beat lets the drops fall, and between beats they fall by themselves at the rate set.",
+   "controls": {
+    "speed": {
+     "line": "How fast the waves run round."
+    },
+    "rate": {
+     "line": "How often a drop falls by itself."
+    },
+    "wake": {
+     "line": "How long a wave's wake is."
+    },
+    "onBeat": {
+     "line": "With music, a drop falls on every beat."
+    }
+   },
+   "role": "effect",
+   "tags": "💫🎵",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereAntipodeDropEffect.h"
+  },
+  "SphereHarmonicsEffect": {
+   "line": "The ring's own notes: two to six standing waves that fit round it exactly, swelling and sinking like a plucked string, each crest returning in the other color.",
+   "summary": "An odd count puts every crest across from a trough, so each color faces the other through the sphere; an even count faces it with itself. The count runs 2 3 4 5 6 5 4 3 and changes at the dark instant between two swells, where a new pair of colors half the palette apart takes over.",
+   "controls": {
+    "speed": {
+     "line": "How fast the waves swell and sink."
+    },
+    "drift": {
+     "line": "How fast the whole figure turns."
+    },
+    "sharp": {
+     "line": "How narrow the crests are."
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereHarmonicsEffect.h"
+  },
+  "SphereDayAndNightEffect": {
+   "line": "Daylight on one half of the ring, night on the other, and the edge between them travelling round: a sunrise at one place is a sunset straight across the sphere.",
+   "summary": "Day is a warm white, whitest at noon; dawn and dusk run from night blue through red to gold; in the night small lights come on, the more the further from dusk. Its colors are its own, so it ignores the palette.",
+   "controls": {
+    "day": {
+     "line": "Seconds for the sun to go once round."
+    },
+    "lights": {
+     "line": "How many lights come on at night."
+    },
+    "dusk": {
+     "line": "How wide dawn and dusk are."
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereDayAndNightEffect.h"
+  },
+  "SphereOrbitExchangeEffect": {
+   "line": "Two lights circle the ring against each other, flash where they pass and trade colors; the far side of the sphere answers each flash.",
+   "summary": "They pass twice a turn, at two places straight across from each other, and the passing place drifts slowly round, once in four minutes.",
+   "controls": {
+    "speed": {
+     "line": "How fast the two lights circle."
+    },
+    "tail": {
+     "line": "How long their tails are."
+    },
+    "flash": {
+     "line": "How bright the flash is where they pass."
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereOrbitExchangeEffect.h"
+  },
+  "SphereTideEffect": {
+   "line": "Two swells straight across from each other, in two colors, drawn slowly round the ring as the moon draws the sea.",
+   "summary": "A second, slower pull makes them rise high when the two line up and sink low when they stand crosswise: spring tide and neap tide.",
+   "controls": {
+    "speed": {
+     "line": "How fast the swells travel round."
+    },
+    "reach": {
+     "line": "How narrow the swells are."
+    },
+    "low": {
+     "line": "How much is left of them at neap tide."
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereTideEffect.h"
+  },
+  "SphereKaleidoBloomEffect": {
+   "line": "A flower of three to eight petals that opens from the petals' middles until they touch, folds again and comes back with another count.",
+   "summary": "One petal's pattern is mirrored in itself and repeated round the ring, so the figure always closes. The counts run 3 4 6 5 8 6 4, each bloom in the next color, with veins crawling along the petals.",
+   "controls": {
+    "speed": {
+     "line": "How fast the flower opens and folds."
+    },
+    "veins": {
+     "line": "How finely each petal is drawn."
+    },
+    "drift": {
+     "line": "How fast the flower turns."
+    }
+   },
+   "role": "effect",
+   "tags": "💫",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereKaleidoBloomEffect.h"
+  },
+  "SphereSpectrumHaloEffect": {
+   "line": "The music laid round the ring four times over: the bass at both ends of a line through the sphere, the treble crosswise to it, so every band faces itself across the sphere.",
+   "summary": "The line turns slowly and every beat pushes it on and flashes its ends white. Each band falls back slowly between hits, and a silent room goes dark unless an idle glow is set.",
+   "controls": {
+    "gain": {
+     "line": "How hard the bands are driven."
+    },
+    "fall": {
+     "line": "How fast a band falls back."
+    },
+    "idle": {
+     "line": "The glow left when the room is silent."
+    },
+    "kick": {
+     "line": "How far a beat pushes the line round."
+    }
+   },
+   "role": "effect",
+   "tags": "💫🎵🎶",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereSpectrumHaloEffect.h"
+  },
+  "SphereBassBreathEffect": {
+   "line": "The sphere breathes with the music's low end: a glow opens from both ends of a line through the ball toward its middle as the bass swells, and closes again as it fades.",
+   "summary": "The glow follows the bass smoothly, quick to open and slow to let go, so a kick swells it rather than flashing it. It measures the bass against the loudest of late, so it opens fully at any volume. Its color walks slowly along the palette, and the line turns slowly.",
+   "controls": {
+    "gain": {
+     "line": "How far the bass opens the glow."
+    },
+    "floor": {
+     "line": "The bass a silent room still reads, which never opens the glow."
+    },
+    "release": {
+     "line": "How slowly the glow closes again."
+    },
+    "turn": {
+     "line": "How fast the line turns."
+    }
+   },
+   "role": "effect",
+   "tags": "💫🎵🎶",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereBassBreathEffect.h"
+  },
+  "SphereBeatEchoEffect": {
+   "line": "Every beat sends a soft ring of light from both ends of a line through the ball toward its middle, where the echoes from the two ends meet and fade.",
+   "summary": "A ring swells in rather than flashing, and dims as it travels until it is gone, so a fast song layers its echoes instead of blinking. A low glow follows the music between beats.",
+   "controls": {
+    "speed": {
+     "line": "How fast an echo travels."
+    },
+    "width": {
+     "line": "How wide an echo is."
+    },
+    "glow": {
+     "line": "How bright the glow between beats is."
+    }
+   },
+   "role": "effect",
+   "tags": "💫🎵",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereBeatEchoEffect.h"
+  },
+  "SphereMirrorSparksEffect": {
+   "line": "The treble lights sparks that glow up and fade, each at four places at once, mirrored across the line through the ball and repeated straight across, over a bass glow at the line's ends.",
+   "summary": "Brighter treble lights more sparks. A spark swells in and dims away smoothly, so the sphere glitters with the music rather than blinking.",
+   "controls": {
+    "density": {
+     "line": "How many sparks the treble lights."
+    },
+    "decay": {
+     "line": "How long a spark glows."
+    },
+    "glow": {
+     "line": "How bright the bass glow is."
+    }
+   },
+   "role": "effect",
+   "tags": "💫🎵🎶",
+   "dim": 3,
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/light/effects/SphereMirrorSparksEffect.h"
   },
   "RipplesEffect": {
    "line": "Distance from the center sets a per-column wave phase, so the lit surface ripples like water.",

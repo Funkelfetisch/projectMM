@@ -51,7 +51,10 @@ struct Tree {
         REQUIRE(std::string(layers->name()) == "Effects");   // a document addresses the module by this name
     }
 
-    ~Tree() { std::filesystem::remove_all(root_); }   // don't leave a directory per test behind
+    ~Tree() {
+        scheduler.release();   // deletes the modules, so no filesystem outlives its scheduler into a later test
+        std::filesystem::remove_all(root_);   // don't leave a directory per test behind
+    }
 
     /// Add a child at runtime, driving the lifecycle the caller owns (MoonModule.h's contract).
     mm::MoonModule* add(mm::MoonModule* parent, const char* type) {

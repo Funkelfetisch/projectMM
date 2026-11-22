@@ -1,6 +1,45 @@
 {
   "factoryScenes": [
     {
+      "id": "sphere-meridian",
+      "label": "Meridian",
+      "type": "SphereMeridianEffect",
+      "meta": "a line turning through the sphere",
+      "presetIndex": 34,
+      "palette": 0,
+      "controls": {"speed": 60, "tail": 60, "size": 16}
+    },
+    {
+      "id": "sphere-mirror-sparks",
+      "label": "♪ Mirror Sparks",
+      "type": "SphereMirrorSparksEffect",
+      "meta": "treble sparks in four mirrored places",
+      "presetIndex": 44,
+      "palette": 0,
+      "audio": true,
+      "controls": {"density": 120, "decay": 60, "glow": 40}
+    },
+    {
+      "id": "sphere-spectrum-halo",
+      "label": "♪ Spectrum Halo",
+      "type": "SphereSpectrumHaloEffect",
+      "meta": "the spectrum round the ring",
+      "presetIndex": 41,
+      "palette": 0,
+      "audio": true,
+      "controls": {"gain": 97, "fall": 34, "idle": 0, "kick": 32}
+    },
+    {
+      "id": "sphere-beat-echo",
+      "label": "♪ Beat Echo",
+      "type": "SphereBeatEchoEffect",
+      "meta": "soft rings sent out on every beat",
+      "presetIndex": 43,
+      "palette": 0,
+      "audio": true,
+      "controls": {"speed": 110, "width": 60, "glow": 30}
+    },
+    {
       "id": "candle-multi",
       "label": "Candle Glow",
       "type": "HelioCandleMultiEffect",
@@ -1402,7 +1441,7 @@
         "custom 3": 9,
         "white": 0,
         "output": 255,
-        "option 1": false
+        "option 1": true
       },
       "controlMetadata": {
         "speed": {
@@ -1713,6 +1752,71 @@
         "segment start": {"visible": true, "label": "First LED", "description": "First LED in the active segment, counting from zero."},
         "segment stop": {"visible": true, "label": "End LED", "description": "Exclusive end; zero uses the end of the strip."}
       }
+    },
+    {
+      "id": "sphere-antipode-drop",
+      "label": "Antipode Drop",
+      "type": "SphereAntipodeDropEffect",
+      "meta": "waves that meet straight across",
+      "presetIndex": 35,
+      "palette": 26,
+      "controls": {"speed": 110, "rate": 150, "wake": 70, "onBeat": true}
+    },
+    {
+      "id": "sphere-harmonics",
+      "label": "Harmonics",
+      "type": "SphereHarmonicsEffect",
+      "meta": "standing waves round the ring",
+      "presetIndex": 36,
+      "palette": 28,
+      "controls": {"speed": 100, "drift": 40, "sharp": 1}
+    },
+    {
+      "id": "sphere-day-and-night",
+      "label": "Day and Night",
+      "type": "SphereDayAndNightEffect",
+      "meta": "sunrise across from sunset",
+      "presetIndex": 37,
+      "palette": 0,
+      "usesGlobalPalette": false,
+      "controls": {"day": 30, "lights": 120, "dusk": 40}
+    },
+    {
+      "id": "sphere-orbit-exchange",
+      "label": "Orbit Exchange",
+      "type": "SphereOrbitExchangeEffect",
+      "meta": "two lights trading colors",
+      "presetIndex": 38,
+      "palette": 8,
+      "controls": {"speed": 120, "tail": 110, "flash": 200}
+    },
+    {
+      "id": "sphere-tide",
+      "label": "Tide",
+      "type": "SphereTideEffect",
+      "meta": "two opposite swells",
+      "presetIndex": 39,
+      "palette": 11,
+      "controls": {"speed": 60, "reach": 1, "low": 60}
+    },
+    {
+      "id": "sphere-kaleido-bloom",
+      "label": "Kaleido Bloom",
+      "type": "SphereKaleidoBloomEffect",
+      "meta": "a mirrored flower opening",
+      "presetIndex": 40,
+      "palette": 10,
+      "controls": {"speed": 100, "veins": 3, "drift": 30}
+    },
+    {
+      "id": "sphere-bass-breath",
+      "label": "♪ Bass Breath",
+      "type": "SphereBassBreathEffect",
+      "meta": "the bass opening a glow from both ends",
+      "presetIndex": 42,
+      "palette": 0,
+      "audio": true,
+      "controls": {"gain": 170, "floor": 5, "release": 40, "turn": 20}
     }
   ],
   "extraScenes": [

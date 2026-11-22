@@ -82,6 +82,17 @@
 #include "light/effects/PlasmaEffect.h"
 #include "light/effects/PulseEffect.h"
 #include "light/effects/HelioWledPresetsEffect.h"
+#include "light/effects/SphereMeridianEffect.h"
+#include "light/effects/SphereAntipodeDropEffect.h"
+#include "light/effects/SphereHarmonicsEffect.h"
+#include "light/effects/SphereDayAndNightEffect.h"
+#include "light/effects/SphereOrbitExchangeEffect.h"
+#include "light/effects/SphereTideEffect.h"
+#include "light/effects/SphereKaleidoBloomEffect.h"
+#include "light/effects/SphereSpectrumHaloEffect.h"
+#include "light/effects/SphereBassBreathEffect.h"
+#include "light/effects/SphereBeatEchoEffect.h"
+#include "light/effects/SphereMirrorSparksEffect.h"
 #include "light/effects/HelioFactoryTestEffect.h"
 #include "light/effects/MetaballsEffect.h"
 #include "light/effects/FireEffect.h"
@@ -331,6 +342,17 @@ void mm::registerModuleTypes() {
         mm::ModuleFactory::registerType<mm::HelioGEQEffect>("HelioGEQEffect", doc);
         mm::ModuleFactory::registerType<mm::HelioGravFreqEffect>("HelioGravFreqEffect", doc);
         mm::ModuleFactory::registerType<mm::HelioFreqWaveEffect>("HelioFreqWaveEffect", doc);
+        mm::ModuleFactory::registerType<mm::SphereMeridianEffect>("SphereMeridianEffect");
+        mm::ModuleFactory::registerType<mm::SphereAntipodeDropEffect>("SphereAntipodeDropEffect");
+        mm::ModuleFactory::registerType<mm::SphereHarmonicsEffect>("SphereHarmonicsEffect");
+        mm::ModuleFactory::registerType<mm::SphereDayAndNightEffect>("SphereDayAndNightEffect");
+        mm::ModuleFactory::registerType<mm::SphereOrbitExchangeEffect>("SphereOrbitExchangeEffect");
+        mm::ModuleFactory::registerType<mm::SphereTideEffect>("SphereTideEffect");
+        mm::ModuleFactory::registerType<mm::SphereKaleidoBloomEffect>("SphereKaleidoBloomEffect");
+        mm::ModuleFactory::registerType<mm::SphereSpectrumHaloEffect>("SphereSpectrumHaloEffect");
+        mm::ModuleFactory::registerType<mm::SphereBassBreathEffect>("SphereBassBreathEffect");
+        mm::ModuleFactory::registerType<mm::SphereBeatEchoEffect>("SphereBeatEchoEffect");
+        mm::ModuleFactory::registerType<mm::SphereMirrorSparksEffect>("SphereMirrorSparksEffect");
     }
     mm::ModuleFactory::registerType<mm::RipplesEffect>("RipplesEffect", "light/effects.md#ripples");
     mm::ModuleFactory::registerType<mm::RubiksCubeEffect>("RubiksCubeEffect", "light/effects.md#rubikscube");

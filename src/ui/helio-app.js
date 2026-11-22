@@ -73,8 +73,8 @@ import { nebuliteLiveSampler } from "./nebulite-live-preview.js";
 let state = null;
 let helioBatteryConnected = false;
 const helioBatteryReceipts = batteryReceiptTracker();
-let nebulitePreviewMetadataPending = false;
-let nebulitePreviewMetadataRetryAt = 0;
+let driversPreviewMetadataPending = false;
+let driversPreviewMetadataRetryAt = 0;
 let nebulitePreviewProfileSignature = null;
 let nebuliteLiveFrame = null;
 let nebuliteLiveExpiryTimer = null;
@@ -177,7 +177,7 @@ const LS_HELIO_PREVIEW_WALL = "mm_helio_preview_wall";
 const LS_HELIO_PREVIEW_TILT = "mm_helio_preview_tilt";
 const LS_HELIO_PREVIEW_SWIVEL = "mm_helio_preview_swivel";
 const LS_HELIO_PREVIEW_SETTINGS = "mm_helio_preview_settings";
-const HELIO_PREVIEW_SETTINGS_VERSION = 6;
+const HELIO_PREVIEW_SETTINGS_VERSION = 7;
 const UI_RUNTIME_VERSION = "20261027k";
 const HELIO_VIEW   = "__helio";
 const PRESETS_VIEW = "__presets";
@@ -189,7 +189,7 @@ const API_FETCH_TIMEOUT_MS = 7000;
 const HELIO_PREVIEW_DEFAULTS = Object.freeze({
     exposure: 3.10,
     mainBounces: 6,
-    cardBounces: 3,
+    cardBounces: 16,  // the app's tunnel depth: its 28 stop at the cutoff after 16
     attenuation: 0.80,
     cutoff: 0.03,
     offThreshold: 12,
@@ -206,8 +206,8 @@ const HELIO_PREVIEW_DEFAULTS = Object.freeze({
     cardDpr: 1.25,
     cardMaxBackingSize: 480,
     mainFps: 24,
-    cardFps: 18,
-    cardBatch: 2,
+    cardFps: 8,
+    cardBatch: 3,
     showRim: true,
 });
 const HELIO_PREVIEW_SETTING_SPECS = Object.freeze([
@@ -599,6 +599,12 @@ function revealInitialUi() {
     });
 }
 
+function helioHomeOnScreen() {
+    const wrap = document.querySelector("#main > .helio-home");
+    const presets = wrap?.querySelector(":scope > .helio-presets");
+    return presets ? { wrap, presets, mounted: null } : null;
+}
+
 function renderStateSnapshot() {
     if (!initialUiRevealed && isHelioFirmware(deviceFirmwareInfo())) selectedModule = HELIO_VIEW;
     // Branding must exist before any generic shell or module view is allowed to paint. Keeping this
@@ -607,10 +613,12 @@ function renderStateSnapshot() {
     renderNav();
     const early = earlyHelioHome;
     earlyHelioHome = null;
-    if (early?.wrap.isConnected && selectedModule === HELIO_VIEW &&
+    // A HELIO home on screen, the early one or one a scene switch's snapshot finds, takes the new state in place: its stage is redrawn while its cards keep their previews and the list is not read again.
+    const home = early?.wrap.isConnected ? early : helioHomeOnScreen();
+    if (home && selectedModule === HELIO_VIEW &&
         isHelioFirmware(deviceFirmwareInfo()) && !isNebuliteFirmware()) {
-        hydrateHelioHome(early.wrap, early.presets);
-        deferHelioTraceUntilCards(early.mounted, early.presets);
+        hydrateHelioHome(home.wrap, home.presets);
+        deferHelioTraceUntilCards(home.mounted, home.presets);
         helioPresetCollection?.refreshOpenControls();
     } else renderCards();
     initialFirmwareModule = null;
@@ -1276,6 +1284,18 @@ function isExpertMode() {
 function renderCards() {
     const main = document.getElementById("main");
     if (!main || !state) return;
+    // Drawing the view on screen again keeps its scroll position: emptying #main collapses the page to the top, as a scene switch rebuilding the home did. Only a move to another view starts at the top; the early home has no view recorded and is the same page.
+    const view = String(selectedModule);
+    const keep = (main.dataset.view ?? view) === view ? { x: window.scrollX, y: window.scrollY, inner: main.scrollTop } : null;
+    main.dataset.view = view;
+    renderCardsInto(main);
+    if (keep) {
+        main.scrollTop = keep.inner;
+        window.scrollTo(keep.x, keep.y);
+    }
+}
+
+function renderCardsInto(main) {
     main.innerHTML = "";
     main.setAttribute("aria-busy", "false");
     const helioDevice = isHelioFirmware(deviceFirmwareInfo());
@@ -2087,14 +2107,17 @@ function helioPreviewPaletteForScene(scene, fallback = paletteFromState()) {
     return scene ? paletteByIndex(scene.palette, fallback) : fallback;
 }
 
-function requestNebulitePreviewMetadata() {
-    if (nebulitePreviewMetadataPending || performance.now() < nebulitePreviewMetadataRetryAt ||
-        !helioNeedsModuleMetadata("Drivers")) return;
-    nebulitePreviewMetadataPending = true;
+// Previews resolve palettes and wiring through the Drivers metadata, which loads lazily. Answers whether a preview should wait for it: true while it loads, false once it is here or has just failed, so a preview then draws with what it has.
+function requestDriversPreviewMetadata() {
+    if (!helioNeedsModuleMetadata("Drivers") || performance.now() < driversPreviewMetadataRetryAt) return false;
+    if (driversPreviewMetadataPending) return true;
+    driversPreviewMetadataPending = true;
     ensureHelioModuleMetadata("Drivers").then(ready => {
         if (ready) refreshHistoricalCroptopPreviews();
-        else nebulitePreviewMetadataRetryAt = performance.now() + 5000;
-    }).finally(() => { nebulitePreviewMetadataPending = false; });
+        else driversPreviewMetadataRetryAt = performance.now() + 5000;
+    }).catch(() => { driversPreviewMetadataRetryAt = performance.now() + 5000; })
+      .finally(() => { driversPreviewMetadataPending = false; });
+    return true;
 }
 
 function refreshHistoricalCroptopPreviews() {
@@ -2130,7 +2153,7 @@ function drawHelioCardTracePreview(canvas, t, sampler, ledCount = helioCurrentCo
     if (isNebuliteFirmware()) {
         const model = controlValue(findModule("System"), "deviceModel", "");
         const profile = NEBULITE_SETUP_PROFILES.find(item => item.name === model);
-        if (model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" || model === "NEBULITE Jacket S3" || model === "NEBULITE Jacket ESP32") requestNebulitePreviewMetadata();
+        if (model === "NEBULITE Croptop S3" || model === "NEBULITE Croptop ESP32" || model === "NEBULITE Jacket S3" || model === "NEBULITE Jacket ESP32") requestDriversPreviewMetadata();
         const matches = profile && productProfileMatches(profile, state?.modules || []);
         const projection = productProjection(profile, state?.modules || []) === "virtual2d"
             ? productProjectionPoints(profile, state?.modules || []) : null;
@@ -2162,11 +2185,12 @@ function drawHelioCardTracePreview(canvas, t, sampler, ledCount = helioCurrentCo
     }
     if (!drawHelioTraceWebGLPreview) return;
     const detail = helioPreviewDetail("card");
+    // A card is a thumbnail, as in the app: the ball on black, with no photographed room or wall behind it.
     drawHelioTraceWebGLPreview(canvas, t, sampler, {
         ledCount,
         ...detail,
         offThreshold: opts.live ? 0 : detail.offThreshold,
-        wall: helioPreviewWallEnabled(),
+        wall: false,
     });
 }
 
@@ -2248,6 +2272,12 @@ function helioPreviewSettings() {
         saved.cardMaxBackingSize = HELIO_PREVIEW_DEFAULTS.cardMaxBackingSize;
         saved.cardFps = HELIO_PREVIEW_DEFAULTS.cardFps;
     }
+    // Version 7 plays every visible card as the app does, deeper and slower than the one card that played before.
+    if (savedVersion < 7) {
+        if (saved.cardBounces === undefined || Number(saved.cardBounces) === 3) saved.cardBounces = HELIO_PREVIEW_DEFAULTS.cardBounces;
+        if (saved.cardFps === undefined || Number(saved.cardFps) === 18) saved.cardFps = HELIO_PREVIEW_DEFAULTS.cardFps;
+        if (saved.cardBatch === undefined || Number(saved.cardBatch) === 2) saved.cardBatch = HELIO_PREVIEW_DEFAULTS.cardBatch;
+    }
     const settings = {};
     for (const key of Object.keys(HELIO_PREVIEW_DEFAULTS)) {
         settings[key] = normalizeHelioPreviewSetting(key,
@@ -2268,7 +2298,7 @@ function persistHelioPreviewSettings() {
 function helioPreviewDetail(kind = "main") {
     const settings = helioPreviewSettings();
     const card = kind === "card";
-    const cameraMode = card ? "tilt" : helioPreviewCameraMode();
+    const cameraMode = card ? "static" : helioPreviewCameraMode();  // a card holds the app's still camera
     return {
         exposure: settings.exposure,
         bounces: card ? settings.cardBounces : settings.mainBounces,
@@ -2834,7 +2864,7 @@ function hydrateHelioHome(wrap, presets) {
     info.className = "helio-stage-info";
     const eyebrow = document.createElement("div");
     eyebrow.className = "helio-eyebrow";
-    eyebrow.textContent = isNebuliteFirmware() ? "Your NEBULITE" : "Live Preview";
+    eyebrow.textContent = "Your " + productLabel();
 
     const heroActions = document.createElement("div");
     heroActions.className = "helio-hero-actions";
@@ -2913,11 +2943,10 @@ function hydrateHelioHome(wrap, presets) {
 
     panels.replaceChildren(renderHelioControlPanel(null, { globalOnly: true }));
     wrap.appendChild(renderHelioSetupMenu());
-
-    if (helioModeApplying) {
     const timer = renderHelioTimerMenu();
     if (timer) wrap.appendChild(timer);
 
+    if (helioModeApplying) {
         const pending = helioModeQueued?.mode || HELIO_MODES.find(mode => mode.id === helioModeApplyingId);
         if (pending) showHelioScenePending(pending);
     }
@@ -4057,6 +4086,8 @@ function helioCardPreviewTime(canvas, now) {
 }
 
 function paintHelioScenePreview(canvas, t) {
+    // A card's palette is a name the Drivers palette list resolves: until that list is here the card keeps its last frame rather than drawing white.
+    if (requestDriversPreviewMetadata()) return;
     if (canvas.dataset.nativePreset) {
         const record = helioPresetCollection?.records.get(canvas.dataset.nativePreset);
         if (!record?.editor) {
@@ -4096,10 +4127,8 @@ function paintHelioScenePreview(canvas, t) {
 function helioPreviewItems(force, opts = {}) {
     const items = [];
     const animated = canvas => {
-        // NEBULITE's cards are flat 2D canvases, so every visible one plays, as in the app; HELIO's WebGL trace plays one at a time.
-        if (isNebuliteFirmware()) return !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-        const card = canvas.closest(".helio-scene-card, .preset-card");
-        return card?.classList.contains("active") || card?.matches(":hover, :focus-within");
+        // Every visible card plays, as in the app, at the card frame rate; one shared WebGL context draws them all.
+        return !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     };
     document.querySelectorAll(".helio-mode-preview").forEach(canvas => {
         if (!force && !helioPreviewNearViewport(canvas)) {
@@ -7563,8 +7592,6 @@ function applyTheme(t) {
 }
 
 
-const HELIO_LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 283.47 70.87"><g fill="#fff"><circle cx="27.63" cy="35.43" r="14.93"/><path d="M69.76 69.76h46.17V57.32H84.04V41.56h30.04V29.12H84.04V13.55h31.89V1.11H69.76v68.65Zm117.14 0h14.28V1.11H186.9v68.65ZM40.9 19.5c5.25-.58 9.21.39 10.64 3.05 2.23 4.13-2.32 11.13-10.64 17.39v29.84h14.36V1.09H40.9V19.5ZM0 69.78h14.36V51.37c-5.25.58-9.21-.39-10.64-3.05-2.23-4.13 2.32-11.13 10.64-17.39V1.09H0v68.69ZM248.03 0c-19.57 0-35.43 15.86-35.43 35.43s15.86 35.43 35.43 35.43S283.46 55 283.46 35.43 267.6 0 248.03 0Zm0 57.55c-12.22 0-22.12-9.9-22.12-22.12s9.9-22.12 22.12-22.12 22.12 9.9 22.12 22.12-9.9 22.12-22.12 22.12ZM142.84 1.11h-14.28v68.65h46.17V57.32h-31.89V1.11Z"/></g></svg>`;
-
 function isNebuliteFirmware(info = deviceFirmwareInfo()) {
     return String(info?.firmware || "").startsWith("nebulite");
 }
@@ -7588,7 +7615,7 @@ function applyBranding() {
     const helio = isHelioFirmware(info);
     preview.setProductInfo(info);
     document.body.dataset.brand = helio ? "helio" : "projectmm";
-    // NEBULITE shares HELIO's product layout and wears its own app's palette (helio-style.css).
+    // Every product wears the app's palette (helio-style.css); NEBULITE's data-product picks its own logo.
     if (isNebuliteFirmware(info)) document.body.dataset.product = "nebulite";
     else delete document.body.dataset.product;
     applyFavicon(helio);
@@ -7596,10 +7623,9 @@ function applyBranding() {
     if (brand) brand.textContent = helio ? productLabel(info) : "MoonLight";
     const logo = document.getElementById("brand-logo");
     if (logo) {
-        logo.hidden = isNebuliteFirmware(info);
-        logo.alt = helio ? "HELIO" : "MoonLight";
-        logo.src = helio ? "data:image/svg+xml;charset=utf-8," + encodeURIComponent(HELIO_LOGO_SVG)
-                         : "/moonmodules-logo.png";
+        logo.hidden = helio;   // a product's logo is the brand name's mask (helio-style.css)
+        logo.alt = "MoonLight";
+        logo.src = "/moonmodules-logo.png";
     }
     for (const target of [brand, logo].filter(Boolean)) {
         const label = helio ? "Open " + productLabel(info) : "Open home";

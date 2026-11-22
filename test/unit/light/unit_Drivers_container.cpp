@@ -19,6 +19,7 @@
 #include "../core/conditional_controls.h"   // mm::test::setControlValue
 #include "platform/platform.h"                 // gpioRead: the desktop reads back what gpioWrite put there
 
+#include <cstdlib>   // atoi: the current readout
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -938,6 +939,66 @@ TEST_CASE("the lights rise to their brightness after a device boot, and a host p
     layouts.removeChild(&grid);
 }
 
+// A supply behind a long cable or a slip ring sags under load until the controller browns out.
+TEST_CASE("the current limit finds the highest level whose draw fits, through the driver's own curve") {
+    mm::Correction linear;
+    linear.curve = mm::Correction::Curve::Linear;
+    CHECK(mm::Drivers::currentCap(0, 100, 255, 255, linear) == 255);       // a dark frame draws nothing to limit
+    CHECK(mm::Drivers::currentCap(400, 500, 255, 255, linear) == 255);     // already within the budget
+    CHECK(mm::Drivers::currentCap(1000, 500, 255, 255, linear) == 127);    // half the draw at half the level
+    CHECK(mm::Drivers::currentCap(500, 500, 128, 255, linear) == 128);     // measured at a lower level, the same frame
+    mm::Correction gamma;
+    gamma.curve = mm::Correction::Curve::Gamma22;
+    const uint8_t cap = mm::Drivers::currentCap(1000, 250, 255, 255, gamma);   // a quarter of the light takes about half the level
+    CHECK(cap >= 134);
+    CHECK(cap <= 136);
+    CHECK(mm::Drivers::currentCap(1000, 500, 128, 128, linear) == 127);    // a driver at half its own brightness: its table is at 128, the cap is in global levels
+}
+
+TEST_CASE("the lights dim just enough to stay under the current limit, and switching it off restores the level") {
+    mm::Layouts layouts;
+    mm::GridLayout grid;
+    grid.width = 10; grid.height = 1;
+    layouts.addChild(&grid);
+    mm::Layer layer;
+    layer.setLayouts(&layouts);
+    layouts.applyState();
+    layer.applyState();
+    REQUIRE(layer.buffer().data());
+    std::memset(layer.buffer().data(), 255, layer.buffer().bytes());   // ten lights on full white
+    mm::Drivers drivers;
+    mm::PreviewDriver preview;
+    drivers.addChild(&preview);
+    drivers.setLayer(&layer);
+    drivers.brightness = 255;
+    drivers.defineControls();
+    drivers.setup();
+    drivers.tick20ms();
+    CHECK(drivers.effectiveBrightness() == 255);   // no limit set
+    drivers.tick1s();
+    CHECK(std::strcmp(drivers.readText("current", "?"), "") == 0);
+    drivers.maxCurrent = 300;   // ten lights of three colours at 20 mA draw 600, and 10 in the dark
+    drivers.tick20ms();
+    const uint8_t limited = drivers.effectiveBrightness();
+    CHECK(limited < 255);
+    drivers.tick20ms();
+    drivers.tick1s();
+    const int drawn = std::atoi(drivers.readText("current", ""));
+    CHECK(drawn <= 300);
+    CHECK(drawn >= 270);   // dimmed to the limit, not past it
+    CHECK(std::strstr(drivers.readText("current", ""), "limited") != nullptr);
+    drivers.tick20ms();
+    CHECK(drivers.effectiveBrightness() == limited);   // a steady frame holds its level
+    drivers.brightness = 40;
+    CHECK(drivers.effectiveBrightness() == 40);   // below the limit, the set level shows
+    drivers.brightness = 255;
+    drivers.maxCurrent = 0;
+    drivers.tick20ms();
+    CHECK(drivers.effectiveBrightness() == 255);
+    drivers.removeChild(&preview);
+    layouts.removeChild(&grid);
+}
+
 // Regression: a palette script edited, or downloaded by an open page, stayed on its old program until a control changed.
 TEST_CASE("the running palette script compiles again when its file changes") {
     mm::platform::fsMkdir(mm::moonlive::kScriptDir);
@@ -959,4 +1020,53 @@ TEST_CASE("the running palette script compiles again when its file changes") {
     CHECK(std::strstr(drivers.status(), "unknown function") != nullptr);
     CHECK(drivers.severity() == mm::MoonModule::Severity::Error);
     mm::platform::fsRemove("/moonlive/unit-live.mlp");
+}
+
+// A driver that counts its prepares and records the buffer it was handed.
+class PrepareCountingDriver : public mm::DriverBase {
+public:
+    unsigned prepares = 0;
+    mm::Buffer* source = nullptr;
+    void prepare() override { ++prepares; mm::DriverBase::prepare(); }
+    void setSourceBuffer(mm::Buffer* buffer) override { source = buffer; }
+    void tick() MM_NONBLOCKING override {}
+};
+
+TEST_CASE("a look that replaces its layer with one of the same size rewires the outputs without preparing them again") {
+    mm::Layouts layouts; mm::GridLayout grid; mm::Effects effects; mm::Drivers drivers; PrepareCountingDriver output;
+    mm::Scheduler scheduler;
+    layouts.setName("Layouts"); layouts.setTypeName("Layouts");
+    effects.setName("Effects"); effects.setTypeName("Effects");
+    drivers.setName("Drivers"); drivers.setTypeName("Drivers");
+    output.setName("Output"); output.setTypeName("PrepareCounting");
+    grid.width = 4; grid.height = 1; grid.depth = 1;
+    layouts.addChild(&grid);
+    effects.setLayouts(&layouts);
+    bool deleted = false;
+    auto* old = new DeletedLayer(deleted);
+    old->setName("Layer"); old->setTypeName("Layer");
+    effects.addChild(old);
+    drivers.multicore = false;
+    drivers.setEffects(&effects);
+    drivers.addChild(&output);
+    scheduler.addModule(&layouts); scheduler.addModule(&effects); scheduler.addModule(&drivers);
+    scheduler.setup();
+    REQUIRE(output.layer() == old);
+    const unsigned prepared = output.prepares;
+
+    // What a preset's "$patch":"replace" does: the outputs let go, the layer goes, a fresh one of the same geometry takes its place, and Effects alone is rebuilt.
+    drivers.quiesceRenderSplit();
+    REQUIRE(effects.removeChild(old));
+    delete old;
+    REQUIRE(deleted);
+    auto* fresh = new mm::Layer;
+    fresh->setName("Layer"); fresh->setTypeName("Layer");
+    REQUIRE(effects.addChild(fresh));
+    scheduler.prepareSubtree(&effects);
+
+    CHECK(output.layer() == fresh);
+    CHECK(output.source == &fresh->buffer());
+    CHECK(output.prepares == prepared);   // the peripheral is kept, which a full rebuild would re-initialize
+    // A layer of another size still rebuilds them: the detach test above widens the channels and sees the drivers re-parse the geometry.
+
 }

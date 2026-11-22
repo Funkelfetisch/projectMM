@@ -284,15 +284,17 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
         ambient->markWiredByCode();
         servicesModule->addChild(ambient);
     }
+    // The product's scene catalog, which BLE and the WLED shim both reach the scenes through.
+    static constexpr mm::ProductSceneApi sceneApi{
+        &mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+        &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply,
+        &mm::BleSceneCatalog::writeState, &mm::BleSceneCatalog::descriptors,
+        &mm::BleSceneCatalog::at, &mm::BleSceneCatalog::current, &mm::BleSceneCatalog::revision};
     if (productFirmware) {
         auto* ble = createOrDie<mm::BleControlService>("BleControlService");
         ble->setName("BLE");
         ble->setScheduler(&scheduler);
         ble->setIdentity(mm::kFirmwareName, mm::kBuildId, mm::kVersion, mm::kBuildDate);
-        static constexpr mm::BleSceneApi sceneApi{
-            &mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
-            &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply,
-            &mm::BleSceneCatalog::writeState, &mm::BleSceneCatalog::descriptors};
         ble->setScenes(&sceneApi);
         ble->setPixelMapReader(&mm::BlePixelMapPage::writeCurrent);
         ble->setOutputReader(&mm::BleOutputPage::writeCurrent);
@@ -424,6 +426,7 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
     }
     // Two full 1440-byte TCP segments a 20 ms tick: 1 KB loaded a page at 25 KB/s, and the reserve, not the chunk, guards the radio.
     if (productFirmware) httpServer->setSendBudget(mm::platform::HEAP_RESERVE, 2880);
+    if (productFirmware) httpServer->setScenes(&sceneApi);
     // PreviewDriver pushes the coordinate table and per-frame RGB to the HTTP server's WS broadcaster.
     if (auto* preview = static_cast<mm::PreviewDriver*>(wired(drivers, "PreviewDriver"))) {
         preview->setBroadcaster(httpServer);

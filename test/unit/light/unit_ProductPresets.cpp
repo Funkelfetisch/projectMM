@@ -10,6 +10,17 @@
 #include "light/effects/DistortionWavesEffect.h"
 #include "light/effects/PlasmaEffect.h"
 #include "light/effects/MetaballsEffect.h"
+#include "light/effects/SphereMeridianEffect.h"
+#include "light/effects/SphereAntipodeDropEffect.h"
+#include "light/effects/SphereHarmonicsEffect.h"
+#include "light/effects/SphereDayAndNightEffect.h"
+#include "light/effects/SphereOrbitExchangeEffect.h"
+#include "light/effects/SphereTideEffect.h"
+#include "light/effects/SphereKaleidoBloomEffect.h"
+#include "light/effects/SphereSpectrumHaloEffect.h"
+#include "light/effects/SphereBassBreathEffect.h"
+#include "light/effects/SphereBeatEchoEffect.h"
+#include "light/effects/SphereMirrorSparksEffect.h"
 #include "light/layouts/GridLayout.h"
 #include "light/layouts/Layouts.h"
 #include "light/layers/Effects.h"
@@ -49,6 +60,8 @@ struct ProductTree {
         REGISTER_PRODUCT_TYPE(HelioNoiseMeterEffect); REGISTER_PRODUCT_TYPE(HelioPlasmoidEffect);
         REGISTER_PRODUCT_TYPE(HelioFreqMapWideEffect); REGISTER_PRODUCT_TYPE(HelioGEQEffect);
         REGISTER_PRODUCT_TYPE(HelioGravFreqEffect); REGISTER_PRODUCT_TYPE(HelioFreqWaveEffect);
+        REGISTER_PRODUCT_TYPE(SphereMeridianEffect); REGISTER_PRODUCT_TYPE(SphereAntipodeDropEffect); REGISTER_PRODUCT_TYPE(SphereHarmonicsEffect); REGISTER_PRODUCT_TYPE(SphereDayAndNightEffect); REGISTER_PRODUCT_TYPE(SphereOrbitExchangeEffect); REGISTER_PRODUCT_TYPE(SphereTideEffect); REGISTER_PRODUCT_TYPE(SphereKaleidoBloomEffect); REGISTER_PRODUCT_TYPE(SphereSpectrumHaloEffect);
+        REGISTER_PRODUCT_TYPE(SphereBassBreathEffect); REGISTER_PRODUCT_TYPE(SphereBeatEchoEffect); REGISTER_PRODUCT_TYPE(SphereMirrorSparksEffect);
 #undef REGISTER_PRODUCT_TYPE
         grid.width = 64; grid.height = 1; grid.depth = 1;
         layouts.addChild(&grid); layouts.applyState();

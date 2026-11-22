@@ -264,3 +264,17 @@ TEST_CASE("BLE link security: an open link asks once, pairing waits, and a failu
     link = Link::Encrypted;
     CHECK(mm::platform::requestLinkSecurity(link, ask) == Link::Encrypted); CHECK_FALSE(ask);
 }
+
+// A sphere keeps two phones; a third that connects pushes out the one that went quiet longest, so a newcomer is never locked out.
+TEST_CASE("BLE peer table: the connection that connected or sent least recently is the one to let go") {
+    mm::BlePeerTable<3> peers;
+    CHECK(peers.leastRecent(UINT16_MAX) == UINT16_MAX);
+    REQUIRE(peers.connect(1)); REQUIRE(peers.connect(2));
+    CHECK(peers.leastRecent(UINT16_MAX) == 1);
+    const uint8_t request[] = {'{', '}', '\n'};
+    peers.feed(1, request, sizeof(request));   // phone 1 is in use again
+    REQUIRE(peers.connect(3));
+    CHECK(peers.leastRecent(3) == 2);          // the newcomer stays; the quiet phone goes
+    REQUIRE(peers.disconnect(2));
+    CHECK(peers.leastRecent(3) == 1);
+}

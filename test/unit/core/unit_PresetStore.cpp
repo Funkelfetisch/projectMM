@@ -565,3 +565,41 @@ TEST_CASE("System metadata identifies the product dashboard runtime for browser 
     const bool product = mm::kProductFirmware;
     CHECK(std::strcmp(ui->str, product ? mm::ui::kProductRuntimeVersion : "") == 0);
 }
+
+TEST_CASE("The preset index carries a tag, answers 304 to a client holding it, and changes it on every write and on a switch of look") {
+    PresetDevice device;
+    REQUIRE(status(device.request("PUT", "/api/presets/Glow", kLook, "If-None-Match: *\r\n"), 201));
+    const auto tagOf = [](const std::string& reply) {
+        const auto at = reply.find("ETag: ");
+        REQUIRE(at != std::string::npos);
+        return reply.substr(at + 6, reply.find("\r\n", at) - at - 6);
+    };
+    const auto first = device.request("GET", "/api/presets");
+    REQUIRE(status(first, 200));
+    const std::string tag = tagOf(first);
+    const std::string holding = "If-None-Match: " + tag + "\r\n";
+
+    const auto unchanged = device.request("GET", "/api/presets", {}, holding);
+    CHECK(status(unchanged, 304));
+    CHECK(tagOf(unchanged) == tag);
+    CHECK(unchanged.find("\"items\"") == std::string::npos);  // nothing read, nothing sent
+
+    mm::PresetStore::File file;
+    REQUIRE(mm::PresetStore::read("Glow", file));
+    REQUIRE(status(device.request("POST", "/api/presets/Glow/apply", "{}", tagHeader(file.etag)), 200));
+    const auto switched = device.request("GET", "/api/presets", {}, holding);
+    REQUIRE(status(switched, 200));  // the playing look is part of the index
+    const std::string playing = tagOf(switched);
+    CHECK(playing != tag);
+    CHECK(std::strcmp(device.control->currentLook(), "Glow") == 0);
+
+    REQUIRE(mm::PresetStore::put("Glow 2", kLook, mm::PresetStore::Mode::Create));
+    CHECK(status(device.request("GET", "/api/presets", {}, "If-None-Match: " + playing + "\r\n"), 200));
+
+    const std::string afterWrite = tagOf(device.request("GET", "/api/presets"));
+    mm::PresetStore::noteFileChanged("/.config/presets/Glow 2.json");  // as a file upload past the store reports it
+    CHECK(status(device.request("GET", "/api/presets", {}, "If-None-Match: " + afterWrite + "\r\n"), 200));
+    const std::string afterUpload = tagOf(device.request("GET", "/api/presets"));
+    mm::PresetStore::noteFileChanged("/.config/Drivers.json");  // a file elsewhere leaves the index alone
+    CHECK(status(device.request("GET", "/api/presets", {}, "If-None-Match: " + afterUpload + "\r\n"), 304));
+}

@@ -22,6 +22,17 @@
 #include "light/effects/DistortionWavesEffect.h"
 #include "light/effects/PlasmaEffect.h"
 #include "light/effects/MetaballsEffect.h"
+#include "light/effects/SphereMeridianEffect.h"
+#include "light/effects/SphereAntipodeDropEffect.h"
+#include "light/effects/SphereHarmonicsEffect.h"
+#include "light/effects/SphereDayAndNightEffect.h"
+#include "light/effects/SphereOrbitExchangeEffect.h"
+#include "light/effects/SphereTideEffect.h"
+#include "light/effects/SphereKaleidoBloomEffect.h"
+#include "light/effects/SphereSpectrumHaloEffect.h"
+#include "light/effects/SphereBassBreathEffect.h"
+#include "light/effects/SphereBeatEchoEffect.h"
+#include "light/effects/SphereMirrorSparksEffect.h"
 #include "light/layers/Effects.h"
 #include "light/layers/Layer.h"
 
@@ -73,6 +84,17 @@ struct SceneTree {
         mm::ModuleFactory::registerType<mm::HelioGEQEffect>("HelioGEQEffect");
         mm::ModuleFactory::registerType<mm::HelioGravFreqEffect>("HelioGravFreqEffect");
         mm::ModuleFactory::registerType<mm::HelioFreqWaveEffect>("HelioFreqWaveEffect");
+        mm::ModuleFactory::registerType<mm::SphereMeridianEffect>("SphereMeridianEffect");
+        mm::ModuleFactory::registerType<mm::SphereAntipodeDropEffect>("SphereAntipodeDropEffect");
+        mm::ModuleFactory::registerType<mm::SphereHarmonicsEffect>("SphereHarmonicsEffect");
+        mm::ModuleFactory::registerType<mm::SphereDayAndNightEffect>("SphereDayAndNightEffect");
+        mm::ModuleFactory::registerType<mm::SphereOrbitExchangeEffect>("SphereOrbitExchangeEffect");
+        mm::ModuleFactory::registerType<mm::SphereTideEffect>("SphereTideEffect");
+        mm::ModuleFactory::registerType<mm::SphereKaleidoBloomEffect>("SphereKaleidoBloomEffect");
+        mm::ModuleFactory::registerType<mm::SphereSpectrumHaloEffect>("SphereSpectrumHaloEffect");
+        mm::ModuleFactory::registerType<mm::SphereBassBreathEffect>("SphereBassBreathEffect");
+        mm::ModuleFactory::registerType<mm::SphereBeatEchoEffect>("SphereBeatEchoEffect");
+        mm::ModuleFactory::registerType<mm::SphereMirrorSparksEffect>("SphereMirrorSparksEffect");
         effects->setName("Effects"); effects->setTypeName("Effects");
         layer->setName("Layer"); layer->setTypeName("Layer"); layer->markWiredByCode();
         drivers->setName("Drivers"); drivers->setTypeName("Drivers");
@@ -116,7 +138,8 @@ TEST_CASE("A scene picked to keep is saved and one played live is not") {
 
 TEST_CASE("BLE scenes: the shared catalog has stable IDs and bounded real control metadata") {
     SceneTree tree;
-    CHECK(mm::BleSceneCatalog::count() == 35);
+    CHECK(mm::BleSceneCatalog::count() == 46);
+    CHECK(mm::BleSceneCatalog::exists("sphere-spectrum-halo"));
     CHECK(mm::BleSceneCatalog::exists("nebulite-noisefire"));
     CHECK(mm::BleSceneCatalog::exists("nebulite-plasmoid"));
     CHECK(mm::BleSceneCatalog::exists("nebulite-flow-stripe"));
@@ -344,7 +367,7 @@ TEST_CASE("BLE scenes: pages fill the 512-byte response, so a scene's controls a
         if (next->type == mm::json::JsonType::Null) { ++pages; break; }
         REQUIRE(next->intValue > cursor + 1); cursor = static_cast<uint16_t>(next->intValue);
     }
-    CHECK(pages <= 8);   // 35 scenes, one per page before packing
+    CHECK(pages <= 11);  // 46 scenes, one per page before packing
 
     for (const char* scene : {"ripple", "lake", "geq", "solid"}) {
         CAPTURE(scene);
@@ -393,7 +416,7 @@ TEST_CASE("BLE scenes: invalid catalog, controls, ranges and allocation failure 
 TEST_CASE("BLE scenes: the real RPC2 dispatcher applies full scenes and reads actual RGBW") {
     SceneTree tree;
     mm::BleControlService service;
-    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+    static constexpr mm::ProductSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
         &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState};
     service.setScheduler(&tree.scheduler); service.setScenes(&api);
     service.setEpochForTest("00000000000000000000000000000001");
@@ -433,7 +456,7 @@ TEST_CASE("BLE scenes: the real RPC2 dispatcher applies full scenes and reads ac
 TEST_CASE("BLE scenes: through the real RPC2 dispatcher, every scene's controls arrive in a handful of packed 512-byte replies whose cursor ends") {
     SceneTree tree;
     mm::BleControlService service;
-    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+    static constexpr mm::ProductSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
         &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState};
     service.setScheduler(&tree.scheduler); service.setScenes(&api);
     service.setEpochForTest("00000000000000000000000000000001");
@@ -466,7 +489,7 @@ TEST_CASE("BLE scenes: through the real RPC2 dispatcher, every scene's controls 
 TEST_CASE("BLE scenes: one scene-info request streams every page in order under its id, a retry streams them again, and a session gone ends it") {
     SceneTree tree;
     mm::BleControlService service;
-    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+    static constexpr mm::ProductSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
         &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState};
     service.setScheduler(&tree.scheduler); service.setScenes(&api);
     service.setEpochForTest("00000000000000000000000000000001");
@@ -514,7 +537,7 @@ TEST_CASE("BLE scenes: info reports the descriptors tag, FNV-1a 64 over the cata
         fold(mm::LivePalettes::isLive(i) ? mm::LivePalettes::nameAt(mm::LivePalettes::sourceIndex(i)) : mm::palettes::kBuiltins[i].name);
     CHECK(mm::BleSceneCatalog::descriptors() == expected);
     mm::BleControlService service;
-    static constexpr mm::BleSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
+    static constexpr mm::ProductSceneApi api{&mm::BleSceneCatalog::writePage, &mm::BleSceneCatalog::writeInfo,
         &mm::BleSceneCatalog::validate, &mm::BleSceneCatalog::apply, &mm::BleSceneCatalog::writeState, &mm::BleSceneCatalog::descriptors};
     service.setScheduler(&tree.scheduler); service.setScenes(&api);
     service.setEpochForTest("00000000000000000000000000000001");

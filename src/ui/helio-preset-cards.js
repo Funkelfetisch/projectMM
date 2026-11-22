@@ -96,6 +96,12 @@ export class HelioPresetCards {
     }
 
     card(record) {
+        // A preset's card is built once and moved, never rebuilt, so its preview keeps its last frame when the page redraws.
+        if (record.card) {
+            record.card.classList.toggle("active", this.selected === record.name);
+            record.play.setAttribute("aria-pressed", String(this.selected === record.name));
+            return record.card;
+        }
         const card = document.createElement("article");
         card.className = "helio-scene-card helio-native-preset-card";
         card.dataset.presetName = record.name;
@@ -185,7 +191,7 @@ export class HelioPresetCards {
         actions.append(reset, copy, remove);
         details.append(actions);
         card.append(play, details);
-        Object.assign(record, { card, details, content, status, canvas });
+        Object.assign(record, { card, play, details, content, status, canvas });
         details.addEventListener("toggle", () => {
             card.classList.toggle("is-expanded", details.open);
             record.controlsOpen = details.open;

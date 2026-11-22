@@ -9,6 +9,7 @@
 #include "core/util/sha256.h"
 #include "platform/platform.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -104,6 +105,7 @@ public:
         if (!valid) return valid;
         LockGuard guard(lock_);
         if (!guard) return failure(503, "preset store is busy");
+        ++revision_;  // any write, even a refused one, only costs a client one full index
         char path[80]; pathFor(name, path, sizeof(path));
         const bool exists = platform::fsExists(path);
         if (mode == Mode::Create && exists) return failure(412, "preset already exists");
@@ -133,6 +135,7 @@ public:
         if (requireMatch && (!etag || !etag[0])) return failure(428, "If-Match is required");
         LockGuard guard(lock_);
         if (!guard) return failure(503, "preset store is busy");
+        ++revision_;  // any write, even a refused one, only costs a client one full index
         File file;
         const auto loaded = readUnlocked(name, file);
         if (!loaded) return loaded.status == 404 && requireMatch ? failure(412, "preset changed or was deleted") : loaded;
@@ -147,6 +150,7 @@ public:
         if (std::strcmp(from, to) == 0) return {};
         LockGuard guard(lock_);
         if (!guard) return failure(503, "preset store is busy");
+        ++revision_;  // any write, even a refused one, only costs a client one full index
         File file;
         const auto loaded = readUnlocked(from, file);
         if (!loaded) return loaded;
@@ -277,6 +281,14 @@ public:
         return writeIndexItemUnlocked(name, sink);
     }
 
+    /// Counts the writes to the store, so the index's tag changes with its content and a client holding the tag skips the file reads that build it (RFC 9110 conditional GET).
+    static uint32_t revision() { return revision_; }
+    /// A writer outside the store, such as a file upload or removal, reports the path it changed.
+    static void noteFileChanged(const char* path) {
+        const size_t n = std::strlen(kDirectory);
+        if (path && std::strncmp(path, kDirectory, n) == 0 && (path[n] == '/' || path[n] == 0)) ++revision_;
+    }
+
     /// The file index is independent of whichever look currently renders.
     static Result writeIndex(JsonSink& sink) {
         LockGuard guard(lock_);
@@ -295,6 +307,7 @@ public:
         if (!etag || !etag[0]) return failure(428, "preset content tag is required");
         LockGuard guard(lock_);
         if (!guard) return failure(503, "preset store is busy");
+        ++revision_;  // any write, even a refused one, only costs a client one full index
         File file;
         const auto loaded = readUnlocked(name, file);
         if (!loaded) return loaded.status == 404 ? failure(412, "preset changed or was deleted") : loaded;
@@ -331,6 +344,7 @@ public:
 
 private:
     static inline TryLock lock_;
+    static inline std::atomic<uint32_t> revision_{0};  ///< written by HTTP and control surfaces alike
     struct Index { JsonSink& sink; bool first = true; Result result{}; };
     struct Snapshot { IndexSnapshot& names; Result result{}; };
     static Result failure(int status, const char* error) { Result result; result.status = status; result.error = error; return result; }

@@ -403,7 +403,7 @@ private:
         {155, 192, 128, 63, "Aqua Flash",{255, 135,   0},   0, {  0,   0,   0}, 128, 128, 16, true,  false, false, 0, 0},
         {139, 128, 128, 11, "Rainbow",   {255, 135,   0},   0, {111, 255,   0}, 255,  64, 16, false, false, false, 0, 0},
         {158,  71,  98,  1, "Orangery",  {255, 135,   0},   0, {111, 255,   0}, 128, 128, 16, false, false, false, 0, 0},
-        {137, 202, 247,  1, "Rainbow",   {  0,   0, 255},   0, {111, 255,   0},   9, 255,  9, false, false, false, 0, 2},
+        {137, 202, 247,  1, "Rainbow",   {  0,   0, 255},   0, {111, 255,   0},   9, 255,  9, true,  false, false, 0, 2},
     };
 
     inline static constexpr uint8_t kStaticOrder[] = {
@@ -465,7 +465,8 @@ private:
     int gravityTop_ = -1;
     int gravityCounter_ = 0;
     uint8_t gravColorIndex_ = 0;
-    size_t cometPositions_[16] = {};
+    uint32_t cometLaunch_[16] = {};
+    uint16_t cometLive_ = 0;  ///< one bit per comet under way
     uint8_t cometArmed_ = 0;
     uint32_t lastCometStep_ = 0;
     uint16_t geqPeaks_[16] = {};
@@ -751,8 +752,7 @@ private:
         gravityTop_ = -1;
         gravityCounter_ = 0;
         gravColorIndex_ = 0;
-        const size_t n = lightCount();
-        for (size_t& position : cometPositions_) position = n;
+        cometLive_ = 0;
         cometArmed_ = 0;
         lastCometStep_ = 0;
         std::memset(geqPeaks_, 0, sizeof(geqPeaks_));
@@ -1316,10 +1316,20 @@ private:
             color = hsvToRgb(static_cast<uint8_t>(mapped),
                              static_cast<uint8_t>(176u + brightness / 4u), brightness);
         }
+        // The wave reaches the ends in about 1.5 s on any ring, so a long ring gets wider steps rather than a slower wave.
         const size_t center = n / 2u;
+        const size_t stepMs = (256u - speed) / 2u;
+        const size_t reach = (center * stepMs + 750u) / 1500u;
+        const size_t shift = reach > 1u ? reach : 1u;
         setPixel(center, color);
-        for (size_t i = n - 1u; i > center; i--) copyPixel(i, i - 1u);
-        for (size_t i = 0; i < center; i++) copyPixel(i, i + 1u);
+        for (size_t i = n - 1u; i > center; i--) {
+            if (i >= center + shift) copyPixel(i, i - shift);
+            else setPixel(i, color);
+        }
+        for (size_t i = 0; i < center; i++) {
+            if (i + shift <= center) copyPixel(i, i + shift);
+            else setPixel(i, color);
+        }
     }
 
     void renderJuggles(uint32_t now, const AudioView& audio) {
@@ -1362,27 +1372,40 @@ private:
     void renderMultiComet(uint32_t now, const AudioView& audio) {
         const size_t n = lightCount();
         if (n == 0) return;
+        // Comets arm and launch on WLED's step clock; their travel follows time, so a crossing takes the same 0.6 to 2.6 s on any ring.
         const uint32_t cycleTime = (255u - speed) / 4u > 0u ? (255u - speed) / 4u : 1u;
         const uint32_t step = now / cycleTime;
-        if (lastCometStep_ == step) return;
-        lastCometStep_ = step;
-        fadeOut(static_cast<uint8_t>(254u - effectIntensity / 2u));
-
-        const size_t armRange = n < 256u ? n : 256u;
-        bool launched = false;
-        for (size_t i = 0; i < 16u; i++) {
-            if (cometPositions_[i] < n) {
-                const size_t position = cometPositions_[i]++;
-                setPixel(position, palette(posByte(position, n)));
-                continue;
+        if (lastCometStep_ != step) {
+            lastCometStep_ = step;
+            const size_t armRange = n < 256u ? n : 256u;
+            bool launched = false;
+            for (size_t i = 0; i < 16u; i++) {
+                if (cometLive_ & (1u << i)) continue;
+                if (armRange > 0 && rng_.next16() % armRange < 3u) cometArmed_++;
+                if (cometArmed_ > 2u) cometArmed_ = 2u;
+                if (cometArmed_ > 0u && !launched && audioActive(audio) &&
+                    (audio.peakMag > kAudioPeakMagGate || audio.level > 104u)) {
+                    cometLaunch_[i] = now;
+                    cometLive_ = static_cast<uint16_t>(cometLive_ | (1u << i));
+                    cometArmed_--;
+                    launched = true;
+                }
             }
-            if (armRange > 0 && rng_.next16() % armRange < 3u) cometArmed_++;
-            if (cometArmed_ > 2u) cometArmed_ = 2u;
-            if (cometArmed_ > 0u && !launched && audioActive(audio) &&
-                (audio.peakMag > kAudioPeakMagGate || audio.level > 104u)) {
-                cometPositions_[i] = 0;
-                cometArmed_--;
-                launched = true;
+        }
+        // The tail is a share of the ring, longest at low intensity as WLED's slow fade made it.
+        clearFrame();
+        const uint32_t crossMs = 600u + (255u - speed) * 8u;
+        const size_t share = n * (255u - effectIntensity) / 1536u;
+        const size_t tail = share > 3u ? share : 3u;
+        for (size_t i = 0; i < 16u; i++) {
+            if (!(cometLive_ & (1u << i))) continue;
+            const size_t head = static_cast<size_t>(static_cast<uint64_t>(now - cometLaunch_[i]) * n / crossMs);
+            if (head >= n + tail) { cometLive_ = static_cast<uint16_t>(cometLive_ & ~(1u << i)); continue; }
+            for (size_t k = 0; k < tail && k <= head; k++) {
+                const size_t position = head - k;
+                if (position >= n) continue;
+                const uint8_t fade = static_cast<uint8_t>(255u - k * 255u / tail);
+                addPixel(position, palette(posByte(position, n)), 0, scale8(fade, fade));
             }
         }
     }

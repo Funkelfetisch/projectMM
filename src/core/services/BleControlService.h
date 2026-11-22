@@ -9,7 +9,7 @@
 #include "core/util/BleAdvertisement.h"
 #include "core/util/BleRpcSession.h"
 #include "core/util/BleRpcPeers.h"
-#include "core/util/BleSceneApi.h"
+#include "core/util/ProductSceneApi.h"
 #include "core/util/JsonSink.h"
 #include "core/util/JsonUtil.h"
 #include "core/util/fnv.h"
@@ -50,7 +50,7 @@ public:
         firmware_ = firmware; build_ = build; version_ = version; builtAt_ = builtAt;
     }
     /// Product callbacks supply scenes without making the core depend on a light-domain catalog.
-    void setScenes(const BleSceneApi* scenes) { scenes_ = scenes; }
+    void setScenes(const ProductSceneApi* scenes) { scenes_ = scenes; }
     /// Product-supplied, read-only page of configured output coordinates.
     void setPixelMapReader(const char* (*reader)(JsonSink&, Scheduler&, uint16_t, const char*)) { pixelMapReader_ = reader; }
     /// Product-supplied, read-only configured output windows.
@@ -878,9 +878,7 @@ private:
     void info(uint16_t id, bool effect) {
         JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
         if (effect) {
-            MoonModule* found = nullptr;
-            if (scheduler_) for (uint8_t i = 0; i < scheduler_->moduleCount(); ++i)
-                if (std::strcmp(scheduler_->module(i)->name(), "Effects") == 0) found = firstEffect(scheduler_->module(i));
+            MoonModule* found = runningEffect(scheduler_);
             sink.append(",\"effect\":");
             if (!found) sink.append("null");
             else {
@@ -956,14 +954,6 @@ private:
         return true;
     }
 
-    static MoonModule* firstEffect(MoonModule* module) {
-        if (!module->effectivelyEnabled()) return nullptr;
-        if (module->role() == ModuleRole::Effect) return module;
-        for (uint8_t i = 0; i < module->childCount(); ++i)
-            if (auto* found = firstEffect(module->child(i))) return found;
-        return nullptr;
-    }
-
     static bool number(const json::JsonDoc& doc, const char* key, uint32_t& out) {
         const auto* node = json::member(doc, doc.rootNode(), key);
         if (!node || node->type != json::JsonType::Int || node->decimal || !node->str) return false;
@@ -973,7 +963,7 @@ private:
 
 
     Scheduler* scheduler_ = nullptr;
-    const BleSceneApi* scenes_ = nullptr;
+    const ProductSceneApi* scenes_ = nullptr;
     BleAdvertisementProduct advertisingProduct_;
     uint8_t (*advertisingProductResolver_)(const char*) = nullptr;
     void (*advertisingScene_)(BleAdvertisementSnapshot&, Scheduler&) = nullptr;

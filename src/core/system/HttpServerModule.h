@@ -5,6 +5,7 @@
 #include "core/util/ScratchBuffer.h"   // leafHashes_: the growable diff-on-the-wire value-hash cache
 #include "core/util/BinaryBroadcaster.h"
 #include "core/util/JsonSink.h"   // walkPatch_ holds the second's gathered patch between ticks
+#include "core/util/ProductSceneApi.h"   // the WLED shim lists and applies product scenes
 #include "platform/platform.h"
 
 #include <array>
@@ -221,6 +222,8 @@ public:
     void setScheduler(Scheduler* s) { scheduler_ = s; }
     /// Product templates write native preset documents without changing the running tree.
     void setPresetTemplates(const PresetTemplates* templates) { presetTemplates_ = templates; }
+    /// The product's scene catalog, which the WLED shim lists as effects and applies by index; without one the shim offers the running effect alone.
+    void setScenes(const ProductSceneApi* scenes) { scenes_ = scenes; }
 
     /// A product with concurrent radios uses the shared heap reserve and bounded writes; the generic send policy stays the default.
     void setSendBudget(size_t reserve, size_t chunkLimit) {
@@ -352,6 +355,10 @@ public:
 
     /// Apply a WLED state body onto the Drivers controls, the entry every WLED path drives.
     void applyWledState(const char* body);
+    /// The module whose `palette` a WLED palette names: the running effect when it carries one, else Drivers.
+    const char* wledPaletteOwner();
+    /// How many effects the WLED shim lists: the product's scenes, or one without a catalog.
+    unsigned wledEffectCount() const;
 
     /// Test seams for the wire diff, so a unit test proves it without a socket.
     uint16_t buildStatePatchForTest(JsonSink& sink) { return buildStatePatch(sink); }
@@ -540,6 +547,7 @@ private:
     uint32_t lowRamWaitMs_ = 0;            ///< when it asked: one that stops asking this long loses its place
     size_t sendFloor_ = kSendFloor;         ///< the default radio reserve; a product may use the shared allocator reserve
     size_t sendChunkLimit_ = 0;            ///< zero keeps the generic throughput budget
+    const ProductSceneApi* scenes_ = nullptr;   ///< the product's scenes, for the WLED shim's effect list
 public:
     /// The internal RAM a send leaves free. On a board without PSRAM every unacknowledged segment is internal RAM, and a page load or a preview over a slow link queued 52 KB of them.
     static constexpr size_t kSendHeadroom = platform::kInternalFreeFloor / 2;
@@ -550,6 +558,12 @@ public:
         const size_t f = platform::freeInternalHeap();
         if (f == 0) return SIZE_MAX;
         return f > sendFloor_ ? f - sendFloor_ : 0;
+    }
+    /// How many bytes a small built answer may queue now: free internal RAM above half the reserve. It is already in RAM and one transport chunk, so it leaves where a large send waits, and still stops short of the RAM WiFi needs to receive.
+    size_t smallAnswerRoom() const {
+        const size_t f = platform::freeInternalHeap();
+        if (f == 0) return SIZE_MAX;
+        return f > sendFloor_ / 2 ? f - sendFloor_ / 2 : 0;
     }
     /// Whether free internal RAM is above the headroom, or unreported (0). Below it every send takes its turn through `maySend`.
     static bool sendHasHeadroom() {
@@ -783,7 +797,7 @@ private:
                        const char* request, const char* query, const char* body, bool hasLength, size_t length);
     void handlePresetTemplates(platform::TcpConnection& conn, const char* method, const char* path);
     /// Stream a snapshotted preset list, retaining only the names and one entry's serialized metadata.
-    void servePresetIndex(platform::TcpConnection& conn);
+    void servePresetIndex(platform::TcpConnection& conn, const char* ifNoneMatch);
     void answerPreset(platform::TcpConnection& conn, int status, JsonSink& sink, const char* etag = nullptr);
     /// Answer with an already owned preset document, transferring its exact bytes to the send slot without a copy.
     void answerPresetBlock(platform::TcpConnection& conn, int status, char* data, size_t size, const char* etag = nullptr);

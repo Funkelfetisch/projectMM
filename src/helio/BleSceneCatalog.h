@@ -32,6 +32,21 @@ public:
     static const char* revision() { return product_scenes::kRevision; }
     /// Number of scenes in this firmware's shared product catalog.
     static uint16_t count() { return sizeof(product_scenes::kEntries) / sizeof(Entry); }
+    /// The scene at `index` in catalog order, by id and display name; false past the end.
+    static bool at(uint16_t index, const char*& id, const char*& name) {
+        if (index >= count()) return false;
+        id = product_scenes::kEntries[index].id;
+        name = product_scenes::kEntries[index].name;
+        return true;
+    }
+    /// The catalog index of the complete scene running now, or -1 when none is recognized.
+    static int current(Scheduler& scheduler) {
+        Probe probe;
+        MoonModule* effect = nullptr;
+        MoonModule* drivers = nullptr;
+        const Entry* entry = recognized(scheduler, probe, effect, drivers);
+        return entry ? static_cast<int>(entry - product_scenes::kEntries) : -1;
+    }
     /// Whether a stable ID exists, independently of the active module graph.
     static bool exists(const char* id) { return find(id) != nullptr; }
     /// FNV-1a 64 over the revision and every palette name in picker order, each ended by a NUL: what a scene's descriptors depend on beyond the code the revision covers.

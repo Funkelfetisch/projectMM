@@ -299,6 +299,9 @@ int gapEvent(ble_gap_event* event, void* arg) {
                     if (first) { peripheral->repeatPairing.reset(); peripheral->connection.store(event->connect.conn_handle); }
                     peripheral->connectionCount.store(static_cast<uint8_t>(peripheral->peers.size()));
                     peripheral->linkAccepted.fetch_add(1, std::memory_order_relaxed);
+                    // The last link is the newcomer's way in: filling it lets go of the peer that went quiet longest, so the radio keeps advertising.
+                    if (kPeerCapacity > 1 && peripheral->peers.size() == kPeerCapacity)
+                        ble_gap_terminate(peripheral->peers.leastRecent(event->connect.conn_handle), BLE_ERR_REM_USER_CONN_TERM);
                 }
                 recordLinkParameters(*peripheral, event->connect.conn_handle);
                 requestConnectionHint(event->connect.conn_handle);

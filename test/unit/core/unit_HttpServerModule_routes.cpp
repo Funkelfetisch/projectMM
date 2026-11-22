@@ -12,6 +12,7 @@
 #include "core/util/build_info.h"
 #include "platform/platform.h"
 #include "http_loopback.h"
+#include "fake_light_output.h"   // the fake Drivers is the light output, whose palettes the shim names
 
 #include <algorithm>
 #include <cstring>
@@ -298,4 +299,128 @@ TEST_CASE("a hosts text carries the boards the device list knows among its entri
 // The interface tells a hosts text by its `known`, so a text naming no board still carries it, empty, and the note can follow an edit.
 TEST_CASE("a hosts text naming no board the device list knows carries an empty known") {
     CHECK(stateWithHosts("10.0.0.9").find(R"("known":{})") != std::string::npos);
+}
+
+namespace {
+
+// The Drivers master state the WLED shim reads and writes.
+struct FakeDrivers : public mm::MoonModule, public mm::test::FakeLightOutput {
+    bool on = true;
+    uint8_t brightness = 200, palette = 0;
+    void defineControls() override {
+        controls_.addControl("on", on);
+        controls_.addControl("brightness", brightness, 0, 255);
+        controls_.addControl("palette", palette, 0, 255);
+    }
+};
+struct FakeEffects : public mm::MoonModule {
+    const char* acceptsChildRoles() const override { return "effect"; }
+};
+// A running scene with its own speed, intensity and palette, as a HELIO scene has them.
+struct FakeScene : public mm::MoonModule {
+    uint8_t speed = 10, intensity = 20, palette = 3;
+    mm::ModuleRole role() const MM_NONBLOCKING override { return mm::ModuleRole::Effect; }
+    void defineControls() override {
+        controls_.addControl("speed", speed, 0, 255);
+        controls_.addControl("effect intensity", intensity, 0, 255);
+        controls_.addControl("palette", palette, 0, 255);
+    }
+};
+
+// A two-scene catalog that records what the shim applied.
+const char* gApplied = nullptr;
+bool sceneAt(uint16_t index, const char*& id, const char*& name) {
+    static const char* ids[] = {"calm", "storm"};
+    static const char* names[] = {"Calm", "Storm"};
+    if (index >= 2) return false;
+    id = ids[index]; name = names[index];
+    return true;
+}
+int sceneCurrent(mm::Scheduler&) { return 1; }
+const char* sceneRevision() { return "rev"; }
+mm::StateDocumentResult sceneApply(mm::Scheduler&, const char* id, const char* catalog, const char* controls, bool) {
+    gApplied = (std::strcmp(catalog, "rev") == 0 && std::strcmp(controls, "{}") == 0) ? id : "wrong";
+    return {};
+}
+constexpr mm::ProductSceneApi kScenes{nullptr, nullptr, nullptr, &sceneApply, nullptr, nullptr, &sceneAt, &sceneCurrent, &sceneRevision};
+
+// Drivers and one running scene, served with the two-scene catalog.
+struct WledServer {
+    mm::Scheduler s;
+    FakeDrivers* drivers = new FakeDrivers();
+    FakeEffects* effects = new FakeEffects();
+    FakeScene* scene = new FakeScene();
+    mm::HttpServerModule http;
+    WledServer() {
+        drivers->setName("Drivers"); effects->setName("Effects"); scene->setName("Scene");
+        drivers->defineControls(); scene->defineControls();
+        drivers->outputSeat_.claim();
+        REQUIRE(effects->addChild(scene));
+        s.addModule(drivers); s.addModule(effects);
+        http.port = kTestPort;
+        http.setScheduler(&s);
+        http.setScenes(&kScenes);
+        http.setup();
+        gApplied = nullptr;
+    }
+    ~WledServer() {
+        http.release();
+        s.deleteTree(effects); s.deleteTree(drivers);
+    }
+    std::string post(const std::string& body) { return whole(withBody("POST /json/state", body)); }
+    // One request on its own connection, read until the server closes it.
+    std::string whole(const std::string& req) {
+        mm::platform::TcpConnection client;
+        if (!connectAndAccept(http, client, kTestPort)) return {};
+        if (!client.write(reinterpret_cast<const uint8_t*>(req.data()), req.size())) return {};
+        return readUntilClosed(http, client);
+    }
+};
+
+} // namespace
+
+// Home Assistant's effect list, speed and intensity sliders stayed empty and at 0 on a sphere: the shim offered one "Solid" and dropped sx and ix.
+TEST_CASE("WLED: the product's scenes are the effect list, and segment 0 reports the running one's speed, intensity and palette") {
+    WledServer w;
+    const std::string json = w.whole("GET /json HTTP/1.1\r\n\r\n");
+    INFO(json);
+    CHECK(json.find("\"effects\":[\"Calm\",\"Storm\"]") != std::string::npos);
+    CHECK(json.find("\"fxcount\":2") != std::string::npos);
+    CHECK(json.find("\"fx\":1,\"sx\":10,\"ix\":20,\"pal\":3") != std::string::npos);
+}
+
+// The firmware reports WLED 99, and clients of WLED 16 and later read a segment's color capability from the segment: without it Home Assistant creates no light.
+TEST_CASE("WLED: segment 0 carries its own RGB capability, so a WLED 16+ client gets a light with colors") {
+    WledServer w;
+    const std::string json = w.whole("GET /json HTTP/1.1\r\n\r\n");
+    INFO(json);
+    CHECK(json.find("\"seg\":[{\"id\":0,") != std::string::npos);
+    CHECK(json.find("\"bri\":255,\"lc\":1,") != std::string::npos);
+}
+
+// HA sends a segment's effect, speed, intensity and palette in one body; each lands on the scene, the effect first so the rest land on it.
+TEST_CASE("WLED: segment 0's fx applies a scene at its defaults, and sx, ix and pal set the running scene's own controls") {
+    WledServer w;
+    w.post(R"({"seg":[{"id":0,"fx":0,"sx":200,"ix":50,"pal":7}]})");
+    REQUIRE(gApplied != nullptr);
+    CHECK(std::strcmp(gApplied, "calm") == 0);
+    CHECK(w.scene->speed == 200);
+    CHECK(w.scene->intensity == 50);
+    CHECK(w.scene->palette == 7);
+    CHECK(w.drivers->palette == 0);   // the scene reads its own palette, so Drivers keeps its
+}
+
+// On/off from a segment light, and WLED's "t" toggle, switch the same master power as the top-level on.
+TEST_CASE("WLED: on at the top, on in segment 0 and the \"t\" toggle all switch the master power") {
+    WledServer w;
+    w.post(R"({"seg":[{"id":0,"on":false}]})");
+    CHECK_FALSE(w.drivers->on);
+    w.post(R"({"on":"t"})");
+    CHECK(w.drivers->on);
+    w.post(R"({"on":false,"bri":90})");
+    CHECK_FALSE(w.drivers->on);
+    CHECK(w.drivers->brightness == 90);
+    // a key nested elsewhere is not the master switch
+    w.post(R"({"on":true,"nl":{"on":false}})");
+    CHECK(w.drivers->on);
 }

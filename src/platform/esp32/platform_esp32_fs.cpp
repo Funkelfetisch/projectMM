@@ -159,6 +159,7 @@ static void makeParent(const char* path) {
     fsMkdir(dir);
 }
 
+// LittleFS commits a file's new contents at sync or close and keeps the old ones until then (copy-on-write), so writing in place is already atomic; a temporary and a rename would add a second metadata commit, the slower half of a save.
 bool fsWriteAtomic(const char* path, const char* data, size_t len) {
     if constexpr (hasSdCard) { if (isSdPath(path)) return sdCardWriteAtomic(path, data, len); }
     if (!fsMounted_) return false;
@@ -166,29 +167,13 @@ bool fsWriteAtomic(const char* path, const char* data, size_t len) {
     if (len > 0 && !data) return false;
     makeParent(path);
     char full[128];
-    char tmp[136];
     if (!fsTranslate(path, full, sizeof(full))) return false;
-    int n = std::snprintf(tmp, sizeof(tmp), "%s.tmp", full);
-    if (n < 0 || static_cast<size_t>(n) >= sizeof(tmp)) return false;
-
-    FILE* f = std::fopen(tmp, "wb");
+    FILE* f = std::fopen(full, "wb");
     if (!f) return false;
-    size_t written = std::fwrite(data, 1, len, f);
-    if (written != len) {
-        std::fclose(f);
-        ::remove(tmp);
-        return false;
-    }
-    std::fflush(f);
-    int fd = ::fileno(f);
-    if (fd >= 0) ::fsync(fd);
-    std::fclose(f);
-
-    if (::rename(tmp, full) != 0) {
-        ::remove(tmp);
-        return false;
-    }
-    return true;
+    const bool written = std::fwrite(data, 1, len, f) == len;
+    // A write that fails (a full volume) marks the LittleFS file errored, and its close then commits nothing: the old contents stay.
+    const bool closed = std::fclose(f) == 0;
+    return written && closed;
 }
 
 int64_t fsSize(const char* path) {

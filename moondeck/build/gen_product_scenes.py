@@ -13,7 +13,7 @@ EFFECT_CONTROLS = ("speed", "effect intensity", "custom 1", "custom 2", "custom 
 
 
 def code(text: str) -> str:
-    """A C++ source without its comments: the catalog revision follows what the tables depend on, so editing prose leaves it unchanged."""
+    """A C++ source without its comments, its whitespace one space: the catalog revision follows what the tables depend on, so prose and layout leave it unchanged."""
     out, i, n = [], 0, len(text)
     while i < n:
         if text.startswith("//", i):
@@ -22,6 +22,10 @@ def code(text: str) -> str:
         elif text.startswith("/*", i):
             end = text.find("*/", i + 2)
             i = n if end < 0 else end + 2
+        elif text[i].isspace():
+            if out and out[-1] != " ":
+                out.append(" ")
+            i += 1
         elif text[i] in "\"'":
             j = i + 1
             while j < n and text[j] != text[i]:
@@ -31,7 +35,7 @@ def code(text: str) -> str:
         else:
             out.append(text[i])
             i += 1
-    return "".join(out)
+    return "".join(out).strip()
 
 
 def outputs():

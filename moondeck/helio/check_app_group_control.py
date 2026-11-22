@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
  mm::BleControlService service; service.setScheduler(&scheduler); service.setEpochForTest("00000000000000000000000000000001");
  if (argc != 2) return 2;
  service.setAdvertisingProduct({static_cast<uint8_t>(std::atoi(argv[1])), 0});
- static constexpr mm::BleSceneApi scenes{&mm::BleSceneCatalog::writePage,&mm::BleSceneCatalog::writeInfo,&mm::BleSceneCatalog::validate,&mm::BleSceneCatalog::apply,&mm::BleSceneCatalog::writeState}; service.setScenes(&scenes);
+ static constexpr mm::ProductSceneApi scenes{&mm::BleSceneCatalog::writePage,&mm::BleSceneCatalog::writeInfo,&mm::BleSceneCatalog::validate,&mm::BleSceneCatalog::apply,&mm::BleSceneCatalog::writeState}; service.setScenes(&scenes);
  service.handle(R"({"$v":1,"$id":1,"$op":"hello","$nonce":"00000000000000000000000000000002"})",0);
  std::string line; unsigned now=10;
  while(std::getline(std::cin,line)) { service.handle(line.c_str(),now++); std::cout << service.response() << std::endl; scheduler.preparePending(); service.applyDue(now); }

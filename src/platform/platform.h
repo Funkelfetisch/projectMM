@@ -341,7 +341,7 @@ bool fsRemove(const char* path);                             // file or empty di
 int  fsRead(const char* path, char* buf, size_t maxLen);
 /// A file's size in bytes, or -1 when missing; wide since a real card file can pass 2 GiB, more than a 32-bit long holds signed.
 int64_t fsSize(const char* path);
-/// Write a whole file atomically, through a temporary and a rename, creating its parent folder.
+/// Write a whole file atomically, the old contents kept until the new ones are complete, creating its parent folder.
 bool fsWriteAtomic(const char* path, const char* data, size_t len);
 /// Fill up to `cap` bytes and answer the count; 0 ends the stream.
 using FsWriteSrc = size_t(*)(char* buf, size_t cap, void* user, bool* abort);

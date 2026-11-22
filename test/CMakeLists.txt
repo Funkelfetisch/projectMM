@@ -275,6 +275,7 @@ add_executable(mm_tests
     unit/light/unit_PreviewFrameSnapshot.cpp
     unit/light/unit_RainbowEffect.cpp
     unit/light/unit_NebuliteRainbowEffect.cpp
+    unit/light/unit_SphereEffects.cpp
     unit/light/unit_NebuliteBlinkEffect.cpp
     unit/light/unit_WledWashingMotion.cpp
     unit/light/unit_NebuliteWashingEffect.cpp

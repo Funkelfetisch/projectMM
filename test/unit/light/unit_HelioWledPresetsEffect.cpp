@@ -309,7 +309,7 @@ TEST_CASE("HELIO prepare preserves generic controls restored by a boot state doc
     CHECK(effect->effectIntensity == 247);
     CHECK(effect->custom1 == 9);
     CHECK(effect->custom2 == 255);
-    CHECK_FALSE(effect->option1);
+    CHECK(effect->option1);  // Frequency Wave's source default sets option 1
 }
 
 TEST_CASE("HELIO prepare preserves tuned controls of a fixed factory scene") {
@@ -513,4 +513,52 @@ TEST_CASE("HELIO native physical scenes use physical light order") {
     CHECK(plasmoid.usesPhysicalLightOrder());
     CHECK(gravFreq.usesPhysicalLightOrder());
     CHECK(freqWave.usesPhysicalLightOrder());
+}
+
+namespace {
+
+/// Milliseconds from a scene's first lit light to its first lit light at `far`, on a strip of `count` fed music.
+template<typename Effect>
+uint32_t travelMs(uint16_t count, size_t far) {
+    SignalAudio signal;
+    mm::Layouts layouts;
+    mm::GridLayout grid;
+    mm::Layer layer;
+    Effect effect;
+    grid.width = count; grid.height = 1; grid.depth = 1;
+    layouts.addChild(&grid);
+    layer.setLayouts(&layouts);
+    layer.setChannelsPerLight(3);
+    layer.addChild(&effect);
+    layer.applyState();
+    uint32_t first = 0;
+    for (uint32_t t = 1000; t < 20000; t += 10) {
+        mm::platform::setTestNowMs(t);
+        signal.tick();
+        layer.tick();
+        const uint8_t* buf = layer.buffer().data();
+        bool any = false;
+        for (size_t i = 0; i < layer.buffer().bytes(); ++i) any |= buf[i] != 0;
+        if (any && !first) first = t;
+        if (first && (buf[3 * far] | buf[3 * far + 1] | buf[3 * far + 2])) {
+            mm::platform::setTestNowMs(0);
+            return t - first;
+        }
+    }
+    mm::platform::setTestNowMs(0);
+    return UINT32_MAX;
+}
+
+}  // namespace
+
+TEST_CASE("HELIO Comets cross a long ring in the same two seconds as a short one") {
+    const uint32_t shortRing = travelMs<mm::HelioMultiCometEffect>(64, 63);
+    const uint32_t longRing = travelMs<mm::HelioMultiCometEffect>(520, 519);
+    CHECK(shortRing > 1500); CHECK(shortRing < 2300);
+    CHECK(longRing > 1500); CHECK(longRing < 2300);
+}
+
+TEST_CASE("HELIO Frequency Wave reaches the ends of a long ring within two seconds") {
+    CHECK(travelMs<mm::HelioFreqWaveEffect>(64, 0) < 2000);
+    CHECK(travelMs<mm::HelioFreqWaveEffect>(520, 0) < 2000);
 }

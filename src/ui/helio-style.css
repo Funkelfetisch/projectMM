@@ -1,6 +1,6 @@
 /* Hallmark · shape: app screen · genre: modern-minimal · theme: brand (NEBULITE app ui/theme.ts: paper #07070B, accent #A58BFF, action #7048D9) · redesign: polish · scope: app · built: the project · v2.0.0 */
-/* Hallmark · polish: NEBULITE wears its app's palette through tokens; HELIO keeps its own values in the same tokens; the eyebrow is a plain label; glow, sheen and glass off for NEBULITE; disabled shows in fill, ink and cursor */
-/* Hallmark · waive 48 · the base and brand palettes are token blocks on body[data-theme] and body[data-product], the project's theme mechanism, not :root; the remaining literals are in the generic MoonLight UI, outside this polish */
+/* Hallmark · polish: every product wears the app's palette through tokens, HELIO as NEBULITE; the eyebrow is a plain label; no glow, sheen or glass; disabled shows in fill, ink and cursor */
+/* Hallmark · waive 48 · the base and brand palettes are token blocks on body[data-theme] and body[data-brand], the project's theme mechanism, not :root; the remaining literals are in the generic MoonLight UI, outside this polish */
 /* Hallmark · waive 76 · #brand-logo gets its source from applyBranding and stays hidden until then */
 /* Hallmark · waive 67 · .surface-popup-caption and .mooncloud-chart-title are generic MoonLight cards, not the NEBULITE home */
 /* Hallmark · reworded the live stage labels: "Live source · historical crop-top illustration" to "Live on the crop-top illustration", "Live source · approximate 30 LED jacket" to "Live on the 30 LED jacket illustration", "Waiting for a matching live source preview" to "Connecting to the live preview", "NEBULITE · Choose your product in Setup" to "Choose your product in Setup" · 63 names the dot-joined strings */
@@ -166,6 +166,7 @@
     min-height: 34px;
     padding: 0 9px;
     border-color: rgba(255, 255, 255, 0.18);
+    color: #FFFFFF;   /* on the rendered scene, which stays dark in both themes */
     background: rgba(3, 5, 10, 0.56);
     box-shadow: 0 5px 18px rgba(0, 0, 0, 0.22);
     backdrop-filter: blur(8px);
@@ -811,7 +812,7 @@
 
 .helio-size-grid button.active {
     border-color: var(--helio-gold);
-    background: rgba(245,158,11,0.18);
+    background: var(--accent-soft);
 }
 
 .helio-preset-grid {
@@ -977,36 +978,7 @@
 }
 
 body[data-brand="helio"] .helio-home {
-    --helio-amber: #f59e0b;
-    --helio-gold: #fcd34d;
-    --helio-cyan: #22d3ee;
-    --helio-magenta: #e879f9;
-    --helio-indigo: #818cf8;
-    --helio-panel: rgba(8, 13, 24, 0.86);
-    /* The product surfaces, one token each, so a product brand restyles them without a rule of its own. */
-    --brand-stage-bg:
-        linear-gradient(115deg, rgba(245, 158, 11, 0.18), transparent 26%),
-        linear-gradient(300deg, rgba(34, 211, 238, 0.16), transparent 30%),
-        repeating-linear-gradient(135deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 18px),
-        #06080e;
-    --brand-stage-line: rgba(251, 191, 36, 0.34);
-    --brand-stage-shadow: 0 24px 70px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.08);
-    --brand-stage-sheen:
-        linear-gradient(90deg, rgba(255,255,255,0.10), transparent 18% 82%, rgba(255,255,255,0.08)),
-        linear-gradient(0deg, transparent 0 70%, rgba(245,158,11,0.09));
-    --brand-panel-bg: linear-gradient(145deg, rgba(255,255,255,0.075), rgba(255,255,255,0.025)), rgba(7, 10, 18, 0.86);
-    --brand-line: rgba(255,255,255,0.16);
-    --brand-action-bg: linear-gradient(135deg, #fbbf24, #fb7185);
-    --brand-action-line: rgba(251, 191, 36, 0.75);
-    --brand-on-action: #05070d;
-    --brand-action-glow: 0 0 24px rgba(245, 158, 11, 0.22);
-    --brand-control-bg: linear-gradient(145deg, rgba(255,255,255,0.07), rgba(255,255,255,0.025));
-    --brand-hover-glow: 0 0 18px rgba(34, 211, 238, 0.09);
-    --brand-trace-bg: #03050a;
-}
-
-/* NEBULITE wears the app's brand (NEBULITE app ui/theme.ts): violet on near-black, solid surfaces, no glow. */
-body[data-brand="helio"][data-product="nebulite"] .helio-home {
+    /* The product surfaces, one token each, in the app's palette (NEBULITE app ui/theme.ts): violet on near-black, solid surfaces, no glow. */
     --helio-amber: #7048D9;
     --helio-gold: #A58BFF;
     --helio-cyan: #C9B8FF;
@@ -1027,7 +999,7 @@ body[data-brand="helio"][data-product="nebulite"] .helio-home {
     --brand-hover-glow: none;
     --brand-trace-bg: #07070B;
 }
-body[data-brand="helio"][data-product="nebulite"][data-theme="light"] .helio-home {
+body[data-brand="helio"][data-theme="light"] .helio-home {
     --helio-gold: #6336BD;
     --helio-cyan: #6336BD;
     --helio-magenta: #6336BD;
@@ -1119,8 +1091,8 @@ body[data-brand="helio"] #helio-trace {
     bottom: 16px;
     z-index: 90;
     width: min(420px, calc(100% - 32px));   /* a fixed box's 100% is the viewport without its scrollbar */
-    background: #03050a;
-    border: 1px solid rgba(34, 211, 238, 0.24);
+    background: var(--bg-0);
+    border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 20px 70px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255,255,255,0.08);
     overflow: hidden;
@@ -1199,7 +1171,7 @@ body[data-brand="helio"] .helio-scene-card:hover {
 body[data-brand="helio"] .helio-scene-card.active,
 body[data-brand="helio"] .helio-playlist-section.active .helio-playlist-header {
     border-color: var(--helio-gold);
-    box-shadow: inset 0 0 0 1px rgba(251,191,36,0.45), 0 0 30px rgba(251,191,36,0.14);
+    box-shadow: inset 0 0 0 1px var(--helio-gold);
 }
 
 body[data-brand="helio"] .helio-mode-preview,
@@ -1429,7 +1401,7 @@ body[data-brand="helio"] .helio-setup-panel.is-collapsed {
     min-height: 48px;
     padding: 0 16px;
     border-color: color-mix(in srgb, var(--helio-cyan) 25%, var(--border));
-    background: linear-gradient(105deg, rgba(34, 211, 238, 0.10), rgba(255,255,255,0.035));
+    background: var(--card-bg-1);
 }
 
 .helio-controls .helio-advanced-group[open] {
@@ -1560,8 +1532,8 @@ body[data-brand="helio"] .helio-setup-panel.is-collapsed {
     .nebulite-setup-panel > button { width: 100%; }
 }
 
-/* NEBULITE takes the app's palette for the whole UI, dark and light (NEBULITE app ui/theme.ts). */
-body[data-product="nebulite"][data-theme="dark"] {
+/* A product takes the app's palette for the whole UI, dark and light (NEBULITE app ui/theme.ts, which HELIO shares). */
+body[data-brand="helio"][data-theme="dark"] {
     --bg-0: #07070B;
     --bg-1: #12121A;
     --fg: #F5F5FA;
@@ -1577,7 +1549,7 @@ body[data-product="nebulite"][data-theme="dark"] {
     --red: #FF737D;
     --yellow: #FFB020;
 }
-body[data-product="nebulite"][data-theme="light"] {
+body[data-brand="helio"][data-theme="light"] {
     --bg-0: #EEEEF4;
     --bg-1: #FFFFFF;
     --fg: #171721;
@@ -1594,8 +1566,8 @@ body[data-product="nebulite"][data-theme="light"] {
     --yellow: #805000;
 }
 
-/* NEBULITE's sidebar is a drawer at every width: the home is the product, and Advanced opens the rest. */
-body[data-product="nebulite"] #nav {
+/* A product's sidebar is a drawer at every width: the home is the product, and Advanced opens the rest. */
+body[data-brand="helio"] #nav {
     position: fixed;
     top: 60px;
     left: 0;
@@ -1609,11 +1581,11 @@ body[data-product="nebulite"] #nav {
     transition: transform 0.2s ease, visibility 0.2s;
     z-index: 90;
 }
-body[data-product="nebulite"].nav-open #nav {
+body[data-brand="helio"].nav-open #nav {
     transform: translateX(0);
     visibility: visible;
 }
-body[data-product="nebulite"] #nav-overlay {
+body[data-brand="helio"] #nav-overlay {
     position: fixed;
     top: 60px;
     left: 0;
@@ -1622,26 +1594,32 @@ body[data-product="nebulite"] #nav-overlay {
     background: rgba(0, 0, 0, 0.5);
     z-index: 80;
 }
-body[data-product="nebulite"].nav-open #nav-overlay { display: block; }
-body[data-product="nebulite"] .workspace.helio-product #main { max-width: 1500px; }
+body[data-brand="helio"].nav-open #nav-overlay { display: block; }
+body[data-brand="helio"] .workspace.helio-product #main { max-width: 1500px; }
 @media (prefers-reduced-motion: reduce) {
-    body[data-product="nebulite"] #nav { transition: none; }
+    body[data-brand="helio"] #nav { transition: none; }
 }
-/* Before the product workspace takes over, MoonLight's preview toolbar stays out of a NEBULITE page. */
-body[data-product="nebulite"] .workspace:not(.helio-device) .preview-pane { display: none; }
+/* Before the product workspace takes over, MoonLight's preview toolbar stays out of a product page. */
+body[data-brand="helio"] .workspace:not(.helio-device) .preview-pane { display: none; }
 /* With the sidebar gone the stage is wide: the garment keeps to one screen height. */
 .nebulite-product-shell > img, .nebulite-product-shell > canvas { max-height: calc(100vh - 170px); }
-/* The NEBULITE logo stands where the name was, in the accent token; the text stays for screen readers. */
-body[data-product="nebulite"] #status-bar .brand {
+/* The product's logo stands where the name was, in the accent token, as tall in capitals for each product; the text stays for screen readers. */
+body[data-brand="helio"] #status-bar .brand {
     display: inline-block;
     flex: 0 0 auto;
-    width: 112px;
-    height: 14px;
+    width: 58px;
+    height: 14.5px;   /* HELIO's round O overshoots its 14 px capitals */
     color: transparent;
     font-size: 0;
     background: var(--accent);
-    -webkit-mask: url(nebulite-logo.svg) center / contain no-repeat;
-    mask: url(nebulite-logo.svg) center / contain no-repeat;
+    -webkit-mask: var(--brand-logo) center / contain no-repeat;
+    mask: var(--brand-logo) center / contain no-repeat;
+    --brand-logo: url(helio-logo.svg);
+}
+body[data-brand="helio"][data-product="nebulite"] #status-bar .brand {
+    width: 112px;
+    height: 14px;
+    --brand-logo: url(nebulite-logo.svg);
 }
 .helio-native-preset-group { grid-column: 1 / -1; margin: 8px 0 0; font-size: 1rem; font-weight: 600; color: var(--fg-muted); }
 .helio-native-preset-group:first-child { margin-top: 0; }

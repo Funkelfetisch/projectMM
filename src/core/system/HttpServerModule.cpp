@@ -866,7 +866,24 @@ void HttpServerModule::answerPresetReply(platform::TcpConnection& conn, Send& sl
     slot.conn = std::move(conn);
 }
 
-void HttpServerModule::servePresetIndex(platform::TcpConnection& conn) {
+static bool etagMatches(const char* ifNoneMatch, const char* etag);
+
+void HttpServerModule::servePresetIndex(platform::TcpConnection& conn, const char* ifNoneMatch) {
+    // The index's tag: the store's write count and the playing look under a per-boot stamp, so a client holding it gets 304 without a file read.
+    static const uint32_t bootStamp = platform::micros();
+    const auto* playing = scheduler_ == Scheduler::instance() ? ControlModule::active() : nullptr;
+    uint32_t lookHash = 2166136261u;  // FNV-1a of the playing look's name
+    for (const char* c = playing ? playing->currentLook() : ""; *c; ++c) lookHash = (lookHash ^ static_cast<uint8_t>(*c)) * 16777619u;
+    char etag[40];
+    mm::formatTo(etag, sizeof(etag), "\"%08lx-%lu-%08lx\"", static_cast<unsigned long>(bootStamp),
+                 static_cast<unsigned long>(PresetStore::revision()), static_cast<unsigned long>(lookHash));
+    if (etagMatches(ifNoneMatch, etag)) {
+        char notModified[160];
+        mm::formatTo(notModified, sizeof(notModified),
+            "HTTP/1.1 304 Not Modified\r\nETag: %s\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n", etag);
+        conn.write(reinterpret_cast<const uint8_t*>(notModified), std::strlen(notModified));
+        return;
+    }
     Send* slot = claimSend(conn);
     if (!slot) return;
     const auto refuse = [&](int status, const char* error) {
@@ -886,8 +903,7 @@ void HttpServerModule::servePresetIndex(platform::TcpConnection& conn) {
     slot->lastActivityMs = platform::millis();
     const auto listed = PresetStore::snapshotIndex(source->snapshot);
     if (!listed) { refuse(listed.status, listed.error); return; }
-    const auto* control = scheduler_ == Scheduler::instance() ? ControlModule::active() : nullptr;
-    if (control) mm::formatTo(source->active, sizeof(source->active), "%s", control->currentLook());
+    if (playing) mm::formatTo(source->active, sizeof(source->active), "%s", playing->currentLook());
     PresetStore::Result first;
     {
         JsonSink fragment;
@@ -900,9 +916,10 @@ void HttpServerModule::servePresetIndex(platform::TcpConnection& conn) {
     }
     if (!first) { refuse(first.status, first.error); return; }
     if (sendRoom() == 0) { refuse(503, "insufficient memory to send preset index"); return; }
-    const char* header =
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-cache\r\n"
-        "Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: ETag\r\nConnection: close\r\n\r\n";
+    char header[224];
+    mm::formatTo(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-cache\r\nETag: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: ETag\r\nConnection: close\r\n\r\n", etag);
     if (!conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header))) { endSendSlot(*slot); return; }
     slot->conn = std::move(conn);
 }
@@ -916,7 +933,7 @@ void HttpServerModule::handlePresets(platform::TcpConnection& conn, const char* 
     };
     if (std::strcmp(path, "/api/presets") == 0) {
         if (std::strcmp(method, "GET")) { refuse(405, "preset index is read only"); return; }
-        servePresetIndex(conn); return;
+        servePresetIndex(conn, findHeaderCI(request, "If-None-Match:")); return;
     }
     const char* segment = path + 13;
     const char* slash = std::strchr(segment, '/');
@@ -1345,6 +1362,8 @@ void HttpServerModule::handleWriteFile(platform::TcpConnection& conn, const char
 void HttpServerModule::applyFileChanged(const char* path) {
     // A written /.config/<Type>.json applies live, queued for the render task: setup() here crashed the ESP32 and a network apply could cut the socket before the response.
     if (auto* fs = FilesystemModule::instance()) fs->requestConfigApply(path);
+    // A preset file written or removed past the store changes the preset index's tag.
+    PresetStore::noteFileChanged(path);
     // A user script of a name the firmware also ships is a fork; record its origin here, where every writer passes, so the binding can flag an updated shipped copy.
     moonlive::noteForkedFrom(path);
     // A script that landed leaves the missing list here, not at a compile that may never come.
@@ -1494,7 +1513,8 @@ bool HttpServerModule::serveUiFromDisk(platform::TcpConnection& conn, const char
 void HttpServerModule::answerBlock(platform::TcpConnection& conn, const char* header, char* data, size_t len) {
     Send* slot = claimSend(conn);
     if (!slot) { platform::free(data); return; }
-    if (len > 0 && sendRoom() == 0) {
+    // An answer of one transport chunk is already built, so it takes the small answers' deeper reserve; a larger one needs room above the floor.
+    if (len > 0 && (len <= kTransferBufBytes ? smallAnswerRoom() : sendRoom()) == 0) {
         platform::free(data);
         sendResponse(conn, 503, "application/json", "{\"error\":\"insufficient memory to send answer\"}");
         return;
@@ -1647,12 +1667,15 @@ void HttpServerModule::serveSystem(platform::TcpConnection& conn) {
     conn.write(reinterpret_cast<const uint8_t*>(header), std::strlen(header));
 
     JsonSink sink(conn);
+    const char* worstModule = "";
+    const uint32_t worstFrameUs = scheduler_ ? scheduler_->takeWorstFrameUs(worstModule) : 0;
     // maxBlock is internal-only, since all-memory reports ~8 MB on PSRAM boards; `allocated`/`allocPeak` mean the same on a board and a laptop, where free heap does not.
     sink.appendf(
-        "{\"fps\":%u,\"tickTimeUs\":%u,\"freeHeap\":%u,\"freeInternal\":%u,\"maxBlock\":%u,\"maxExec\":%u,"
-        "\"allocated\":%u,\"allocPeak\":%u,\"allocBlocks\":%u,\"uptime\":%u,\"modules\":[",
+        "{\"fps\":%u,\"tickTimeUs\":%u,\"worstFrameUs\":%u,\"freeHeap\":%u,\"freeInternal\":%u,\"maxBlock\":%u,\"maxExec\":%u,"
+        "\"allocated\":%u,\"allocPeak\":%u,\"allocBlocks\":%u,\"uptime\":%u,\"worstModule\":",
         static_cast<unsigned>(scheduler_ ? scheduler_->fps() : 0),
         static_cast<unsigned>(scheduler_ ? scheduler_->tickTimeUs() : 0),
+        static_cast<unsigned>(worstFrameUs),
         static_cast<unsigned>(platform::freeHeap()),
         static_cast<unsigned>(platform::freeInternalHeap()),
         static_cast<unsigned>(platform::maxInternalAllocBlock()),
@@ -1661,6 +1684,8 @@ void HttpServerModule::serveSystem(platform::TcpConnection& conn) {
         static_cast<unsigned>(platform::allocatedPeak()),
         static_cast<unsigned>(platform::allocatedCount()),
         static_cast<unsigned>(scheduler_ ? scheduler_->elapsed() / 1000 : 0));
+    sink.writeJsonString(worstModule);
+    sink.append(",\"modules\":[");
 
     // Per-module timing (walk tree recursively)
     if (scheduler_) {
@@ -2868,8 +2893,8 @@ void HttpServerModule::drainSend(Send& s, platform::TcpConnection& conn, const v
             if (close) conn.close();
             return;
         }
-        // A write queues its bytes in internal RAM until acknowledged, so it takes only what lies above the floor WiFi needs to receive; below it the send waits, within the stall window.
-        const size_t room = sendRoom();
+        // Queued bytes hold internal RAM until acked, so a write takes only the room above WiFi's floor and otherwise waits; a small built answer takes its admission's deeper reserve.
+        const size_t room = smallAnswer ? smallAnswerRoom() : sendRoom();
         if (room == 0) break;
         const bool inHead = s.headLeft > 0;
         const size_t span = std::min({budget, room, inHead ? s.headLeft : s.bodyLeft});

@@ -85,9 +85,21 @@ void Scheduler::setup() {
 void Scheduler::tick() MM_NONBLOCKING {
     uint32_t now = platform::millis();
     uint32_t tickStart = platform::micros();
+    // The interval between frame starts, not the tick's own work, is what a viewer sees stall: it also holds whatever ran between two ticks.
+    if (lastTickStartUs_) {
+        const uint32_t gap = tickStart - lastTickStartUs_;
+        if (gap > worstFrameUs_) { worstFrameUs_ = gap; worstModule_ = slowestModule_; }
+    }
+    lastTickStartUs_ = tickStart;
+    uint32_t slowestUs = 0;
+    const char* slowest = "";
+    // The slowest piece of this frame, a module's tick of any cadence or the tree rebuild, names the stall it causes.
+    const auto note = [&](uint32_t spent, const char* name) { if (spent > slowestUs) { slowestUs = spent; slowest = name; } };
 
     // A requested rebuild runs here at a frame boundary; the analyzer reports it transitively and that finding stays on purpose, the only signal if the gate is lost.
+    const uint32_t prepareStart = platform::micros();
     preparePending();
+    note(platform::micros() - prepareStart, "(tree rebuild)");
 
     // Disabled modules do not tick, except system modules that override `respectsEnabled()` to return false so users can re-enable others through them.
     auto shouldRun = [](MoonModule* m) {
@@ -97,7 +109,9 @@ void Scheduler::tick() MM_NONBLOCKING {
         if (!shouldRun(modules_[i])) continue;
         uint32_t modStart = platform::micros();
         modules_[i]->tick();
-        modules_[i]->addAccumUs(platform::micros() - modStart);
+        const uint32_t spent = platform::micros() - modStart;
+        modules_[i]->addAccumUs(spent);
+        note(spent, modules_[i]->name());
     }
 
     if (now - lastLoop20ms_ >= 20) {
@@ -106,7 +120,9 @@ void Scheduler::tick() MM_NONBLOCKING {
             if (!shouldRun(modules_[i])) continue;
             uint32_t modStart = platform::micros();
             modules_[i]->tick20ms();
-            modules_[i]->addAccumUs(platform::micros() - modStart);
+            const uint32_t spent = platform::micros() - modStart;
+            modules_[i]->addAccumUs(spent);
+            note(spent, modules_[i]->name());
         }
     }
 
@@ -116,12 +132,15 @@ void Scheduler::tick() MM_NONBLOCKING {
             if (!shouldRun(modules_[i])) continue;
             uint32_t modStart = platform::micros();
             modules_[i]->tick1s();
-            modules_[i]->addAccumUs(platform::micros() - modStart);
+            const uint32_t spent = platform::micros() - modStart;
+            modules_[i]->addAccumUs(spent);
+            note(spent, modules_[i]->name());
         }
     }
 
     tickAccumUs_ += platform::micros() - tickStart;
     frameCount_++;
+    slowestModule_ = slowest;  // named against the gap that ends at the next frame's start
 
     // Every 1 second: compute averages, recurse into children
     if (now - lastTimingUpdate_ >= 1000) {

@@ -27,7 +27,7 @@ class Scheduler;
 ///
 /// ## Saving is debounced, and bounded
 ///
-/// Every successful mutation marks its module dirty, tree-shape changes included. A save waits for quiet, then writes each dirty subtree to a temporary file and renames it. A flag clears once its write succeeds, so a failure is retried.
+/// Every successful mutation marks its module dirty, tree-shape changes included. A save waits for quiet, then writes the dirty subtrees one a second, each to a temporary file it then renames: a flash write stops the render loop, so the files are spread rather than written in one frozen frame. A flag clears once its write succeeds, so a failure is retried. A reboot flushes them all at once.
 ///
 /// ## Conditional controls, and the first boot
 ///
@@ -58,7 +58,7 @@ public:
     void setScheduler(Scheduler* s);
     /// Report whether the storage mounted, once.
     void setup() override;
-    /// Once the debounce or the ceiling expires, write every dirty subtree. @xref{saving-is-debounced-and-bounded}
+    /// Once the debounce or the ceiling expires, write the dirty subtrees, one a second. @xref{saving-is-debounced-and-bounded}
     void tick1s() MM_NONBLOCKING override;
 
     /// The live "last saved" buffer, which FileManagerModule binds its own control straight at.
@@ -97,6 +97,8 @@ public:
     void tick20ms() MM_NONBLOCKING override;
 
 private:
+    /// Write the first dirty subtree, and keep the save pending while another one waits or the write failed.
+    void saveNextDirty();
     static inline FilesystemModule* instance_ = nullptr;
     Scheduler* scheduler_ = nullptr;
     bool mounted_ = false;
