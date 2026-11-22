@@ -10,6 +10,8 @@ Why the boundary is drawn here, and what is allowed to cross it, is [MoonCore's 
 
 `millis`, `micros`, `delayMs`, `delayUs`. The clock every animation is written against, and the only sleep a module may take.
 
+`utcNow` and `startTimeSync`. The wall clock, in UTC seconds since 1970: NTP's on a device, the system's on a desktop, and zero until one answers. The [Timer](../core/services.md#timer) reads it.
+
 Source: [platform.h](../../../src/platform/platform.h)
 
 ## Memory

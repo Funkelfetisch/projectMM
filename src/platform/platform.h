@@ -73,6 +73,13 @@ uint32_t micros() MM_NONBLOCKING;
 /// Drive `millis()` from a test, on a device too so a scenario run on real hardware can freeze time. Zero restores the real clock, which a test must do in release.
 void setTestNowMs(uint32_t ms);
 
+/// Seconds since 1970 in UTC, the wall clock: NTP's on a device, the system's on a desktop. Zero while no time source has answered.
+uint32_t utcNow() MM_NONBLOCKING;
+/// Keep the wall clock from NTP once a network is up; a later call costs nothing.
+void startTimeSync();
+/// Drive `utcNow()` from a test; zero restores the real clock.
+void setTestUtcNow(uint32_t seconds);
+
 /// Make the next bind fail, a UDP socket's or a TCP listener's, so a test reaches that path; false restores. Hogging the port instead is not portable: Linux permits the overlapping bind under SO_REUSEADDR, and macOS lets a non-root process bind port 80.
 void setTestBindFails(bool fail);
 #ifndef ESP_PLATFORM   // host-test seams, which no ESP32 code calls

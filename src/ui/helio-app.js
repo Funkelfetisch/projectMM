@@ -34,6 +34,7 @@ import {
 } from "./helio-scenes.js";
 import { helioAudioStartEnabled, helioChoiceIndex, planHelioEffectActivation, planHelioControlDocument } from "./helio-orchestration.js";
 import { batteryReceiptTracker, batteryView, renderBatteryStatus } from "./helio-battery.js";
+import { renderTimerBody, timerSummary, timerView } from "./helio-timer.js";
 import { uploadThroughMoonbase } from "./helio-moonbase-upload.js";
 import { helioSceneControlMetadata } from "./helio-scene-controls.js";
 import { createPresetClient } from "./helio-presets.js";
@@ -2914,6 +2915,9 @@ function hydrateHelioHome(wrap, presets) {
     wrap.appendChild(renderHelioSetupMenu());
 
     if (helioModeApplying) {
+    const timer = renderHelioTimerMenu();
+    if (timer) wrap.appendChild(timer);
+
         const pending = helioModeQueued?.mode || HELIO_MODES.find(mode => mode.id === helioModeApplyingId);
         if (pending) showHelioScenePending(pending);
     }
@@ -3280,6 +3284,40 @@ function renderHelioSetupMenu() {
     details.addEventListener("toggle", () => { setHelioSetupCollapsed(!details.open); load(); });
     details.append(summary, content);
     if (details.open) load();
+    return details;
+}
+
+function renderHelioTimerMenu() {
+    if (!firstModuleByType("TimerService")) return null;
+    const details = document.createElement("details");
+    details.className = "helio-dashboard-menu helio-timer-menu";
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.textContent = "Timer";
+    const meta = document.createElement("span");
+    summary.append(title, meta);
+    const content = document.createElement("div");
+    const draw = () => {
+        const module = firstModuleByType("TimerService");
+        meta.textContent = timerSummary(timerView(module));
+        if (!details.open || !module) return;
+        content.replaceChildren(renderTimerBody(document, module, {
+            send: (control, value) => sendControl(module.name, control, value),
+            // At once from the value just sent, then again once the device has worked out what comes next.
+            rerender: () => { draw(); setTimeout(draw, 1500); },
+        }));
+    };
+    const load = async () => {
+        if (!details.open) return;
+        if (helioNeedsModuleMetadata("Services")) {
+            content.textContent = "Loading the timer…";
+            if (!await ensureHelioModuleMetadata("Services")) { content.textContent = "The timer could not be loaded."; return; }
+        }
+        draw();
+    };
+    details.addEventListener("toggle", load);
+    details.append(summary, content);
+    draw();
     return details;
 }
 

@@ -40,10 +40,13 @@ The people, projects and published algorithms whose work shaped MoonLight. Almos
 | Gomez | 🧑 | The demoscene water effect, 2000. |
 | [Harald Kubota](https://hkubota.wordpress.com/2022/01/31/winter-project-colorlight-5a-75b-protocol/) | 🧑 | An independent write-up of the ColorLight 5A-75B wire format. |
 | [HLS](https://www.rfc-editor.org/rfc/rfc8216) | 📜 | HTTP Live Streaming, RFC 8216: video as a playlist of short segments. |
+| [Howard Hinnant](https://howardhinnant.github.io/date_algorithms.html) | 🧑🧮 | `days_from_civil` and `civil_from_days`, the calendar arithmetic the timer counts days by. |
 | Hugo Elias | 🧑 | The water surface algorithm. |
 | [hzeller](https://github.com/hzeller) | 🧑 | Henner Zeller: the HUB75 lineage on the Pi. |
+| [IANA tz database](https://www.iana.org/time-zones) | 🧰 | The world's time zones and their daylight rules, the source of the timer's zone tables. |
 | [IEC 60268-17](https://en.wikipedia.org/wiki/VU_meter) File:VU_Meter.jpg | 📜 | VU meter ballistics, to the millisecond. |
 | [Improv Wi-Fi](https://github.com/improv-wifi) | 📜 | The open serial provisioning standard the web installer uses. |
+| [IPinfo](https://ipinfo.io) | 🏢 | The place and time zone of an internet address, which the timer looks up once. |
 | [Iñigo Quilez](https://iquilezles.org/) | 🧑 | Distance functions and their operators, smooth minimum, cosine palettes. |
 | [John Hart / Sphere tracing](https://en.wikipedia.org/wiki/Ray_marching) File:Visualization_of_SDF_ray_marching_algorithm.png | 🧑🧮 | Sphere tracing, the basis of raymarching. |
 | [Jos Stam / Stable Fluids](https://en.wikipedia.org/wiki/Jos_Stam) File:Jos_Stam_2005_-_by_Azam_Khan.jpg | 🧑🧮 | Stable Fluids, the solver behind the fluid effect. |
@@ -60,6 +63,7 @@ The people, projects and published algorithms whose work shaped MoonLight. Almos
 | [NDI](https://en.wikipedia.org/wiki/Network_Device_Interface) | 📜 | NewTek and Vizrt's video-over-network protocol. |
 | [NEC](https://www.sbprojects.net/knowledge/ir/nec.php) | 📜 | The infrared protocol consumer remotes speak. |
 | [NetMindz](https://github.com/netmindz) | 🧑 | Will Tatam: WLED audio sync, and the statistics work. |
+| [NOAA](https://gml.noaa.gov/grad/solcalc/) | 🏢🧮 | The General Solar Position equations behind the timer's sunrise and sunset. |
 | [ObjectFLED](https://github.com/KurtMF/ObjectFLED) | 🧰 | Parallel WS2812 output on the Teensy 4 by DMA to a GPIO port. |
 | [OctoWS2811](https://www.pjrc.com/teensy/td_libs_OctoWS2811.html) | 🧰 | Paul Stoffregen's parallel WS2812 library for the Teensy, timer-driven DMA. |
 | [Pac-Man](https://en.wikipedia.org/wiki/Pac-Man) | 🎨 | Namco's 1980 arcade game. |

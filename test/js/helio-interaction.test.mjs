@@ -1283,6 +1283,7 @@ function earlyCardsFixture({ firmware = 'helio1', initialState = null, unloading
             return panel;
         },
         renderHelioSetupMenu() { assert.notEqual(context.state, null); phases.push('setup'); return node('aside'); },
+        renderHelioTimerMenu: () => null,
         helioDrivers: () => context.findModule('Drivers'), helioControl: () => null,
         controlValue: (module, key, fallback) => module?.controls?.find(control => control.name === key)?.value ?? fallback,
         helioControlsOpen: () => false, toggleHelioControls() {}, openNavDrawer() {}, openHelioFloatingPreview() {},

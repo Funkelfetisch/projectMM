@@ -41,6 +41,11 @@ namespace mm::platform {
 
 uint32_t millis() MM_NONBLOCKING { return ::millis(); }
 uint32_t micros() MM_NONBLOCKING { return ::micros(); }
+// No NTP client yet, so the wall clock reads unknown unless a test sets it.
+static uint32_t testUtcNow = 0;
+void setTestUtcNow(uint32_t seconds) { testUtcNow = seconds; }
+uint32_t utcNow() MM_NONBLOCKING { return testUtcNow; }
+void startTimeSync() {}
 uintptr_t currentThreadId() MM_NONBLOCKING { return 1; }   // one thread, and the id is never zero
 uint32_t cycleCount() { return ARM_DWT_CYCCNT; }
 uint8_t currentCore() { return 0; }

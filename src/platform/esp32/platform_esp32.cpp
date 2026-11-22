@@ -75,6 +75,8 @@
 #include <netinet/tcp.h>   // TCP_NODELAY on an accepted connection
 
 #include "esp_timer.h"
+#include "esp_sntp.h"   // the wall clock utcNow reads
+#include <sys/time.h>
 #include "nvs.h"         // bootRecord: the count that survives a power cut
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"   // esp_ptr_external_ram: the ptrIsPsram residency probe
@@ -155,6 +157,26 @@ uint32_t millis() MM_NONBLOCKING {
     uint32_t override_ = testNowMs.load(std::memory_order_relaxed);
     if (override_) return override_;
     return static_cast<uint32_t>(esp_timer_get_time() / 1000);
+}
+
+// The wall clock is lwIP's SNTP client setting the system time; before its first answer the clock counts from 1970 and reads as unknown.
+static std::atomic<uint32_t> testUtcNow{0};
+static bool timeSyncStarted = false;
+void setTestUtcNow(uint32_t seconds) { testUtcNow.store(seconds, std::memory_order_relaxed); }
+uint32_t utcNow() MM_NONBLOCKING {
+    const uint32_t override_ = testUtcNow.load(std::memory_order_relaxed);
+    if (override_) return override_;
+    timeval tv{};
+    gettimeofday(&tv, nullptr);
+    constexpr time_t kBuiltAfter = 1767225600;   // 2026-01-01: any earlier reading is the clock before NTP answered
+    return tv.tv_sec >= kBuiltAfter ? static_cast<uint32_t>(tv.tv_sec) : 0;
+}
+void startTimeSync() {
+    if (timeSyncStarted || !networkReady()) return;
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    timeSyncStarted = true;
 }
 
 // The task handle IS the identity, and reading it costs one load, no TLS, so it works on a task however it was created. That matters: THREADPTR is 0 on a task without TLS set up, which made C++ thread_local fault at 0xfffffff0 here.

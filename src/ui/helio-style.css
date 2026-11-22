@@ -464,6 +464,95 @@
     font-weight: 500;
 }
 
+.helio-timer {
+    display: grid;
+    gap: 10px;
+    padding-top: 8px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+}
+
+.helio-timer-switch {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+}
+
+.helio-timer-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+}
+
+.helio-timer-label {
+    min-width: 110px;
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+}
+
+.helio-timer-choice,
+.helio-timer-days {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.helio-timer-choice > button,
+.helio-timer-days > button {
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg);
+}
+
+.helio-timer-days > button {
+    min-width: 40px;
+    padding: 0 8px;
+}
+
+.helio-timer-choice > button.active,
+.helio-timer-days > button.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.helio-timer-time,
+.helio-timer-number,
+.helio-timer-zone {
+    min-height: 36px;
+}
+
+.helio-timer-zone {
+    min-width: 0;
+    flex: 1 1 220px;
+}
+
+.helio-timer-status {
+    margin: 0;
+    font-weight: 600;
+}
+
+.helio-timer-facts {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+}
+
+.helio-timer-location > summary {
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+    margin-bottom: 8px;
+}
+
+.helio-timer-location {
+    display: grid;
+    gap: 8px;
+}
+
 .helio-setup-panel-embedded {
     display: grid;
     gap: 12px;

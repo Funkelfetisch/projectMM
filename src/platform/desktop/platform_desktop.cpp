@@ -311,6 +311,17 @@ uint32_t millis() MM_NONBLOCKING {
     );
 }
 
+// The system clock already keeps UTC; a test may set it instead.
+static std::atomic<uint32_t> testUtcNow{0};
+void setTestUtcNow(uint32_t seconds) { testUtcNow.store(seconds, std::memory_order_relaxed); }
+uint32_t utcNow() MM_NONBLOCKING {
+    const uint32_t override_ = testUtcNow.load(std::memory_order_relaxed);
+    if (override_) return override_;
+    return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+void startTimeSync() {}
+
 // The OS thread id as an integer, from each platform's own call since std::this_thread::get_id() does not convert. The +1 keeps it non-zero so callers can treat 0 as none.
 uintptr_t currentThreadId() MM_NONBLOCKING {
 #ifdef _WIN32

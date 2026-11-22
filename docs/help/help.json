@@ -5145,6 +5145,60 @@
    "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/StatusLedService.h",
    "tests": "https://moonmodules.org/MoonLight/reference/tests.html#statusledservice"
   },
+  "TimerService": {
+   "line": "Turns the lights on and off by the clock, or at sunset and sunrise.",
+   "attribution": "[IPinfo](https://moonmodules.org/MoonLight/reference/attributions.html#ipinfo)",
+   "guide": [
+    {
+     "title": "What it does",
+     "text": "The lights go on at a time or sunset and off at a time or sunrise, on ticked days; on at 20:00, off at 01:00 is one evening. Switching by hand holds until the next moment.\n\nIts place and time zone come once from its internet address, or by hand under Manual."
+    }
+   ],
+   "image": "https://moonmodules.org/MoonLight/assets/core/TimerService.png",
+   "controls": {
+    "turnOn": {
+     "line": "What turns the lights on."
+    },
+    "onTime": {
+     "line": "The time they go on, in minutes after midnight."
+    },
+    "turnOff": {
+     "line": "What turns them off."
+    },
+    "offTime": {
+     "line": "The time they go off, in minutes after midnight."
+    },
+    "days": {
+     "line": "The days the lights go on, one bit a day from Sunday in bit 0."
+    },
+    "location": {
+     "line": "Where the place and the time zone come from."
+    },
+    "latitude": {
+     "line": "The place's latitude, in hundredths of a degree north."
+    },
+    "longitude": {
+     "line": "The place's longitude, in hundredths of a degree east."
+    },
+    "timezone": {
+     "line": "The time zone as a POSIX `TZ` string, such as `CET-1CEST,M3.5.0,M10.5.0/3`."
+    },
+    "clock": {
+     "line": "The local time and weekday the timer reads."
+    },
+    "sun": {
+     "line": "Today's sunrise and sunset at the place."
+    },
+    "next": {
+     "line": "What the timer does next, or what it waits for."
+    }
+   },
+   "role": "service",
+   "dim": 0,
+   "doc": "core/services.md#timer",
+   "source": "https://github.com/MoonModules/MoonLight/blob/main/src/core/services/TimerService.h",
+   "tests": "https://moonmodules.org/MoonLight/reference/tests.html#timerservice"
+  },
   "GamepadService": {
    "line": "A gamepad's buttons and sticks, each driving a control through the same rows every input service uses.",
    "summary": "The pad plugs into the computer showing the interface, over USB or Bluetooth, and the browser reports it, so it works on every chip. A fresh service maps the sticks and A onto the first faders and switch.",

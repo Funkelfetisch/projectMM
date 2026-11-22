@@ -156,6 +156,7 @@
 #include "helio/ProductBoot.h"   // a product board's unclaimed pins and a garment's radio defaults
 #include "core/services/BleControlService.h"
 #include "core/services/StatusLedService.h"
+#include "core/services/TimerService.h"
 #include "helio/BleSceneCatalog.h"
 #include "helio/BleProductProfiles.h"
 #include "helio/BlePixelMapPage.h"
@@ -315,6 +316,13 @@ void mm_main(volatile bool& keepRunning, uint16_t httpPort) {
             status->markWiredByCode();
             servicesModule->addChild(status);
         }
+
+        // The dashboard's timer card drives this one; it waits switched off until its owner sets it up, and a saved one overlays it.
+        auto* timer = createOrDie<mm::TimerService>("TimerService");
+        timer->setName("Timer");
+        timer->setEnabled(false);
+        timer->markWiredByCode();
+        servicesModule->addChild(timer);
 
         auto* remote = createOrDie<mm::HelioRemoteService>("HelioRemoteService");
         remote->setName("Remote");
