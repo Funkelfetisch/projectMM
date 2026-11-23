@@ -1033,7 +1033,409 @@ export function nebuliteSnowflakesPreviewColor(effect, t, x, count, opts = {}) {
     return [...state.pixels[pixel]];
 }
 
+// Sphere effects (src/light/effects/Sphere*.h, SphereRing.h): the strip read as a closed ring, painted by angle.
+// Integer ports of the firmware's arithmetic; C++ int division truncates, so every quotient goes through t32.
+// A preview owns its state per Effect object; music comes from the preview's audio (bands and level, 0..1),
+// stepped through the firmware's 23 ms analyser blocks for the smoothed level and bands.
+const t32 = v => Math.trunc(v);
+const SPHERE_SIN = [0, 804, 1608, 2410, 3212, 4011, 4808, 5602, 6393, 7179, 7962, 8739, 9512, 10278, 11039, 11793,
+    12539, 13279, 14010, 14732, 15446, 16151, 16846, 17530, 18204, 18868, 19519, 20159, 20787, 21403, 22005, 22594,
+    23170, 23731, 24279, 24811, 25329, 25832, 26319, 26790, 27245, 27683, 28105, 28510, 28898, 29268, 29621, 29956,
+    30273, 30571, 30852, 31113, 31356, 31580, 31785, 31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757, 32767];
+function sphereSin16(angle) {
+    const th = angle & 65535, q = th >> 14, pos = th & 0x3fff, walk = (q & 1) ? 0x4000 - pos : pos;
+    const idx = walk >> 8, frac = walk & 255, a = SPHERE_SIN[idx], b = SPHERE_SIN[idx < 64 ? idx + 1 : 64];
+    const v = a + (((b - a) * frac) >> 8);
+    return q >= 2 ? -v : v;
+}
+const sphereSine = a => sphereSin16(a) + 32768;
+const sphereCosine = a => sphereSin16((a & 65535) + 16384) + 32768;
+const sphereLevel = v => v < 0 ? 0 : (v > 255 ? 255 : v | 0);
+const sphereScale8 = (v, s) => ((v * s) + 1 + ((v * s) >> 8)) >> 8;
+const sphereAngleOf = (i, count) => Math.floor(i * 65536 / count) & 65535;
+const spherePhaseOf = (t, periodMs) => Math.floor((t % periodMs) * 65536 / periodMs) & 65535;
+function sphereFromAxis(a, axis) { const f = ((a - axis) & 65535) % 32768; return f > 16384 ? 32768 - f : f; }
+function sphereColor(pal, index, brightness) {
+    const colors = Array.isArray(pal) && pal.length === 16 ? pal : null;
+    const i = index & 255, bri = sphereLevel(brightness);
+    let c;
+    if (colors) {
+        const a = colors[i >> 4], b = colors[((i >> 4) + 1) & 15], frac = (i & 15) * 17;
+        c = [0, 1, 2].map(k => (sphereScale8(clampByte(a?.[k]), 255 - frac) + sphereScale8(clampByte(b?.[k]), frac)) & 255);
+    } else c = paletteAt(pal, i / 255);
+    return bri === 255 ? c : c.map(v => sphereScale8(v, bri));
+}
+function sphereBrightIndex(pal, start) {
+    for (let step = 0; step < 8; ++step) {
+        const index = (start + step * 32) & 255, c = sphereColor(pal, index, 255);
+        if (c[0] > 110 || c[1] > 110 || c[2] > 110) return index;
+    }
+    return start & 255;
+}
+class SphereEnvelope {
+    constructor() { this.value = 0; }
+    step(target, dt, rise, fall) {
+        const goal = Math.max(0, Math.min(255, target)) << 8;
+        const rate = Math.min(t32((goal > this.value ? rise : fall) * dt / 10), 256);
+        this.value += t32((goal - this.value) * rate / 256);
+    }
+    level() { return this.value >> 8; }
+}
+function sphereRandom(mem) { mem.seed = (Math.imul(mem.seed, 1664525) + 1013904223) >>> 0; return mem.seed >>> 16; }
+// The analyser's frame from the preview's music. The firmware smooths per 23 ms block (a quarter of the way to the
+// level); a preview frame closes the same share of the gap for the time it spans, at most half of it, so a kick
+// still stands above the average when the preview draws only a few frames a second.
+function sphereAudio(mem, now, audio) {
+    const level = Math.round(Math.max(0, Math.min(1, Number(audio?.level) || 0)) * 255);
+    const bands = Array.from({ length: 16 }, (_v, i) => Math.round(audioBand(audio, i) * 255));
+    const a = mem.audio ??= { at: now, levelSmoothed: level, bandsSmoothed: [...bands] };
+    const span = now - a.at;
+    if (span > 0) {
+        const share = Math.min(0.5, 1 - 0.75 ** (span / 23)), fall = Math.min(0.5, 1 - 0.875 ** (span / 23));
+        a.levelSmoothed = t32(a.levelSmoothed + (level - a.levelSmoothed) * share);
+        a.bandsSmoothed = a.bandsSmoothed.map((s, i) => bands[i] > s ? bands[i] : t32(s - (s - bands[i]) * fall));
+        a.at = now;
+    }
+    return { level, levelSmoothed: a.levelSmoothed, bands, bandsSmoothed: a.bandsSmoothed };
+}
+const sphereOnBeat = f => f.levelSmoothed >= 8 && f.level > f.levelSmoothed + 8;
+function sphereBands(f, from, to) { let sum = 0; for (let i = from; i <= to; ++i) sum += f.bandsSmoothed[i]; return t32(sum / (to - from + 1)); }
+function sphereStepDt(mem, t, min) {
+    let dt = t - mem.last;
+    if (dt >= 0 && dt < min) return 0;
+    if (dt < 0 || dt > 60) dt = 60;
+    mem.last = t; return dt;
+}
+// Gradient noise at 8 bits, src/core/util/noise.h (Tier8, three dimensions).
+const SPHERE_GRADIENT = [[1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0], [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
+    [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1], [1, 1, 0], [0, -1, 1], [-1, 1, 0], [0, -1, -1]];
+const SPHERE_FADE = Array.from({ length: 257 }, (_v, i) => Math.floor((6 * i ** 5 - 3840 * i ** 4 + 655360 * i ** 3) / 16777216));
+function sphereCorner(x, y, z) {
+    let h = (Math.imul(x, 0x8da6b343) ^ Math.imul(y, 0xd8163841) ^ Math.imul(z, 0xcb1ab31f)) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0; h = Math.imul(h, 0x7feb352d) >>> 0; return h >>> 28;
+}
+const sphereGrad = (h, x, y, z) => { const g = SPHERE_GRADIENT[h]; return g[0] * x + g[1] * y + g[2] * z; };
+const sphereBlend = (a, b, w) => a + (((b - a) * w) >> 16);
+function sphereLayer(ix, iy, iz, fx, fy, fz, wx, wy) {
+    const v = sphereBlend(sphereGrad(sphereCorner(ix, iy, iz), fx, fy, fz), sphereGrad(sphereCorner(ix + 1, iy, iz), fx - 256, fy, fz), wx);
+    return sphereBlend(v, sphereBlend(sphereGrad(sphereCorner(ix, iy + 1, iz), fx, fy - 256, fz),
+        sphereGrad(sphereCorner(ix + 1, iy + 1, iz), fx - 256, fy - 256, fz), wx), wy);
+}
+function sphereNoise8(x, y, z) {
+    const ix = x >>> 8, iy = y >>> 8, iz = z >>> 8, fx = x & 255, fy = y & 255, fz = z & 255;
+    const wx = SPHERE_FADE[fx], wy = SPHERE_FADE[fy];
+    const raw = sphereBlend(sphereLayer(ix, iy, iz, fx, fy, fz, wx, wy), sphereLayer(ix, iy, iz + 1, fx, fy, fz - 256, wx, wy), SPHERE_FADE[fz]);
+    const v = 128 + (raw >> 1);
+    return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+// Each draws one frame into `out` (count × [r,g,b]); `c(name)` reads a control within its firmware range.
+const SPHERE_FRAMES = {
+    SphereMeridianEffect(mem, t, n, c, pal, out) {
+        mem.place ??= 0; mem.lag ??= 0; mem.last ??= 0;
+        const speed = c('speed', 60, 1, 255), tail = c('tail', 60, 1, 255), size = c('size', 16, 2, 60);
+        const dt = sphereStepDt(mem, t, 8);
+        if (dt) {
+            const sway = t32((sphereSine((t % 16384) * 4) - 32768) / 64);
+            const moved = t32(dt * (sway + 160) * speed / 1536);
+            mem.place = (mem.place + moved) & 65535;
+            mem.lag = Math.max(-14000, Math.min(14000, mem.lag - moved));
+            mem.lag -= t32(mem.lag * dt / (tail * 15 + 100));
+        }
+        const near = sphereBrightIndex(pal, t32(t / 128) & 255), far = sphereBrightIndex(pal, (t32(t / 128) + 128) & 255);
+        const reach = size * 100, lag = mem.lag;
+        for (let i = 0; i < n; ++i) {
+            let s = (sphereAngleOf(i, n) - mem.place) & 65535, h = near;
+            if (s >= 16384 && s < 49152) { s -= 32768; h = far; }
+            if (s >= 49152) s -= 65536;
+            let bri = 0;
+            const distance = Math.abs(s);
+            if (distance < reach) bri = 255 - t32(distance * 255 / reach);
+            if (lag < 0 && s <= 0 && s > lag) bri = Math.max(bri, 255 - t32(s * 255 / lag));
+            if (lag > 0 && s >= 0 && s < lag) bri = Math.max(bri, 255 - t32(s * 255 / lag));
+            out[i] = sphereColor(pal, h, bri);
+        }
+    },
+    SphereTideEffect(mem, t, n, c, pal, out) {
+        const speed = c('speed', 60, 8, 255), reach = c('reach', 1, 0, 3), low = c('low', 60, 0, 255);
+        const moonMs = t32(1560000 / speed), moon = spherePhaseOf(t, moonMs), sun = spherePhaseOf(t, moonMs * 4);
+        let high = t32(sphereCosine(((moon - sun) & 65535) * 2) / 256);
+        high = low + t32((255 - low) * high / 255);
+        const near = sphereBrightIndex(pal, t32(t / 300) & 255), far = sphereBrightIndex(pal, (t32(t / 300) + 128) & 255);
+        for (let i = 0; i < n; ++i) {
+            const off = (sphereAngleOf(i, n) - moon) & 65535;
+            let v = t32(sphereCosine(off * 2) / 256);
+            v = t32(v * v / 255);
+            for (let s = 0; s < reach; ++s) v = t32(v * v / 255);
+            out[i] = sphereColor(pal, off > 16384 && off < 49152 ? far : near, t32(v * high / 255));
+        }
+    },
+    SphereHarmonicsEffect(mem, t, n, c, pal, out) {
+        const speed = c('speed', 100, 1, 255), drift = c('drift', 40, 0, 255), sharp = c('sharp', 1, 0, 3);
+        const beatMs = 5200 - speed * 16, k = t32(t / beatMs) % 8, waves = k > 4 ? 10 - k : 2 + k;
+        const swell = sphereSine(t32((t % (beatMs * 2)) * 32768 / beatMs)) - 32768;
+        const spin = drift ? spherePhaseOf(t, Math.min(t32(2600000 / drift), 260000)) : 0;
+        const hue = ((t32(t / beatMs) % 256) * 29) & 255;
+        const near = sphereBrightIndex(pal, hue), far = sphereBrightIndex(pal, (hue + 128) & 255);
+        for (let i = 0; i < n; ++i) {
+            const along = ((sphereAngleOf(i, n) + spin) & 65535) * waves;
+            let v = t32((sphereSine(along) - 32768) / 256) * t32(swell / 256), h = near;
+            if (v < 0) { v = -v; h = far; }
+            let bri = Math.min(t32(v / 64), 255);
+            for (let s = 0; s < sharp; ++s) bri = t32(bri * bri / 255);
+            out[i] = sphereColor(pal, h, bri);
+        }
+    },
+    SphereKaleidoBloomEffect(mem, t, n, c, pal, out) {
+        const speed = c('speed', 100, 1, 255), veins = c('veins', 3, 0, 8), drift = c('drift', 30, 0, 255);
+        const bloomMs = 9000 - speed * 22, k = t32(t / bloomMs) % 252, count = [3, 4, 6, 5, 8, 6, 4][k % 7];
+        let open = t32((65535 - sphereCosine(t32((t % bloomMs) * 65536 / bloomMs))) / 2);
+        open = Math.min(open * 3, 65535);
+        const spin = drift ? spherePhaseOf(t, Math.min(t32(4000000 / drift), 260000)) : 0;
+        const crawl = (t % 8192) * 8, near = sphereBrightIndex(pal, (k * 37) & 255);
+        for (let i = 0; i < n; ++i) {
+            let p = ((((sphereAngleOf(i, n) + spin) & 65535) * count) & 65535) * 2;
+            if (p > 65534) p = 131070 - p;
+            let bri = 0;
+            if (p > 65535 - open) {
+                bri = t32(t32((p - 65535 + open) / 64) * 255 / (t32(open / 64) + 1));
+                bri = Math.min(bri * 2, 255);
+                const vein = t32(sphereSine(t32(p * veins / 2) - crawl) / 624);
+                if (veins > 0) bri = t32(bri * (150 + vein) / 255);
+            }
+            out[i] = sphereColor(pal, (near + t32(p / 2800)) & 255, bri);
+        }
+    },
+    SphereDayAndNightEffect(mem, t, n, c, _pal, out) {
+        const day = c('day', 30, 4, 240), lights = c('lights', 120, 0, 255), dusk = c('dusk', 40, 10, 120);
+        const sun = spherePhaseOf(t, day * 1000), edge = dusk * 200;
+        for (let i = 0; i < n; ++i) {
+            const a = sphereAngleOf(i, n), high = sphereCosine((a - sun) & 65535) - 32768;
+            let rr = 0, gg = 0, bb = 0;
+            if (high > edge) {
+                const k = t32((high - edge) * 255 / (32768 - edge));
+                rr = 255; gg = 150 + t32(k * 80 / 255); bb = 50 + t32(k * 130 / 255);
+            } else if (high > -edge) {
+                const k = t32((high + edge) * 255 / (2 * edge));
+                if (k < 128) { rr = 6 + t32(k * 249 / 128); gg = 4 + t32(k * 36 / 128); bb = 36 - t32(k * 26 / 128); }
+                else { rr = 255; gg = 40 + t32((k - 128) * 110 / 127); bb = 10 + t32((k - 128) * 40 / 127); }
+            } else {
+                const deep = Math.min(t32((-edge - high) / 64), 255);
+                rr = 0; gg = 2; bb = 14 + t32(deep / 12);
+                const x = a * 4, town = sphereNoise8(x, 0, 0) + lights - 255;
+                if (town > 0 && deep > 20) {
+                    let glow = t32(Math.min(town * 3, 255) * (130 + t32(sphereNoise8(x, t32(t / 3), 9000) / 2)) / 255);
+                    glow = t32(glow * Math.min(deep * 4, 255) / 255);
+                    rr += glow; gg += t32(glow * 170 / 255); bb += t32(glow * 60 / 255);
+                }
+            }
+            out[i] = [sphereLevel(rr), sphereLevel(gg), sphereLevel(bb)];
+        }
+    },
+    SphereOrbitExchangeEffect(mem, t, n, c, pal, out) {
+        const speed = c('speed', 120, 1, 255), tail = c('tail', 110, 5, 200), flash = c('flash', 200, 0, 255);
+        const passMs = 5200 - speed * 18, k = t32(t / passMs) % 256, since = t32((t % passMs) * 32768 / passMs);
+        const meet = (spherePhaseOf(t, 240000) + (k % 2 === 1 ? 32768 : 0)) & 65535;
+        const hueOf = pass => (pass * 23 + (pass % 2 ? 128 : 0)) & 255, len = tail * 100;
+        const near = sphereBrightIndex(pal, hueOf(k)), nearBefore = sphereBrightIndex(pal, hueOf(k + 255));
+        const far = sphereBrightIndex(pal, (hueOf(k) + 128) & 255), farBefore = sphereBrightIndex(pal, (hueOf(k + 255) + 128) & 255);
+        const tailOf = (behind, now, before) => {
+            const v = behind < len ? 255 - t32(behind * 255 / len) : 0;
+            return sphereColor(pal, behind <= since ? now : before, t32(v * v / 255));
+        };
+        for (let i = 0; i < n; ++i) {
+            const a = sphereAngleOf(i, n);
+            const one = tailOf((meet + since - a) & 65535, near, nearBefore), two = tailOf((a - meet + since) & 65535, far, farBefore);
+            let rr = one[0] + two[0], gg = one[1] + two[1], bb = one[2] + two[2];
+            if (since < 9000) {
+                let d = ((a - meet) & 65535) % 32768;
+                if (d > 16384) d = 32768 - d;
+                if (d < 900 + since) {
+                    let v = t32(t32((255 - t32(d * 255 / (900 + since))) * (9000 - since) / 9000) * flash / 255);
+                    if (((a - meet + 16384) & 65535) >= 32768) v = t32(v / 3);
+                    rr += v; gg += v; bb += v;
+                }
+            }
+            out[i] = [sphereLevel(rr), sphereLevel(gg), sphereLevel(bb)];
+        }
+    },
+    SphereAntipodeDropEffect(mem, t, n, c, pal, out, f) {
+        const speed = c('speed', 110, 1, 255), rate = c('rate', 150, 0, 255), wake = c('wake', 70, 5, 120);
+        const onBeat = controlValue(mem.effect, 'onBeat', true) !== false;
+        mem.drops ??= Array.from({ length: 12 }, () => ({ origin: 0, born: 0, tint: 0 }));
+        mem.nextAt ??= 0; mem.lastAt ??= 0; mem.seed ??= 0x2545F491;
+        const life = 5400 - speed * 16;
+        for (const d of mem.drops) if (d.born && t - (d.born - 1) >= life) d.born = 0;
+        if (t >= mem.nextAt || t < mem.lastAt || (onBeat && sphereOnBeat(f) && t - mem.lastAt > 220)) {
+            const d = mem.drops.find(slot => !slot.born);
+            if (d) {
+                d.tint = sphereBrightIndex(pal, (sphereRandom(mem) >> 8) & 255);
+                d.origin = sphereRandom(mem) & 0xff00;
+                d.born = t + 1; mem.lastAt = t;
+                mem.nextAt = t + Math.min(500 + (255 - rate) * 14, t32(life * 3 / 5));
+            }
+        }
+        const wakeLength = wake * 100;
+        for (let i = 0; i < n; ++i) {
+            const a = sphereAngleOf(i, n);
+            let rr = 0, gg = 0, bb = 0;
+            for (const drop of mem.drops) {
+                if (!drop.born) continue;
+                const age = t - (drop.born - 1), run = Math.floor(age * 65536 / life);
+                const left = 255 - t32(age * 255 / life), fade = t32(left * left / 255);
+                for (const ahead of [(a - drop.origin) & 65535, (drop.origin - a) & 65535]) {
+                    const behind = run - ahead;
+                    if (behind < 0 || behind >= wakeLength) continue;
+                    const w = sphereColor(pal, drop.tint, t32((255 - t32(behind * 255 / wakeLength)) * fade / 255));
+                    rr += w[0]; gg += w[1]; bb += w[2];
+                }
+                let d = (a - drop.origin) & 65535;
+                if (d > 32768) d = 65536 - d;
+                const landing = 255 - t32(run * 255 / 9000);
+                if (landing > 0 && d < 1200) { const v = t32(t32(landing * (1200 - d) / 1200) * fade / 255); rr += v; gg += v; bb += v; }
+                const meeting = 255 - t32(Math.abs(run - 32768) * 255 / 7000);
+                if (meeting > 0 && d > 32768 - 1500) { const v = t32(t32(meeting * (d - 31268) / 1500) * fade / 255); rr += v; gg += v; bb += v; }
+            }
+            out[i] = [sphereLevel(rr), sphereLevel(gg), sphereLevel(bb)];
+        }
+    },
+    SphereBassBreathEffect(mem, t, n, c, pal, out, f) {
+        const gain = c('gain', 170, 10, 255), floor = c('floor', 5, 0, 100), release = c('release', 40, 1, 255), turn = c('turn', 20, 0, 255);
+        mem.breath ??= new SphereEnvelope(); mem.peak ??= 14 << 8; mem.last ??= 0;
+        const dt = sphereStepDt(mem, t, 10);
+        if (dt) {
+            const bass = sphereBands(f, 0, 9);
+            mem.peak = Math.max(bass << 8, mem.peak - t32(mem.peak * dt / 4000), (floor + 9) << 8);
+            const heard = t32(Math.max(0, bass - floor) * 255 / ((mem.peak >> 8) - floor));
+            mem.breath.step(t32(heard * gain / 100), dt, 90, t32(Math.max(1, 256 - release) / 16) + 1);
+        }
+        const lvl = mem.breath.level(), open = t32(lvl * 16384 / 255), glow = Math.min(lvl * 3, 255);
+        const axis = turn ? spherePhaseOf(t, Math.min(t32(4000000 / turn), 260000)) : 0;
+        const hue = sphereBrightIndex(pal, t32(t / 500) & 255);
+        for (let i = 0; i < n; ++i) {
+            const d = sphereFromAxis(sphereAngleOf(i, n), axis);
+            let v = 0;
+            if (d < open) v = 255 - t32(d * 160 / (open + 1));
+            else if (d < open + 2400) v = 95 - t32((d - open) * 95 / 2400);
+            out[i] = sphereColor(pal, (hue + t32(d / 512)) & 255, t32(v * glow / 255));
+        }
+    },
+    SphereBeatEchoEffect(mem, t, n, c, pal, out, f) {
+        const speed = c('speed', 110, 1, 255), width = c('width', 60, 10, 160), glow = c('glow', 30, 0, 120);
+        mem.echoes ??= Array.from({ length: 10 }, () => ({ born: 0, tint: 0, strength: 0 }));
+        mem.glow ??= new SphereEnvelope(); mem.last ??= 0; mem.lastEcho ??= 0; mem.count ??= 0; mem.wasBeat ??= false;
+        const travel = 3200 - speed * 10;
+        for (const e of mem.echoes) if (e.born && t - (e.born - 1) >= travel) e.born = 0;
+        const dt = sphereStepDt(mem, t, 10);
+        if (dt) {
+            mem.glow.step(sphereBands(f, 0, 15) * 2, dt, 40, 8);
+            const heard = sphereOnBeat(f);
+            if (heard && !mem.wasBeat && t - mem.lastEcho > 180) {
+                const e = mem.echoes.find(slot => !slot.born);
+                if (e) {
+                    e.born = t + 1; e.tint = sphereBrightIndex(pal, (mem.count * 41) & 255);
+                    e.strength = Math.max(140, Math.min(255, 140 + sphereBands(f, 0, 3)));
+                    mem.count = (mem.count + 1) & 255; mem.lastEcho = t;
+                }
+            }
+            mem.wasBeat = heard;
+        }
+        const half = width * 40, base = t32(mem.glow.level() * glow / 255), baseHue = sphereBrightIndex(pal, t32(t / 700) & 255);
+        for (let i = 0; i < n; ++i) {
+            const d = sphereFromAxis(sphereAngleOf(i, n), 0), under = sphereColor(pal, (baseHue + t32(d / 256)) & 255, base);
+            let rr = under[0], gg = under[1], bb = under[2];
+            for (const e of mem.echoes) {
+                if (!e.born) continue;
+                const age = t - (e.born - 1), at = Math.floor(age * 16384 / travel), off = Math.abs(d - at);
+                if (off >= half) continue;
+                const left = 255 - t32(age * 255 / travel), swell = Math.min(t32(age * 255 / 90), 255), shape = 255 - t32(off * 255 / half);
+                const col = sphereColor(pal, e.tint, t32(t32(t32(t32(shape * shape / 255) * left / 255) * swell / 255) * e.strength / 255));
+                rr += col[0]; gg += col[1]; bb += col[2];
+            }
+            out[i] = [sphereLevel(rr), sphereLevel(gg), sphereLevel(bb)];
+        }
+    },
+    SphereMirrorSparksEffect(mem, t, n, c, pal, out, f) {
+        const density = c('density', 120, 0, 255), decay = c('decay', 60, 1, 255), glow = c('glow', 40, 0, 160);
+        mem.sparks ??= Array.from({ length: 24 }, () => ({ at: 0, born: 0, tint: 0 }));
+        mem.bass ??= new SphereEnvelope(); mem.owed ??= 0; mem.last ??= 0; mem.seed ??= 0x6C8E9CF5;
+        const life = 300 + decay * 12;
+        for (const s of mem.sparks) if (s.born && t - (s.born - 1) >= life) s.born = 0;
+        const dt = sphereStepDt(mem, t, 10);
+        if (dt) {
+            mem.bass.step(sphereBands(f, 0, 3) * 2, dt, 60, 10);
+            mem.owed += t32(sphereBands(f, 9, 15) * density * dt / 10);
+            while (mem.owed >= 65536) {
+                mem.owed -= 65536;
+                const s = mem.sparks.find(slot => !slot.born);
+                if (!s) { mem.owed = 0; break; }
+                s.at = sphereRandom(mem) % 16385; s.tint = sphereBrightIndex(pal, (sphereRandom(mem) >> 8) & 255); s.born = t + 1;
+            }
+        }
+        const base = t32(mem.bass.level() * glow / 160), baseHue = sphereBrightIndex(pal, t32(t / 900) & 255);
+        for (let i = 0; i < n; ++i) {
+            const d = sphereFromAxis(sphereAngleOf(i, n), 0), under = sphereColor(pal, baseHue, t32(base * Math.max(0, 8000 - d) / 8000));
+            let rr = under[0], gg = under[1], bb = under[2];
+            for (const s of mem.sparks) {
+                if (!s.born) continue;
+                const off = Math.abs(d - s.at);
+                if (off >= 500) continue;
+                const age = t - (s.born - 1), swell = Math.min(t32(age * 255 / 60), 255), left = 255 - t32(age * 255 / life);
+                const col = sphereColor(pal, s.tint, t32(t32(t32(t32((500 - off) * 255 / 500) * swell / 255) * left / 255) * left / 255));
+                rr += col[0]; gg += col[1]; bb += col[2];
+            }
+            out[i] = [sphereLevel(rr), sphereLevel(gg), sphereLevel(bb)];
+        }
+    },
+    SphereSpectrumHaloEffect(mem, t, n, c, pal, out, f) {
+        const gain = c('gain', 97, 10, 255), fall = c('fall', 34, 1, 255), idle = c('idle', 0, 0, 80), kick = c('kick', 32, 0, 255);
+        mem.levels ??= new Array(16).fill(0); mem.axis ??= 0; mem.last ??= 0; mem.hit ??= 0; mem.wasBeat ??= false;
+        const dt = sphereStepDt(mem, t, 10);
+        if (dt) {
+            const heard = sphereOnBeat(f);
+            if (heard && !mem.wasBeat) { mem.hit = 255; mem.axis = (mem.axis + kick * 24) & 65535; }
+            mem.wasBeat = heard;
+            mem.hit = Math.max(mem.hit - dt * 2, 0);
+            mem.axis = (mem.axis + dt * 3) & 65535;
+            for (let i = 0; i < 16; ++i) mem.levels[i] = Math.max(Math.min(t32(f.bands[i] * gain / 100), 255), mem.levels[i] - t32(dt * fall / 32)) & 255;
+        }
+        const near = sphereBrightIndex(pal, t32(t / 400) & 255);
+        for (let i = 0; i < n; ++i) {
+            const d = sphereFromAxis(sphereAngleOf(i, n), mem.axis), band = t32(d * 15 / 16385), part = t32(d * 15 / 64) - band * 256;
+            let v = t32((mem.levels[band] * (256 - part) + mem.levels[Math.min(band + 1, 15)] * part) / 256);
+            v = Math.max(t32(v * v / 255), idle);
+            const col = sphereColor(pal, (near + t32(d / 256)) & 255, v), white = d < 2600 ? t32(mem.hit * (2600 - d) / 2600) : 0;
+            out[i] = [sphereLevel(col[0] + white), sphereLevel(col[1] + white), sphereLevel(col[2] + white)];
+        }
+    },
+};
+const sphereStates = new WeakMap();
+export function spherePreviewColor(effect, pal, t, x, count, audio = HELIO_PREVIEW_AUDIO) {
+    const draw = SPHERE_FRAMES[effect?.type];
+    if (!draw) return [0, 0, 0];
+    const lights = Math.min(4096, Math.max(1, Math.round(Number(count) || HELIO_DEFAULT_LED_COUNT)));
+    const now = Math.floor(Math.max(0, Number(t) || 0) * 1000 + 1e-7) >>> 0;
+    let state = sphereStates.get(effect);
+    // A preview that starts again (time running back, another light count) starts the effect again, as a fresh one would.
+    if (!state || now < state.now || state.lights !== lights) {
+        state = { now: -1, lights, mem: { effect }, frame: Array.from({ length: lights }, () => [0, 0, 0]) };
+        sphereStates.set(effect, state);
+    }
+    if (state.now !== now) {
+        const c = (name, fallback, min, max) => {
+            const v = Number(controlValue(effect, name, fallback));
+            return Math.min(max, Math.max(min, Number.isFinite(v) ? Math.trunc(v) : fallback));
+        };
+        draw(state.mem, now, lights, c, pal, state.frame, sphereAudio(state.mem, now, audio));
+        state.now = now;
+    }
+    const pixel = Math.min(lights - 1, Math.floor(Math.max(0, Math.min(0.999999, Number(x) || 0)) * lights));
+    return [...state.frame[pixel]];
+}
+
 export function helioScenePreviewColor(effect, pal, t, x, y, audio = HELIO_PREVIEW_AUDIO, opts = {}) {
+    if (typeof effect?.type === "string" && effect.type.startsWith("Sphere"))
+        return spherePreviewColor(effect, pal, t, x, opts.ledCount, audio);
     if (effect?.type === "NebuliteNoisefireEffect")
         return nebuliteNoisefirePreviewColor(effect, t, x, opts.ledCount, audio, opts);
     if (effect?.type === "NebulitePlasmoidEffect")
