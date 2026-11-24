@@ -938,6 +938,9 @@ const char* lastPanicSummary() { return ""; }
 static BootRecord testBootRecord_;
 void setTestBootRecord(const BootRecord& r) { testBootRecord_ = r; }
 const BootRecord& bootRecord() { return testBootRecord_; }
+static uint16_t testRecordedBootDraw_ = 0;
+void recordBootDraw(uint16_t milliamps) { testRecordedBootDraw_ = milliamps; }
+uint16_t testRecordedBootDraw() { return testRecordedBootDraw_; }
 
 void setLogLevel(LogLevel) {
     // The terminal takes every line here and the measurement gate reads the level directly, so there is nothing to apply to a platform logger.

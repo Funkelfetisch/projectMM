@@ -7,6 +7,7 @@
 #include "core/module/Scheduler.h"
 #include "core/system/FilesystemModule.h"   // setDeviceModel() arms the debounced save (noteDirty)
 #include "core/util/build_info.h"        // kFirmwareName: the variant persisted for MoonBase
+#include "core/util/SafeModeDiagnosis.h"   // why safe mode, and the limit that keeps the supply up
 #include "platform/platform.h"
 
 #include <cstdio>
@@ -23,7 +24,9 @@ namespace mm {
 ///
 /// ## Safe mode
 ///
-/// Two failed boots in a row start the next boot with the LEDs off, no MoonLive script and at most 1,024 lights. A failed boot is a crash, a brownout, or a power loss within a minute of starting. Every boot raises the lights over five seconds.
+/// Two failed boots in a row start the next boot with the LEDs off, no scripts and at most 1,024 lights. A failed boot is a crash, a brownout, or a power loss within a minute of starting.
+///
+/// After a power loss the status suggests a `maxCurrent`. Connect a stronger supply or set that limit, then restart.
 ///
 /// @technical
 ///
@@ -79,8 +82,16 @@ public:
         applyLogLevel();
 
         if (safeMode()) {
-            mm::formatTo(statusBuf_, sizeof(statusBuf_), "Safe mode after %u failed boots in a row (%s): lights dark and scripts off; restart to run normally",
-                         static_cast<unsigned>(failedBoots()), platform::resetReason());
+            diagnosis_ = diagnoseSafeMode(platform::resetReason(), platform::bootRecord().failedDrawMa);
+            const unsigned boots = failedBoots();
+            if (diagnosis_.suggestedMaxCurrent)
+                mm::formatTo(statusBuf_, sizeof(statusBuf_), "Safe mode: the power gave out %u times in a row at about %u mA of LEDs. Connect a stronger supply, or limit the current to %u mA, then restart",
+                             boots, static_cast<unsigned>(diagnosis_.drawMa), static_cast<unsigned>(diagnosis_.suggestedMaxCurrent));
+            else if (diagnosis_.power)
+                mm::formatTo(statusBuf_, sizeof(statusBuf_), "Safe mode: the power gave out %u times in a row before the LEDs drew much. Connect a stronger supply or check the cable, then restart", boots);
+            else
+                mm::formatTo(statusBuf_, sizeof(statusBuf_), "Safe mode after %u failed boots in a row (%s): lights dark and scripts off; restart to run normally",
+                             boots, platform::resetReason());
             setStatus(statusBuf_, Severity::Warning);
         }
 
@@ -94,6 +105,7 @@ public:
     void onControlChanged(const char* controlName) override {
         if (std::strcmp(controlName, "logLevel") == 0) applyLogLevel();
         // No flush first, since a save would write back what the reset deletes.
+        if (std::strcmp(controlName, "restart") == 0) platform::reboot();
         if (std::strcmp(controlName, "factory reset") == 0) {
             if (factoryReset()) platform::reboot();
             else setStatus("factory reset failed: some settings could not be deleted", Severity::Warning);
@@ -179,6 +191,19 @@ public:
         /// Retained exception and code addresses, correlated with the image fingerprint.
         controls_.addReadOnly("lastPanic", const_cast<char*>(platform::lastPanicSummary()));
         controls_.setDeveloper(controls_.count() - 1);
+        // Only in safe mode, whose one way out is a restart: what a client needs to explain it and offer the limit.
+        if (safeMode()) {
+            diagnosis_ = diagnoseSafeMode(platform::resetReason(), platform::bootRecord().failedDrawMa);
+            /// Why the device is in safe mode: `power` when the supply gave out, `crash` otherwise.
+            controls_.addReadOnly("safeModeCause", const_cast<char*>(diagnosis_.power ? "power" : "crash"));
+            controls_.setHidden(controls_.count() - 1, true);   // the status says it in words
+            /// A `maxCurrent` under the draw the supply gave out at, or 0 when none helps.
+            controls_.addControl("suggestedMaxCurrent", diagnosis_.suggestedMaxCurrent, 0, 20000);
+            controls_.setReadOnly(controls_.count() - 1, true);
+            controls_.setHidden(controls_.count() - 1, true);
+            /// Restart and run normally.
+            controls_.addButton("restart");
+        }
         // The UI honors this client-side, so nothing in the firmware reads it. A LEVEL rather than a switch, because a control names the audience it is for and one number decides which audience is reading.
         controls_.addSelect("mode", mode_, kModeOptions, 3);
         /// Delete every setting and preset and restart as freshly installed.
@@ -268,7 +293,8 @@ public:
 
 private:
     Scheduler* scheduler_ = nullptr;
-    char statusBuf_[128] = {};   ///< the safe-mode line, 120 with a 9-character reset reason
+    char statusBuf_[192] = {};   ///< the safe-mode line, 179 with a five-digit draw and limit
+    SafeModeDiagnosis diagnosis_{};   ///< why this boot is in safe mode, read once at boot
 
     /// The name behind mDNS, the access point and DHCP.
     /// @guide Anything but letters, digits and hyphens is coerced to a valid hostname, and a rename reaches the network within a tick.

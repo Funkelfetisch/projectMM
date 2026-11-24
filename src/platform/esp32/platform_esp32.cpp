@@ -467,6 +467,7 @@ constexpr const char* kBootNamespace = "mm";
 constexpr const char* kPowerOnsKey = "powerOns";
 constexpr const char* kRestartsKey = "restarts";
 constexpr const char* kYoungKey = "young";                // set at every boot and cleared once it has stayed up
+constexpr const char* kDrawKey = "drawMa";                // the LED draw a boot after a failed one has reached
 constexpr uint64_t kQuickPowerOnUs = 5 * 1000 * 1000;     // on this long, and the switch-ons start again from one
 constexpr uint64_t kStableUs = uint64_t{kBootStableMs} * 1000;
 
@@ -519,6 +520,9 @@ const BootRecord& bootRecord() {
     const uint8_t powerOns = loadCount(kPowerOnsKey);
     const uint8_t restarts = loadCount(kRestartsKey);
     const uint8_t young = loadCount(kYoungKey);
+    uint16_t draw = 0;
+    nvs_handle_t h;
+    if (nvs_open(kBootNamespace, NVS_READONLY, &h) == ESP_OK) { nvs_get_u16(h, kDrawKey, &draw); nvs_close(h); }
     const esp_reset_reason_t reason = esp_reset_reason();
     const bool powerOn = reason == ESP_RST_POWERON;
     // A collapsing supply cuts the chip off, so its restart reads as a power-on: one that ends a boot younger than a minute failed, as a crash does.
@@ -528,10 +532,20 @@ const BootRecord& bootRecord() {
         record.quickPowerOns = powerOn ? bump(powerOns) : powerOns;
         record.abnormalRestarts = failed ? bump(restarts) : restarts;
     }
+    record.failedDrawMa = failed ? draw : 0;
+    if (draw) recordBootDraw(0);   // each boot records its own
     persist(kPowerOnsKey, record.quickPowerOns, powerOns, kQuickPowerOnUs);
     persist(kRestartsKey, record.abnormalRestarts, restarts, kStableUs);
     persist(kYoungKey, 1, young, kStableUs);
     return record;
+}
+
+void recordBootDraw(uint16_t milliamps) {
+    nvs_handle_t h;
+    if (nvs_open(kBootNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u16(h, kDrawKey, milliamps);
+    nvs_commit(h);
+    nvs_close(h);
 }
 
 const char* resetReason() {

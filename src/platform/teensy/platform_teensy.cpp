@@ -453,6 +453,8 @@ const BootRecord& bootRecord() {
     return record;
 }
 
+void recordBootDraw(uint16_t) {}   // a power loss clears SNVS, so a supply that gives out leaves no record
+
 void setLogLevel(LogLevel) {}   // stdout goes straight to USB serial
 
 void applyStagedFirmware();   // platform_teensy_ota.cpp: a checked upload replaces the program here

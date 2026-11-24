@@ -225,12 +225,34 @@ TEST_CASE("the factory reset button asks for a second press, and safe mode says 
     mm::writeControlMetadata(sink, *reset);
     CHECK(std::string(buf) == ",\"confirm\":true");
 
+    CHECK(find(normal, "restart") == nullptr);   // outside safe mode the top bar restarts
+    CHECK(find(normal, "safeModeCause") == nullptr);
+
     mm::platform::setTestBootRecord({0, 2});
     mm::SystemModule safe;
     safe.defineControls();
     safe.setup();
     REQUIRE(safe.status() != nullptr);
     CHECK(std::string(safe.status()).find("Safe mode after 2 failed boots") != std::string::npos);
+    CHECK(find(safe, "restart") != nullptr);
+    CHECK(std::string(safe.readText("safeModeCause", "")) == "crash");   // the host's reset reason is no power loss
+}
+
+// A supply that gives out reads as a brownout, or as a power-on when it cuts the chip off entirely, and the draw the failed boot reached places the limit.
+TEST_CASE("safe mode after a power loss suggests 80 % of the draw the supply gave out at, and none when the LEDs drew little or the firmware crashed") {
+    const auto power = mm::diagnoseSafeMode("POWERON", 1450);
+    CHECK(power.power);
+    CHECK(power.drawMa == 1450);
+    CHECK(power.suggestedMaxCurrent == 1150);   // 1160 down to a 50 mA step
+    CHECK(mm::diagnoseSafeMode("BROWNOUT", 3000).suggestedMaxCurrent == 2400);
+    const auto dim = mm::diagnoseSafeMode("POWERON", 120);
+    CHECK(dim.power);
+    CHECK(dim.suggestedMaxCurrent == 0);   // the LEDs are not what overloads the supply
+    CHECK(mm::diagnoseSafeMode("POWERON", 0).suggestedMaxCurrent == 0);
+    const auto crash = mm::diagnoseSafeMode("PANIC", 1450);
+    CHECK_FALSE(crash.power);
+    CHECK(crash.suggestedMaxCurrent == 0);
+    CHECK_FALSE(mm::diagnoseSafeMode(nullptr, 1450).power);
 }
 
 // A board tooling never named reports an empty deviceModel, and a state document read from it must apply back.

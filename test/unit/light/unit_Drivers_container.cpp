@@ -977,7 +977,7 @@ TEST_CASE("the lights dim just enough to stay under the current limit, and switc
     CHECK(drivers.effectiveBrightness() == 255);   // no limit set
     drivers.tick1s();
     CHECK(std::strcmp(drivers.readText("current", "?"), "") == 0);
-    drivers.maxCurrent = 300;   // ten lights of three colours at 20 mA draw 600, and 10 in the dark
+    drivers.maxCurrent = 300;   // ten lights of three colors at 20 mA draw 600, and 10 in the dark
     drivers.tick20ms();
     const uint8_t limited = drivers.effectiveBrightness();
     CHECK(limited < 255);
@@ -1069,4 +1069,57 @@ TEST_CASE("a look that replaces its layer with one of the same size rewires the 
     CHECK(output.prepares == prepared);   // the peripheral is kept, which a full rebuild would re-initialize
     // A layer of another size still rebuilds them: the detach test above widens the channels and sees the drivers re-parse the geometry.
 
+}
+
+// A supply that gives out cuts the chip off before it can log anything, so the boot after a failed one keeps its rising draw, and the next boot reads where the power went.
+TEST_CASE("a boot after a failed one records its LED draw as it rises, and a healthy boot records nothing") {
+    struct Record { ~Record() { mm::platform::setTestBootRecord({}); mm::platform::recordBootDraw(0); mm::platform::setTestNowMs(0); } } guard;
+    mm::platform::setTestNowMs(1000);
+    mm::Layouts layouts;
+    mm::GridLayout grid;
+    grid.width = 10; grid.height = 1;
+    layouts.addChild(&grid);
+    mm::Layer layer;
+    layer.setLayouts(&layouts);
+    layouts.applyState();
+    layer.applyState();
+    REQUIRE(layer.buffer().data());
+    std::memset(layer.buffer().data(), 255, layer.buffer().bytes());   // ten lights on full white: 600 mA lit and 10 dark
+    mm::Drivers drivers;
+    mm::PreviewDriver preview;
+    drivers.addChild(&preview);
+    drivers.setLayer(&layer);
+    drivers.brightness = 255;
+    drivers.defineControls();
+    drivers.setup();
+
+    mm::platform::recordBootDraw(0);
+    drivers.tick20ms();
+    drivers.tick1s();
+    CHECK(mm::platform::testRecordedBootDraw() == 0);   // a healthy boot writes nothing
+
+    mm::platform::setTestBootRecord({0, 1});
+    drivers.tick20ms();
+    drivers.tick1s();
+    CHECK(mm::platform::testRecordedBootDraw() == 610);
+    CHECK(drivers.effectiveBrightness() == 255);   // recording does not limit
+
+    mm::platform::recordBootDraw(0);
+    drivers.tick1s();
+    CHECK(mm::platform::testRecordedBootDraw() == 0);   // a steady draw is written once, not every second
+
+    mm::platform::setTestBootRecord({0, 2});
+    drivers.tick1s();
+    CHECK(mm::platform::testRecordedBootDraw() == 0);   // safe mode is dark, and keeps the failed boot's record
+
+    mm::platform::setTestBootRecord({0, 1});
+    mm::platform::setTestNowMs(mm::platform::kBootStableMs);
+    std::memset(layer.buffer().data(), 0, layer.buffer().bytes());
+    drivers.tick20ms();
+    std::memset(layer.buffer().data(), 255, layer.buffer().bytes());
+    drivers.tick20ms();
+    drivers.tick1s();
+    CHECK(mm::platform::testRecordedBootDraw() == 0);   // a boot that counts as good stops recording
+    drivers.removeChild(&preview);
+    layouts.removeChild(&grid);
 }

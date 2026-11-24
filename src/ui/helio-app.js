@@ -7639,6 +7639,42 @@ function applyBranding() {
     }
 }
 
+/// What the safe-mode warning says, or null outside safe mode: SystemModule adds `safeModeCause` only then.
+function safeModeNotice(sys) {
+    const controls = sys?.controls || [];
+    const cause = controls.find(c => c.name === "safeModeCause")?.value;
+    if (!cause) return null;
+    const limit = Number(controls.find(c => c.name === "suggestedMaxCurrent")?.value) || 0;
+    const power = cause === "power";
+    return {
+        title: power ? "The power supply gave out" : "The device kept crashing",
+        text: typeof sys.status === "string" ? sys.status : "",
+        limit: power ? limit : 0,
+    };
+}
+
+/// Desktop hides reboot, since platform::reboot() exits the process; HELIO shows it only in safe mode, whose one way out is a restart.
+function rebootHidden(helio, chip, safeMode) {
+    return chip === "desktop" || (helio && !safeMode);
+}
+
+/// The safe-mode warning under the top bar: why the lights are dark, and the restart, with the suggested current limit when the supply gave out.
+function renderSafeModeBanner(notice) {
+    const banner = document.getElementById("safe-mode-banner");
+    if (!banner) return;
+    banner.hidden = !notice;
+    if (!notice) return;
+    banner.querySelector(".safe-mode-title").textContent = notice.title;
+    banner.querySelector(".safe-mode-text").textContent = notice.text;
+    const limitBtn = banner.querySelector(".safe-mode-limit");
+    limitBtn.hidden = !notice.limit;
+    limitBtn.textContent = `Limit to ${notice.limit} mA and restart`;
+    limitBtn.onclick = async () => {
+        if (await sendControl("Drivers", "maxCurrent", notice.limit)) rebootDevice();
+    };
+    banner.querySelector(".safe-mode-restart").onclick = rebootDevice;
+}
+
 function updateStatusBar() {
     if (!state || !state.modules) return;
     applyBranding();
@@ -7691,20 +7727,20 @@ function updateStatusBar() {
         statsEl.textContent = parts.join(" · ");
     }
 
-    // Hide reboot button on desktop builds — platform::reboot() just exits the process,
-    // which is not useful from the UI and can be mistaken for a crash.
     const chipCtrl = ctrls.find(c => c.name === "chip");
     const rebootBtn = document.getElementById("reboot-btn");
-    if (rebootBtn && chipCtrl) {
-        rebootBtn.hidden = helio || chipCtrl.value === "desktop";
-    }
+    const notice = safeModeNotice(sys);
+    const safeMode = !!notice;
+    if (rebootBtn && chipCtrl) rebootBtn.hidden = rebootHidden(helio, chipCtrl.value, safeMode);
+    renderSafeModeBanner(notice);
 
     // bootReason → crashed-state styling on reboot button
     const reasonCtrl = ctrls.find(c => c.name === "bootReason");
     if (rebootBtn && reasonCtrl) {
-        const crashed = ["PANIC", "INT_WDT", "TASK_WDT", "BROWNOUT"].includes(reasonCtrl.value);
+        const crashed = safeMode || ["PANIC", "INT_WDT", "TASK_WDT", "BROWNOUT"].includes(reasonCtrl.value);
         rebootBtn.dataset.crashed = crashed ? "true" : "false";
-        if (crashed) rebootBtn.title = "Last boot: " + reasonCtrl.value + " (click to reboot)";
+        if (safeMode) rebootBtn.title = sys.status;
+        else if (crashed) rebootBtn.title = "Last boot: " + reasonCtrl.value + " (click to reboot)";
         else rebootBtn.title = "Reboot device";
     }
 

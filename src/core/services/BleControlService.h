@@ -15,6 +15,7 @@
 #include "core/util/fnv.h"
 #include "core/util/LightOutput.h"
 #include "core/util/ScratchBuffer.h"
+#include "core/util/SafeModeDiagnosis.h"
 #include "core/services/Bh1750Service.h"
 #include "core/services/BatteryService.h"
 #include "core/system/FilesystemModule.h"
@@ -406,6 +407,7 @@ private:
         if (!fields(doc, op)) { result(id, "fields"); return; }
         if (std::strcmp(op, "get") == 0 || std::strcmp(op, "clock") == 0) { get(id); return; }
         if (std::strcmp(op, "battery") == 0) { battery(id); return; }
+        if (std::strcmp(op, "restart") == 0) { leaveSafeMode(id, now); return; }
         if (std::strcmp(op, "profile") == 0) { profile(id); return; }
         if (std::strcmp(op, "ambient") == 0) { ambient(id); return; }
         if (std::strcmp(op, "info") == 0 || std::strcmp(op, "effect") == 0) { info(id, std::strcmp(op, "effect") == 0); return; }
@@ -576,7 +578,7 @@ private:
         }
         return true;
     }
-    /// Under Drivers a peer reaches only `on`, `brightness` and a named driver's `fixture`, its channel order.
+    /// Under Drivers a peer reaches only `on`, `brightness`, `maxCurrent` and a named driver's `fixture`, its channel order.
     static bool driverControls(const json::JsonDoc& doc, const json::JsonNode* drivers) {
         if (drivers->type != json::JsonType::Object || drivers->firstChild < 0) return false;
         for (int c = drivers->firstChild; c >= 0; c = doc.nodes[c].next) {
@@ -584,6 +586,10 @@ private:
             if (!node.key || node.key[0] == '$') return false;
             if (std::strcmp(node.key, "on") == 0) { if (node.type != json::JsonType::Bool) return false; continue; }
             if (std::strcmp(node.key, "brightness") == 0) { if (node.type != json::JsonType::Int) return false; continue; }
+            if (std::strcmp(node.key, "maxCurrent") == 0) {
+                if (node.type != json::JsonType::Int || node.decimal || node.intValue < 0 || node.intValue > 20000) return false;
+                continue;
+            }
             const int first = node.firstChild;
             if (node.type != json::JsonType::Object || first < 0 || doc.nodes[first].next >= 0 || !doc.nodes[first].key ||
                 std::strcmp(doc.nodes[first].key, "fixture") || doc.nodes[first].type != json::JsonType::String) return false;
@@ -703,7 +709,14 @@ private:
         }
         int32_t wifi = 0;
         if (scheduler_ && scheduler_->getControlWide("Network", "wifiEnabled", wifi)) { if (comma) sink.append(","); sink.append(wifi ? "\"wifiEnabled\":true" : "\"wifiEnabled\":false"); }
-        sink.append("},\"queued\":"); sink.append(scheduled() ? "true" : "false");
+        sink.append("}");
+        // Present only in safe mode, so a phone can explain it and offer the limit and the restart.
+        if (MoonModule::safeMode()) {
+            const auto d = diagnoseSafeMode(platform::resetReason(), platform::bootRecord().failedDrawMa);
+            sink.appendf(",\"safeMode\":{\"cause\":\"%s\",\"failedBoots\":%u,\"drawMa\":%u,\"suggestedMaxCurrent\":%u}", d.power ? "power" : "crash",
+                         static_cast<unsigned>(MoonModule::failedBoots()), static_cast<unsigned>(d.drawMa), static_cast<unsigned>(d.suggestedMaxCurrent));
+        }
+        sink.append(",\"queued\":"); sink.append(scheduled() ? "true" : "false");
         sink.append(",\"group\":"); sink.writeJsonString(group);
         sink.append(",\"pending\":"); writeJob(sink, job_);
         sink.append(",\"terminal\":"); writeJob(sink, terminal_); end(sink, id);
@@ -825,6 +838,13 @@ private:
             sink.append(",\"rebooting\":true");
         }
         end(sink, id);
+    }
+    /// Leave safe mode: the reply goes out first, then pending settings are written and the device restarts, as after an update.
+    void leaveSafeMode(uint16_t id, uint32_t now) {
+        if (!MoonModule::safeMode()) { result(id, "not-in-safe-mode"); return; }
+        restartAt_ = now + kRestartDelayMs; restartScheduled_ = true;
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.append(",\"rebooting\":true"); end(sink, id);
     }
     void updateStatus(uint16_t id) {
         uint32_t received = 0, total = 0;

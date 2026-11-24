@@ -111,8 +111,8 @@
      "more": "A long or thin cable, a slip ring or a power bank drops the voltage under load until the controller resets. The limit dims the whole frame just enough to stay under it, from what every LED is sent."
     },
     "channelCurrent": {
-     "line": "What one LED colour draws fully lit, in mA.",
-     "more": "20 is the WS2812B's figure. For your own LEDs: measure a strip on full white, divide by its lights, then by its colours."
+     "line": "What one LED color draws fully lit, in mA.",
+     "more": "20 is the WS2812B's figure. For your own LEDs: measure a strip on full white, divide by its lights, then by its colors."
     },
     "current": {
      "line": "the `current` readout"
@@ -4648,7 +4648,7 @@
    "guide": [
     {
      "title": "Safe mode",
-     "text": "Two failed boots in a row start the next boot with the LEDs off, no MoonLive script and at most 1,024 lights. A failed boot is a crash, a brownout, or a power loss within a minute of starting. Every boot raises the lights over five seconds."
+     "text": "Two failed boots in a row start the next boot with the LEDs off, no scripts and at most 1,024 lights. A failed boot is a crash, a brownout, or a power loss within a minute of starting.\n\nAfter a power loss the status suggests a `maxCurrent`. Connect a stronger supply or set that limit, then restart."
     }
    ],
    "image": "https://moonmodules.org/MoonLight/assets/core/SystemModule.png",
@@ -4720,6 +4720,15 @@
     },
     "lastPanic": {
      "line": "Retained exception and code addresses, correlated with the image fingerprint."
+    },
+    "safeModeCause": {
+     "line": "the supply gave out, rather than the firmware crashing"
+    },
+    "suggestedMaxCurrent": {
+     "line": "a `maxCurrent` under that draw, 0 when no LED limit helps"
+    },
+    "restart": {
+     "line": "Restart and run normally."
     },
     "mode": {
      "line": "How much of the UI is shown, cumulative.",

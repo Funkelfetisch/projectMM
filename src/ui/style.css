@@ -140,6 +140,19 @@ a { color: var(--accent); }
     border-color: var(--red);
     color: var(--red);
 }
+/* Safe mode: a full-width warning under the top bar, red as the crashed reboot button. */
+.safe-mode-banner {
+    margin: 8px 12px;
+    padding: 12px 16px;
+    border: 2px solid var(--red);
+    border-radius: 8px;
+    color: var(--fg);
+}
+.safe-mode-banner .safe-mode-title { color: var(--red); font-size: 1.1em; }
+.safe-mode-banner .safe-mode-text { margin: 6px 0 10px; }
+.safe-mode-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.safe-mode-actions button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--red); background: transparent; color: var(--fg); cursor: pointer; }
+.safe-mode-actions .safe-mode-limit { background: var(--red); color: #fff; }
 /* Armed reboot: first click of the press-twice-to-reboot confirm. */
 #reboot-btn.armed {
     background: var(--red);

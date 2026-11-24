@@ -155,8 +155,8 @@ public:
     /// The most current the lights may draw from their supply, in mA; 0 does not limit.
     /// @guide A long or thin cable, a slip ring or a power bank drops the voltage under load until the controller resets. The limit dims the whole frame just enough to stay under it, from what every LED is sent.
     uint16_t maxCurrent = 0;
-    /// What one LED colour draws fully lit, in mA.
-    /// @guide 20 is the WS2812B's figure. For your own LEDs: measure a strip on full white, divide by its lights, then by its colours.
+    /// What one LED color draws fully lit, in mA.
+    /// @guide 20 is the WS2812B's figure. For your own LEDs: measure a strip on full white, divide by its lights, then by its colors.
     uint8_t channelCurrent = 20;
     /// What a dark LED still draws, in mA: the FastLED figure for a WS2812B, which the limit keeps out of the lights' budget.
     static constexpr uint32_t kDarkMilliamps = 1;
@@ -259,6 +259,7 @@ public:
     const Buffer* source_ = nullptr;            ///< the frame the drivers read, which the rise waits to see lit
     uint8_t     currentCap_ = 255;              ///< the highest level `maxCurrent` allows for the frame on show
     uint32_t    currentMa_ = 0;                 ///< the estimated draw of the frame on show
+    uint16_t    recordedDrawMa_ = 0;            ///< the draw this boot last recorded for a supply that may give out
     char        currentText_[24] = "";          ///< the `current` readout
     uint32_t    softStartAt_ = 0;               ///< when they started rising
 
@@ -470,6 +471,11 @@ public:
                                               static_cast<unsigned>(renderWaitPeakUs_));
         else                    mm::formatTo(renderWaitStr_, sizeof(renderWaitStr_), "—");
         renderWaitPeakUs_ = 0;   // start a fresh window
+        // A boot after a failed one keeps its rising draw in 10 % steps, so a supply that gives out leaves where it did.
+        if (recordsBootDraw() && currentMa_ > recordedDrawMa_ + recordedDrawMa_ / 10u + 10u) {
+            recordedDrawMa_ = static_cast<uint16_t>(currentMa_ < 65535 ? currentMa_ : 65535);
+            platform::recordBootDraw(recordedDrawMa_);
+        }
         if (!maxCurrent) currentText_[0] = '\0';
         else mm::formatTo(currentText_, sizeof(currentText_), currentCap_ < 255 ? "%u mA, limited" : "%u mA",
                           static_cast<unsigned>(currentMa_));
@@ -517,7 +523,7 @@ public:
 
     /// Estimate the draw of the frame on show through the first LED driver's table, and cap the level at what `maxCurrent` allows: down at once, up in steps past a small margin, so a steady frame does not rebake every tick.
     void limitCurrent() MM_NONBLOCKING {
-        if (!maxCurrent) { currentCap_ = 255; return; }
+        if (!maxCurrent && !recordsBootDraw()) { currentCap_ = 255; return; }
         DriverBase* reference = nullptr;
         for (uint8_t i = 0; i < childCount() && !reference; i++) {
             if (child(i)->role() != ModuleRole::Driver || !child(i)->enabled()) continue;
@@ -534,10 +540,15 @@ public:
             for (uint8_t c = 0; c < colors; c++) sum += table[d[at + c]];
         const uint32_t dark = lights * kDarkMilliamps, lit = sum * channelCurrent / 255;
         currentMa_ = dark + lit;
+        if (!maxCurrent) { currentCap_ = 255; return; }
         const uint32_t budget = maxCurrent > dark ? maxCurrent - dark : 0;
         const uint8_t local = reference->localBrightness();
         const uint8_t cap = currentCap(lit, budget, reference->effectiveBrightness(), local ? local : 1, reference->correction());
         if (cap < currentCap_ || cap >= currentCap_ + kCurrentCapStep || cap == 255) currentCap_ = cap;
+    }
+    /// Whether this boot records its draw: one that follows a failed boot, lit, and not yet counted good.
+    static bool recordsBootDraw() MM_NONBLOCKING {
+        return MoonModule::failedBoots() > 0 && !MoonModule::safeMode() && platform::millis() < platform::kBootStableMs;
     }
     /// How far the cap must be able to rise before it does.
     static constexpr uint8_t kCurrentCapStep = 4;

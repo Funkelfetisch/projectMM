@@ -303,12 +303,17 @@ struct BootRecord {
     uint8_t quickPowerOns = 0;      ///< switch-ons in a row, each within a few seconds of the last
     uint8_t abnormalRestarts = 0;   ///< failed boots in a row: panics, watchdogs, brownouts, and power losses of a boot younger than a minute
     bool booted = false;            ///< this run is a device boot, which a host process never is
+    uint16_t failedDrawMa = 0;      ///< the estimated LED draw, in mA, the previous boot had reached when it failed; 0 when unknown
 };
 /// How the last boots went, counted once on the first call. The count lives in flash and clears once the device stays up, or on a restart, an update or a deep sleep.
 const BootRecord& bootRecord();
+/// Keep the LED draw this boot has reached, so the boot after a failed one reads where the supply gave out.
+void recordBootDraw(uint16_t milliamps);
 #ifndef ESP_PLATFORM   // a host-test seam, which no ESP32 code calls
 /// What bootRecord answers on the host, which has no boot to count.
 void setTestBootRecord(const BootRecord& r);
+/// The draw recordBootDraw last kept on the host.
+uint16_t testRecordedBootDraw();
 #endif
 
 /// Serial log verbosity, low to high, ordered as syslog and ESP-IDF order it.

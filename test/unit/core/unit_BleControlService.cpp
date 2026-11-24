@@ -76,11 +76,13 @@ struct BleKnobs : mm::MoonModule {
     bool on = true;
     uint8_t brightness = 255;
     uint8_t palette = 0;
+    uint16_t maxCurrent = 0;
     bool rebuild = false;
     void defineControls() override {
         controls_.addControl("on", on);
         controls_.addControl("brightness", brightness, 0, 255);
         controls_.addControl("palette", palette, 0, 255);
+        controls_.addControl("maxCurrent", maxCurrent, 0, 20000);
     }
     bool affectsPrepare(const char*) const override { return rebuild; }
 };
@@ -183,6 +185,41 @@ TEST_CASE("BLE lighting patches use scheduler validation and read back actual dr
     tree.send(R"({"$v":1,"$id":2,"$op":"patch","Drivers":{"brightness":999}})", 100);
     CHECK(tree.drivers->brightness == 32);
     CHECK(tree.reply().find("\"ok\":false") != std::string::npos);
+}
+
+TEST_CASE("BLE sets the current limit within its range, like brightness") {
+    BleTree tree;
+    tree.send(R"({"$v":1,"$id":1,"$op":"patch","Drivers":{"maxCurrent":1150}})", 100);
+    CHECK(tree.reply().find("\"ok\":true") != std::string::npos);
+    CHECK(tree.drivers->maxCurrent == 1150);
+    tree.send(R"({"$v":1,"$id":2,"$op":"patch","Drivers":{"maxCurrent":20001}})", 100);
+    CHECK(tree.reply().find("\"error\":\"scope\"") != std::string::npos);
+    CHECK(tree.drivers->maxCurrent == 1150);
+}
+
+int safeModeRestarts = 0;
+void countSafeModeRestart() { ++safeModeRestarts; }
+
+// A phone explains safe mode from get, and its restart is the way out without unplugging.
+TEST_CASE("BLE reports safe mode with its cause and suggested limit, and restarts only from it") {
+    struct Record { ~Record() { mm::platform::setTestBootRecord({}); } } guard;
+    safeModeRestarts = 0;
+    BleTree tree;
+    tree.service.setRestartForTest(&countSafeModeRestart);
+    tree.send(R"({"$v":1,"$id":1,"$op":"get"})", 1000);
+    CHECK(tree.reply().find("\"safeMode\"") == std::string::npos);
+    tree.send(R"({"$v":1,"$id":2,"$op":"restart"})", 1000);
+    CHECK(tree.reply().find("\"error\":\"not-in-safe-mode\"") != std::string::npos);
+
+    mm::platform::setTestBootRecord({0, 3, false, 1450});
+    tree.send(R"({"$v":1,"$id":3,"$op":"get"})", 1000);
+    CHECK(tree.reply().find(R"("safeMode":{"cause":"crash","failedBoots":3,"drawMa":1450,"suggestedMaxCurrent":0})") != std::string::npos);
+    tree.send(R"({"$v":1,"$id":4,"$op":"restart"})", 1000);
+    CHECK(tree.reply().find("\"rebooting\":true") != std::string::npos);
+    tree.service.applyDue(2499);
+    CHECK(safeModeRestarts == 0);   // the reply reaches the phone first
+    tree.service.applyDue(2500);
+    CHECK(safeModeRestarts == 1);
 }
 
 TEST_CASE("BLE battery reads on mains firmware return no invented pack") {

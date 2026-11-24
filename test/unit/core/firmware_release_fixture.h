@@ -24,7 +24,7 @@ const std::array<uint8_t, 65> kOtaKey = [] {
     return key;
 }();
 
-// The substitute primitive accepts exactly the signature a disposable scheme derives from the key and the signed digest.
+/// The substitute primitive accepts exactly the signature a disposable scheme derives from the key and the signed digest.
 std::array<uint8_t, 64> otaSignatureOf(const uint8_t* signedDigest) {
     std::array<uint8_t, 64> signature{};
     mm::Sha256 first, second;
@@ -52,10 +52,11 @@ std::vector<uint8_t> otaImage(size_t size, uint8_t seed = 1) {
     return image;
 }
 
-// What the publisher hands the phone: the 60 signed claims and the signature over their SHA-256, both as hex.
+/// What the publisher hands the phone: the 60 signed claims and the signature over their SHA-256, both as hex.
 struct OtaRelease {
-    std::vector<uint8_t> image;
-    std::string claims, signature;
+    std::vector<uint8_t> image;   ///< the firmware bytes
+    std::string claims;            ///< the 60 signed claims, hex
+    std::string signature;         ///< the signature over the claims' SHA-256, hex
 };
 OtaRelease otaRelease(std::vector<uint8_t> image, uint32_t target = kOtaEsp32Target, uint32_t version = kOtaSecurityVersion) {
     std::array<uint8_t, 60> claims{};
