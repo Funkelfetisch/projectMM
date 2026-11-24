@@ -4,6 +4,7 @@
 #include "doctest.h"
 #include "firmware_release_fixture.h"
 #include "core/services/BleControlService.h"
+#include "core/services/AudioService.h"
 #include "core/util/BleUpdateStream.h"
 #include "helio/BleAdvertisementRegistry.h"
 #include "helio/BlePixelMapPage.h"
@@ -578,6 +579,31 @@ TEST_CASE("BLE sets the ambient sensor's switch and curve but never its bus, pin
         tree.send(request, 100);
         CHECK(tree.reply().find("scope") != std::string::npos);
     }
+}
+
+// A phone sets the floor against the level it reads, since the floor is the silence threshold in both level modes.
+TEST_CASE("BLE audio answers the sound-to-light input with its mode, levels, floor, gain and live level, and null without one") {
+    const auto npos = std::string::npos;
+    BleTree tree;
+    tree.send(R"({"$v":1,"$id":30,"$op":"audio"})", 100);
+    CHECK(tree.reply().find(R"("audio":null)") != npos);
+
+    auto* services = new mm::MoonModule(); services->setName("Services");
+    auto* audio = new mm::AudioService(); audio->setName("Audio"); audio->setTypeName("AudioService");
+    audio->mode = mm::AudioService::kLocalMode; audio->levels = mm::AudioService::kLevelsManual; audio->floor = 75; audio->gain = 1;
+    audio->defineControls();
+    services->addChild(audio); tree.scheduler.addModule(services);
+    tree.send(R"({"$v":1,"$id":31,"$op":"audio"})", 100);
+    CHECK(tree.reply().find(R"("audio":{"service":"Audio","local":true,"automatic":false,"floor":75,"gain":1,"level":0})") != npos);
+
+    tree.send(R"({"$v":1,"$id":32,"$op":"patch","Services":{"Audio":{"floor":90,"levels":1}}})", 100);
+    tree.finishPrepare(100);
+    tree.send(R"({"$v":1,"$id":33,"$op":"audio"})", 100);
+    CHECK(tree.reply().find(R"("automatic":true,"floor":90,)") != npos);
+
+    audio->setEnabled(false);
+    tree.send(R"({"$v":1,"$id":34,"$op":"audio"})", 100);
+    CHECK(tree.reply().find(R"("audio":null)") != npos);
 }
 
 TEST_CASE("BLE ambient answers the sensor Drivers follows, with its switch, reading, target and curve, and null for one a patch cannot name") {

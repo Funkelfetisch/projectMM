@@ -16,6 +16,7 @@
 #include "core/util/LightOutput.h"
 #include "core/util/ScratchBuffer.h"
 #include "core/util/SafeModeDiagnosis.h"
+#include "core/services/AudioService.h"
 #include "core/services/Bh1750Service.h"
 #include "core/services/BatteryService.h"
 #include "core/system/FilesystemModule.h"
@@ -24,6 +25,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -410,6 +412,7 @@ private:
         if (std::strcmp(op, "restart") == 0) { leaveSafeMode(id, now); return; }
         if (std::strcmp(op, "profile") == 0) { profile(id); return; }
         if (std::strcmp(op, "ambient") == 0) { ambient(id); return; }
+        if (std::strcmp(op, "audio") == 0) { audio(id); return; }
         if (std::strcmp(op, "info") == 0 || std::strcmp(op, "effect") == 0) { info(id, std::strcmp(op, "effect") == 0); return; }
         if (std::strcmp(op, "preview-frame") == 0) {
             if (!previewFrameReader_ || !scheduler_) { result(id, "frame-unavailable"); return; }
@@ -949,6 +952,24 @@ private:
         sink.appendf(",\"darkLux\":%u,\"darkBrightness\":%u,\"brightLux\":%u,\"brightBrightness\":%u,\"hysteresisLux\":%u}",
                      static_cast<unsigned>(sensor->darkLux), static_cast<unsigned>(sensor->darkBrightness), static_cast<unsigned>(sensor->brightLux),
                      static_cast<unsigned>(sensor->brightBrightness), static_cast<unsigned>(sensor->hysteresisLux));
+        end(sink, id);
+    }
+    /// The sound-to-light input a phone tunes: its service name, whether it listens locally, the automatic levels switch, floor, gain and the last second's peak level.
+    void audio(uint16_t id) {
+        JsonSink sink(response_, sizeof(response_)); begin(sink, id, nullptr);
+        sink.append(",\"audio\":");
+        MoonModule* services = scheduler_ ? scheduler_->firstByName("Services") : nullptr;
+        const AudioService* service = nullptr;
+        for (uint8_t i = 0; services && !service && i < services->childCount(); ++i) {
+            MoonModule* child = services->child(i);
+            if (child->enabled() && std::strcmp(child->typeName(), "AudioService") == 0) service = static_cast<const AudioService*>(child);
+        }
+        if (!service) { sink.append("null"); end(sink, id); return; }
+        sink.append("{\"service\":"); sink.writeJsonString(service->name());
+        sink.append(service->mode == AudioService::kLocalMode ? ",\"local\":true" : ",\"local\":false");
+        sink.append(service->levels == AudioService::kLevelsAutomatic ? ",\"automatic\":true" : ",\"automatic\":false");
+        sink.appendf(",\"floor\":%u,\"gain\":%u,\"level\":%u}", static_cast<unsigned>(service->floor), static_cast<unsigned>(service->gain),
+                     static_cast<unsigned>(std::strtoul(service->readText("level RMS", "0"), nullptr, 10)));
         end(sink, id);
     }
     bool serviceControls(const json::JsonDoc& doc, const json::JsonNode* node) const {

@@ -133,6 +133,8 @@ The read-only `productProfile` control of the BLE service exposes the same descr
 
 `ambient` reads the light sensor the master brightness follows: its `service` name, the `automatic` switch, the measured `lux`, the brightness `target` it sets, and the response curve `darkLux`, `darkBrightness`, `brightLux`, `brightBrightness` and `hysteresisLux`. `lux` is null without a valid reading, and `target` is null while the sensor has no reading or `automatic` is off, when the master brightness applies. A `patch` of `{"Services":{"<service>":{"automatic":false}}}` switches it, and the same patch sets the curve fields. The reply is `ambient:null` without an enabled sensor, or when the sensor sits below a group of Services, where no patch can name it. A firmware without the operation answers `error:"operation"`.
 
+`audio` reads the sound-to-light input: its `service` name, whether it listens `local`ly to its microphone, the `automatic` levels switch, `floor`, `gain` and `level`, the last second's peak 0–255. The floor is the silence threshold in both level modes, so a phone sets it against `level`: raise it until silence reads 0. A `patch` of `{"Services":{"<service>":{"floor":90}}}` sets it, and `levels` 1 or 0 switches automatic. The reply is `audio:null` without an enabled audio service. A firmware without the operation answers `error:"operation"`.
+
 ```json
 {"$v":1,"$id":8,"$op":"ambient","$e":"00112233445566778899aabbccddeeff","$s":1}
 ```
