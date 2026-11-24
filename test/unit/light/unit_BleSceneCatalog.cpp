@@ -448,6 +448,15 @@ TEST_CASE("BLE scenes: the real RPC2 dispatcher applies full scenes and reads ac
     CHECK(std::strstr(service.response(), "\"id\":\"ripple\"") != nullptr);
     CHECK(std::strstr(service.response(), "\"background brightness\":255") != nullptr);
     CHECK(tree.drivers->brightness == 137);
+    send("scene", std::string(",\"$live\":true,\"$scene\":\"sphere-meridian\",\"$catalog\":\"") + mm::BleSceneCatalog::revision() + "\",\"controls\":{\"speed\":77,\"palette\":5}");
+    tree.scheduler.preparePending(); service.applyDue(100);
+    send("scene-state");
+    CHECK(std::strstr(service.response(), "\"id\":\"sphere-meridian\"") != nullptr);
+    CHECK(std::strstr(service.response(), "\"speed\":77") != nullptr);
+    CHECK(std::strstr(service.response(), "\"palette\":5") != nullptr);
+    mm::BleAdvertisementSnapshot scan;
+    mm::BleSceneCatalog::advertisement(scan, tree.scheduler);
+    CHECK(scan.animation == 25); CHECK(scan.speed == 77); CHECK(scan.palette == 5);
     send("get");
     CHECK(std::strstr(service.response(), "\"pending\":null") != nullptr);
     CHECK(std::strstr(service.response(), "\"state\":\"applied\"") != nullptr);

@@ -16,6 +16,7 @@ CPP = r'''
 #include "core/util/BleAdvertisement.h"
 #include "helio/BleAdvertisementRegistry.h"
 #include <cstdio>
+#include <iterator>
 int main() {
     const int codes[] = {0,1,2,mm::ble_advertisement::productCodeForModel("NEBULITE Croptop S3"),
                          mm::ble_advertisement::productCodeForModel("NEBULITE Jacket S3"),
@@ -27,7 +28,7 @@ int main() {
         v.ledCount = static_cast<uint32_t>((n*79)%65536);
         v.powerKnown = n&1; v.powerOn = n&2;
         v.rgbwKnown = n&4; v.rgbw = n&8;
-        v.animation = static_cast<uint8_t>(n%25);
+        v.animation = static_cast<uint8_t>(n%(std::size(mm::ble_advertisement::scenes)+1));
         v.speedKnown = n&16; v.speed = speeds[n%6];
         v.rgbKnown = n&32; v.red = (n*29)%256; v.green = (n*71)%256; v.blue = (n*131)%256;
         v.whiteKnown = n&64; v.white = (n*17)%256;
@@ -51,7 +52,7 @@ for (let n=0;n<rows.length;n++) {
  if(!d) fail(n,'decoder',null,'valid');
  const code=codes[n%6], rgbwKnown=Boolean(n&4), rgbw=Boolean(n&8), rgbKnown=Boolean(n&32);
  const expected={productCode:code,ledCount:(n*79)%65536||null,diameterCm:code===1||code===2?n%70+1:null,
-  on:n&1?Boolean(n&2):null,rgbw:rgbwKnown?rgbw:null,animationCode:n%25,
+  on:n&1?Boolean(n&2):null,rgbw:rgbwKnown?rgbw:null,animationCode:n%(Object.keys(MOONLIGHT_AD_SCENES).length+1),
   rawSpeed:n&16?speeds[n%6]:null,white:rgbwKnown&&rgbw&&(n&64)?(n*17)%256:null,
   paletteCode:n%61===60?255:n%60};
  for (const [key,value] of Object.entries(expected)) if(d[key]!==value) fail(n,key,d[key],value);
@@ -60,7 +61,7 @@ for (let n=0;n<rows.length;n++) {
  if(JSON.stringify(d.colour)!==JSON.stringify(expectedRgb)) fail(n,'colour',d.colour,expectedRgb);
  const expectedKey={0:null,1:'HELIO1',2:'MINI80',3:'helio-necklace',20:'croptop',22:'jacket-vest'}[code];
  if((d.product?.key??null)!==expectedKey) fail(n,'product',d.product?.key??null,expectedKey);
- if(d.scene!==(MOONLIGHT_AD_SCENES[n%25]??null)) fail(n,'scene',d.scene,n%25);
+ if(d.scene!==(MOONLIGHT_AD_SCENES[expected.animationCode]??null)) fail(n,'scene',d.scene,expected.animationCode);
  if(d.palette!==(MOONLIGHT_AD_PALETTES[expected.paletteCode]??null)) fail(n,'palette',d.palette,expected.paletteCode);
 }
 const registry={scene:MOONLIGHT_AD_SCENES,palette:MOONLIGHT_AD_PALETTES};

@@ -3,6 +3,7 @@
 #include "core/util/BleAdvertisement.h"
 #include "platform/esp32/BleAdvertisementRefresh.h"
 #include "helio/BleAdvertisementRegistry.h"
+#include "helio/BleSceneData.h"
 
 TEST_CASE("BLE discovery recovers after a failed start without dropping active peers") {
     using mm::platform::bleAdvertisementAction;
@@ -82,6 +83,14 @@ TEST_CASE("BLE advertising: named registries are explicit unique stable wire ide
     for (const auto& a : mm::ble_advertisement::palettes)
         for (const auto& b : mm::ble_advertisement::palettes)
             if (&a != &b) { CHECK(a.code != b.code); CHECK(std::strcmp(a.name,b.name) != 0); }
+}
+TEST_CASE("BLE advertising: every catalogue scene has a wire code, so a scan names it before connecting") {
+    CHECK(mm::ble_advertisement::sceneCode("sphere-meridian") == 25);
+    CHECK(mm::ble_advertisement::sceneCode("sphere-bass-breath") == 46);
+    for (const auto& entry : mm::product_scenes::kEntries) {
+        CAPTURE(entry.id);
+        CHECK(mm::ble_advertisement::sceneCode(entry.id) != 0);
+    }
 }
 
 TEST_CASE("BLE advertising: native white requires known RGBW and non-spheres cannot claim diameter") {
